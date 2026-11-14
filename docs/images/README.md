@@ -6,6 +6,7 @@ Portland routes are synthetic; demo never reads device GPS.
 - `demo-dark.png`: all trip GPS paths, dark appearance.
 - `demo-light.png`: light appearance with traveled-road overlay.
 - `demo-history.png`: individual trips, categories, and lifetime totals.
+- `demo-terrain.png`: vector map and synthetic routes over cached 3D terrain.
 
 Map attribution stays visible in map captures. Map data: © OpenStreetMap
 contributors, distributed by Protomaps; see root NOTICE. Artwork and UI follow

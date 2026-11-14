@@ -15,3 +15,10 @@ mod labels;
 mod overlay_tiles;
 mod style;
 pub mod view;
+
+mod terrain;
+mod terrain_gestures;
+mod terrain_gpu;
+mod terrain_surface;
+mod terrain_tiles;
+mod terrain_view;

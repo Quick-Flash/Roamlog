@@ -13,6 +13,7 @@ distance; shared road history shows where you have been across all trips.
 <img src="docs/images/demo-dark.png" width="240" alt="Combined demo routes in dark mode">
 <img src="docs/images/demo-light.png" width="240" alt="Demo road coverage in light mode">
 <img src="docs/images/demo-history.png" width="240" alt="Demo trip history and distance totals">
+<img src="docs/images/demo-terrain.png" width="240" alt="Vector map and synthetic GPS routes over cached 3D terrain">
 </p>
 
 Screenshots show synthetic Portland, Oregon demo trips, captured on Android.
@@ -22,6 +23,7 @@ Screenshots show synthetic Portland, Oregon demo trips, captured on Android.
 - Toggle GPS paths and traveled roads independently. Line widths and dashes
   distinguish overlays without relying only on color.
 - Download offline vector maps; optionally use online satellite imagery.
+- Switch to optional 3D terrain with vector map, road coverage, and GPS paths.
 - Draw areas to measure road coverage and find nearby untraveled roads.
 - Switch light/dark appearance independently of system theme.
 - Back up/restore local journal and export GPX. No account or trip upload service.

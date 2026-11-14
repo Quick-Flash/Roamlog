@@ -26,6 +26,13 @@ images and draws visible tiles. Coarse cached tiles remain beneath requested
 sharp tiles. Worker queues discard stale zoom work. Area overlays use same
 worker/tile approach to keep geometry work off UI thread.
 
+3D mode reuses Enlumi’s adaptive quadtree with split/merge hysteresis,
+parent-tile handover, shared terrain mesh/skirt indices, and retained GPU
+textures/materials. Vector styling, labels, and path overlays rasterize on
+workers; orbiting updates uniforms without rerasterizing those tiles. Surface
+producer runs on worker, bounds in-flight work to one submission, and rebuilds
+after device replacement. Tile requests skip work no longer wanted by view.
+
 Frame rate depends on display mode, thermal state, map view, and cache state.
 Display refresh rate is not measured rendering throughput. Compare identical
 views and gestures with warmed caches; report frame times and missed frames,

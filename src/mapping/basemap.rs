@@ -513,6 +513,43 @@ pub(crate) fn tiles_at(camera: Camera, size: [f64; 2], z: u8) -> Vec<TileId> {
     tiles
 }
 
+/// Same vector styling as 2D, supplied to terrain worker before overlays/labels.
+pub(super) fn terrain_tile(
+    archive: Option<&Archive>,
+    id: TileId,
+    dark: bool,
+    kind: Kind,
+    online: bool,
+) -> Result<tiny_skia::Pixmap, String> {
+    let draw = |archive: &Archive| {
+        let depth = id.z.saturating_sub(archive.max_zoom);
+        let frame = Frame {
+            px: 512.,
+            depth,
+            sub: (
+                id.canonical_x() & ((1 << depth) - 1),
+                id.y & ((1 << depth) - 1),
+            ),
+        };
+        archive
+            .tile(id.z - depth, id.canonical_x() >> depth, id.y >> depth)?
+            .map(|bytes| render(&bytes, id.z, &frame, dark, kind, labels::system_font()))
+            .transpose()
+    };
+    let mut png = archive.map(draw).transpose()?.flatten();
+    if png.is_none() && online {
+        png = draw(&*download::remote()?)?;
+    }
+    if let Some(png) = png {
+        return tiny_skia::Pixmap::decode_png(&png).map_err(|e| e.to_string());
+    }
+    let mut empty = tiny_skia::Pixmap::new(512, 512).ok_or("Invalid tile size")?;
+    if kind == Kind::Map {
+        empty.fill(color(BACKGROUND.rgba(dark, id.z + 1)));
+    }
+    Ok(empty)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

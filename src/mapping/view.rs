@@ -3,6 +3,8 @@ use super::{
     camera::{self, Camera, project},
     gestures::Contacts,
     overlay_tiles::{OverlayTiles, Polyline},
+    terrain_tiles::Style as TerrainStyle,
+    terrain_view::TerrainViewProps,
     tiles::{Config, Provider, Service},
 };
 use crate::ui::icons::{COMPASS, EXPLORE, FIT, LOCATE, SLIDERS};
@@ -33,6 +35,7 @@ use zgui_ui_icons::{
 pub fn MapView() -> impl IntoView {
     let s = UiState::current();
     let camera = s.camera;
+    let three_d = RwSignal::new_local(false);
     let service = Service::new(Config {
         cache: s.directory.get_value().join("maps"),
         local: None,
@@ -69,7 +72,7 @@ pub fn MapView() -> impl IntoView {
     let vector = Memo::new(move |_| s.basemap.archive.with(Option::is_some));
     // Online raster tiles: no offline map at all, or satellite underlay. Beyond downloaded
     // area, basemap streams same vector tiles online instead.
-    let raster = Memo::new(move |_| !vector.get() || s.satellite.get());
+    let raster = Memo::new(move |_| !three_d.get() && (!vector.get() || s.satellite.get()));
     let outside = Memo::new(move |_| vector.get() && s.basemap.outside(camera.get(), size.get()));
     let provider = Memo::new(move |_| {
         if s.satellite.get() {
@@ -381,6 +384,34 @@ pub fn MapView() -> impl IntoView {
         }
         lines
     });
+    let terrain_style = Memo::new(move |_| {
+        let mut layers =
+            geometry.with(|layers| layers.iter().map(|p| p.lines.clone()).collect::<Vec<_>>());
+        let mut missing = Polylines::default();
+        s.area_stats.with(|stats| {
+            for section in stats.iter().flat_map(|st| &st.untraveled) {
+                if let (Some(a), Some(b)) = (
+                    project(section.start.lon, section.start.lat),
+                    project(section.end.lon, section.end.lat),
+                ) {
+                    missing.segment(a, b);
+                }
+            }
+        });
+        missing.finish();
+        layers.push(missing.lines);
+        TerrainStyle {
+            dark: s.dark.get(),
+            layers,
+        }
+    });
+    // Area editing remains in established flat-map interaction model.
+    let flat_edit = RenderEffect::new(move |_| {
+        if s.area_drawing.get() {
+            three_d.set(false);
+        }
+    });
+    on_cleanup_local(move || drop(flat_edit));
     let overlay_tiles = OverlayTiles::new();
     let untraveled = RenderEffect::new(move |_| {
         let mut lines = Polylines::default();
@@ -496,7 +527,10 @@ pub fn MapView() -> impl IntoView {
         box(class="map-card") {
             box(class="map-viewport",node_ref=host,a11y:label="Traveled roads map",on:pointer_down=down,on:pointer_move=moved,
                 on:pointer_up=move |ev|{ev.release_pointer();tapped(ev.id.raw(),[f64::from(ev.position.x.0),f64::from(ev.position.y.0)]);release(ev.id.raw());},on:pointer_cancel=move |ev|{ev.release_pointer();cancel(ev.id.raw());}) {
-                box(class="map-rotor",
+                if move ||three_d.get() {
+                    TerrainView(service=service,offline=offline,map_style=Signal::derive_local(move ||std::sync::Arc::new(terrain_style.get())))
+                }
+                box(class="map-rotor",class:map-hidden=move ||three_d.get(),
                     style:width=move ||Some(format!("{}px",size.get()[0])),style:height=move ||Some(format!("{}px",size.get()[1])),
                     style:left=move ||Some(format!("{}px",(view_size.get()[0]-size.get()[0])/2.0)),style:top=move ||Some(format!("{}px",(view_size.get()[1]-size.get()[1])/2.0)),
                     style:transform=move ||{let b=s.bearing.get();(b!=0.0).then(||format!("rotate({b}rad)"))}) {
@@ -508,7 +542,7 @@ pub fn MapView() -> impl IntoView {
                     }
                 }
                 box(class="map-vector-tiles") {
-                    for item in move ||s.basemap.visible(camera.get(),size.get(),s.dark.get()||s.satellite.get(),if s.satellite.get(){Kind::Roads}else{Kind::Map},f64::from(host.scale()),!offline.get()),key=|item|item.clone() {
+                    for item in move ||if three_d.get(){Vec::new()}else{s.basemap.visible(camera.get(),size.get(),s.dark.get()||s.satellite.get(),if s.satellite.get(){Kind::Roads}else{Kind::Map},f64::from(host.scale()),!offline.get())},key=|item|item.clone() {
                         // 512 CSS px box: nominal display size of rendered tile; place() scales 256 px boxes.
                         box(class="map-vector-tile",style:transform=move ||{let[x,y,scale]=camera.get().place(item.0,size.get());Some(format!("translate({x}px, {y}px) scale({})",scale/2.0))}) {
                             {zgui::elements::image().class("map-vector-image").src(Some(item.1.clone())).alt(Some("Map tile".to_string())).into_view()}
@@ -516,7 +550,7 @@ pub fn MapView() -> impl IntoView {
                     }
                 }
                 box(class="map-vector-tiles") {
-                    for item in move ||overlay_tiles.visible(camera.get(),size.get(),f64::from(host.scale())),key=|item|item.clone() {
+                    for item in move ||if three_d.get(){Vec::new()}else{overlay_tiles.visible(camera.get(),size.get(),f64::from(host.scale()))},key=|item|item.clone() {
                         box(class="map-vector-tile",style:transform=move ||{let[x,y,scale]=camera.get().place(item.0,size.get());Some(format!("translate({x}px, {y}px) scale({})",scale/2.0))}) {
                             {zgui::elements::image().class("map-vector-image").src(Some(item.1.clone())).alt(Some("Untraveled roads in area".to_string())).into_view()}
                         }
@@ -525,7 +559,7 @@ pub fn MapView() -> impl IntoView {
                 {overlay}
                 // Street names above trip and area lines.
                 box(class="map-vector-tiles") {
-                    for item in move ||s.basemap.visible(camera.get(),size.get(),s.dark.get()||s.satellite.get(),Kind::Labels,f64::from(host.scale()),!offline.get()),key=|item|item.clone() {
+                    for item in move ||if three_d.get(){Vec::new()}else{s.basemap.visible(camera.get(),size.get(),s.dark.get()||s.satellite.get(),Kind::Labels,f64::from(host.scale()),!offline.get())},key=|item|item.clone() {
                         box(class="map-vector-tile",style:transform=move ||{let[x,y,scale]=camera.get().place(item.0,size.get());Some(format!("translate({x}px, {y}px) scale({})",scale/2.0))}) {
                             {zgui::elements::image().class("map-vector-image").src(Some(item.1.clone())).alt(Some("Map labels".to_string())).into_view()}
                         }
@@ -545,7 +579,7 @@ pub fn MapView() -> impl IntoView {
                     box(class="gps-dot",style:transform=move ||marker.get().map(|m|format!("translate({}px, {}px)",m.x-8.0,m.y-8.0))) {}
                 }
                 }
-                text(class="attribution") {{move ||if s.satellite.get(){"Imagery: Esri, Vantor, Earthstar Geographics, GIS User Community · Roads: © OpenStreetMap"}else if vector.get(){"Protomaps © OpenStreetMap"}else{"© OpenStreetMap contributors"}}}
+                text(class="attribution") {{move ||if three_d.get(){"Protomaps © OpenStreetMap · Terrain: © Mapterhorn"}else if s.satellite.get(){"Imagery: Esri, Vantor, Earthstar Geographics, GIS User Community · Roads: © OpenStreetMap"}else if vector.get(){"Protomaps © OpenStreetMap"}else{"© OpenStreetMap contributors"}}}
             }
             if move ||s.area_drawing.get()||s.area_busy.get()||s.area_stats.with(Option::is_some) {
                 AreaBar()
@@ -559,7 +593,7 @@ pub fn MapView() -> impl IntoView {
             row(class="map-top") {
                 ViewOptions()
                 AreasSheet()
-                if move ||raster.get()||outside.get() {
+                if move ||three_d.get()||raster.get()||outside.get() {
                     Button(variant=ButtonVariant::Secondary,class="map-chip",on:click=move |_|offline.update(|v| *v = !*v)) {{move ||if offline.get(){"Offline"}else{"Online"}}}
                 }
                 if move ||raster.get()&&service.status().contains("errors") {
@@ -570,12 +604,14 @@ pub fn MapView() -> impl IntoView {
             if move ||!s.message.get().is_empty() {
                 text(class="map-message",a11y:role=Role::Status,on:click=move |_|s.message.set(String::new())) {{move ||s.message.get()}}
             }
-            if move ||s.bearing.get()!=0.0 {
+            if move ||!three_d.get()&&s.bearing.get()!=0.0 {
                 Button(variant=ButtonVariant::Secondary,class="map-button compass",on:click=move |_|s.bearing.set(0.0),a11y:label="Rotate map north up") {
                     box(class="compass-needle",style:transform=move ||Some(format!("rotate({}rad)",s.bearing.get()))) {Icon(icon=COMPASS)}
                 }
             }
             column(class="map-controls") {
+                Button(variant=ButtonVariant::Secondary,class="map-button terrain-toggle",disabled=Signal::derive_local(move ||s.area_drawing.get()),on:click=move |_|three_d.update(|v|*v = !*v),a11y:label=move ||if three_d.get(){"Switch to 2D map"}else{"Switch to 3D terrain map"}) {{move ||if three_d.get(){"2D"}else{"3D"}}}
+
                 if move ||s.follow.get() {
                     Button(class="map-button",on:click=move |_|s.locate(),a11y:label="Following my location") {Icon(icon=LOCATE)}
                 } else {

@@ -156,3 +156,20 @@ permission prompt.
 Uninstall removes local data. **Trips** sheet lists trips (show on map, delete
 finished trip, km/mi units, road coverage near history) and exports all trips as
 GPX via Android save dialog. Deletion is journaled as event, so replay matches.
+
+## 3D terrain map
+
+Tap **3D** in right-side map controls to tilt vector map over Mapterhorn terrain.
+Drag with one finger to rotate and tilt. Use two fingers to pan; pinch to zoom.
+Tap **2D** to return to flat map and its original drag/rotation controls. Map
+center/zoom remain shared; flat-map bearing is retained independently.
+
+Trips, category filters, traveled-road toggles, area outlines, and labels are
+included in terrain map. Position marker follows terrain height. Area drawing
+returns to 2D for corner editing. 3D uses vector basemap; satellite selection
+remains available when returning to 2D.
+
+Elevation downloads on demand into existing tile cache. **Offline** uses cached
+heights only; vector map downloads do not bundle elevation. Until elevation is
+available, flat preview is labeled. Retry control handles failed tile requests.
+Labels follow map surface, so distant or steeply tilted text gets smaller.

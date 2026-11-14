@@ -238,3 +238,48 @@ fn area_tool_collects_corners_and_inspects_roads() {
     assert_eq!(s.message.get_untracked(), "Elm Street · 3 trips");
     assert!(s.area_points.with_untracked(Vec::is_empty));
 }
+
+#[test]
+fn terrain_toggle_preserves_flat_camera_and_recorded_history() {
+    use crate::mapping::view::MapViewProps;
+    let directory = tempfile::tempdir().unwrap();
+    let window = Window::open();
+    let s = window.scope.with(|| {
+        let s = UiState::new(directory.path().to_path_buf());
+        provide_local_context(s);
+        s
+    });
+    let camera = crate::mapping::camera::Camera {
+        center: [0., 0.],
+        zoom: 12.,
+    };
+    s.camera.set(camera);
+    s.bearing.set(0.5);
+    let mut mounted = window.scope.with(|| {
+        view! { ThemeProvider { MapView() } }
+            .into_view()
+            .build(&mut window.cx.cx())
+    });
+    mounted.mount(&window.dom_handle, window.root, None);
+    window.frame();
+    let toggle = find(&window, "terrain-toggle");
+    let click = || {
+        window.dispatcher().send_to(
+            toggle,
+            EventKind::Click,
+            zgui::vocab::Payload::Pointer(zgui::vocab::PointerEvent::mouse(
+                zgui::geom::Point::new(zgui::geom::CssPx(0.), zgui::geom::CssPx(0.)),
+            )),
+        );
+        window.frame();
+    };
+    click();
+    find(&window, "terrain-view");
+    assert_eq!(s.camera.get_untracked(), camera);
+    click();
+    assert_eq!(s.camera.get_untracked(), camera);
+    assert_eq!(s.bearing.get_untracked(), 0.5);
+    assert!(s.data.with_untracked(|d| d.trips.is_empty()));
+    assert!(!directory.path().join("trips.jsonl").exists());
+    mounted.unmount(&window.dom_handle);
+}
