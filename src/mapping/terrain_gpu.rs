@@ -40,6 +40,7 @@ pub struct Renderer {
     images: BTreeMap<Key, Image>,
     materials: BTreeMap<(Key, Key), wgpu::BindGroup>,
     stride: u64,
+    uniforms: Vec<u8>,
     fallback: wgpu::Texture,
     depth: Option<([u32; 2], wgpu::Texture)>,
 }
@@ -204,6 +205,7 @@ impl Renderer {
             images: BTreeMap::new(),
             materials: BTreeMap::new(),
             stride,
+            uniforms: Vec::with_capacity(MAX_RENDER_TILES * stride as usize),
             fallback,
             depth: None,
         }
@@ -327,6 +329,7 @@ impl Renderer {
             self.depth = Some((extent, depth));
         }
         let mut binds = Vec::new();
+        self.uniforms.clear();
         let scale = ground_scale(camera);
         let base = scene.center_height(camera);
         for tile in scene.tiles.iter().take(MAX_RENDER_TILES) {
@@ -360,7 +363,12 @@ impl Renderer {
                 0.,
             ];
             let offset = binds.len() as u64 * self.stride;
-            queue.write_buffer(&self.tiles, offset, &floats(&values));
+            self.uniforms
+                .resize(offset as usize + self.stride as usize, 0);
+            for (index, value) in values.iter().enumerate() {
+                let at = offset as usize + index * 4;
+                self.uniforms[at..at + 4].copy_from_slice(&value.to_ne_bytes());
+            }
             let bind = self
                 .materials
                 .entry((Key::raster_from(tile.raster_id, tile.provider), dem))
@@ -395,6 +403,10 @@ impl Renderer {
                     })
                 });
             binds.push(bind.clone());
+        }
+        // One queue write per frame, rather than one staging allocation per terrain tile.
+        if !self.uniforms.is_empty() {
+            queue.write_buffer(&self.tiles, 0, &self.uniforms);
         }
         let depth = self
             .depth

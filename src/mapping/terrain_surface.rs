@@ -87,6 +87,9 @@ impl Producer {
     }
     pub fn update(&self, camera: Camera, orbit: Orbit, scene: Arc<Scene>) {
         let mut s = self.shared.state.lock().unwrap();
+        if s.camera == camera && s.orbit == orbit && Arc::ptr_eq(&s.scene, &scene) {
+            return;
+        }
         s.camera = camera;
         s.orbit = orbit;
         s.scene = scene;
@@ -233,4 +236,29 @@ fn recovery_image(gpu: &GpuShare) -> Arc<wgpu::Texture> {
         size,
     );
     texture
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn unchanged_camera_reuses_scene_without_queuing_another_gpu_frame() {
+        let producer = Producer::new();
+        let scene = Arc::new(Scene::default());
+        let camera = Camera::default();
+        let orbit = Orbit::default();
+        producer.update(camera, orbit, scene.clone());
+        let revision = producer.shared.state.lock().unwrap().revision;
+        producer.update(camera, orbit, scene.clone());
+        assert_eq!(producer.shared.state.lock().unwrap().revision, revision);
+        producer.update(
+            Camera {
+                zoom: camera.zoom + 0.1,
+                ..camera
+            },
+            orbit,
+            scene,
+        );
+        assert_eq!(producer.shared.state.lock().unwrap().revision, revision + 1);
+    }
 }

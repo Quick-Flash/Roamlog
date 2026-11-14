@@ -32,12 +32,8 @@ pub fn TerrainView(
         })
     });
     let selector = StoredValue::new_local(RefCell::new(Selector::default()));
-    let ids = Memo::new(move |_| {
-        selector.with_value(|v| v.borrow_mut().select(orbit.get(), camera.get(), size.get()))
-    });
     let tiles = Tiles::new();
-    let previous = StoredValue::new_local(Scene::default());
-    let scene_revision = RwSignal::new_local(0u64);
+    let scene = RwSignal::new_local(Arc::new(Scene::default()));
     let has_height = RwSignal::new_local(false);
     let retry = RwSignal::new_local(0u64);
     let reset = RenderEffect::new(move |_| {
@@ -45,15 +41,16 @@ pub fn TerrainView(
         offline.track();
         s.basemap.archive.track();
         tiles.reset();
-        previous.set_value(Scene::default());
+        scene.set(Arc::new(Scene::default()));
     });
-    let demands = RenderEffect::new(move |_| {
-        retry.track();
-        let style = map_style.get();
-        if style.satellite {
-            service.revision.track();
-        }
-        let ids = ids.get();
+    // Camera frames reuse retained scene; tile selection/downloads are bounded to 20 Hz.
+    let throttle = super::throttle::Throttle::new(std::time::Duration::from_millis(50));
+    let update = move || {
+        let style = map_style.get_untracked();
+        let camera = camera.get_untracked();
+        let orbit = orbit.get_untracked();
+        let size = size.get_untracked();
+        let ids = selector.with_value(|v| v.borrow_mut().select(orbit, camera, size));
         let mut wanted = BTreeSet::new();
         for id in &ids {
             for z in id.z.saturating_sub(3)..=id.z {
@@ -66,22 +63,41 @@ pub fn TerrainView(
             }
         }
         let mut wanted: Vec<_> = wanted.into_iter().collect();
-        orbit
-            .get()
-            .screen_first(camera.get(), size.get(), &mut wanted);
+        orbit.screen_first(camera, size, &mut wanted);
         // Coarse tiles first: show terrain promptly rather than wait for all leaves.
         wanted.sort_by_key(|t| t.z);
         wanted.truncate(192);
+        // Imagery detail follows screen pixels rather than terrain mesh resolution.
+        let mut rasters =
+            super::terrain_tiles::detail_tiles(orbit, camera, size, f64::from(host.scale()), &ids);
+        let mut cached = Vec::new();
+        for &id in &ids {
+            cached.extend(
+                service
+                    .cached_raster_children(id, Provider::EsriImagery)
+                    .into_iter()
+                    .filter(|child| child.z <= id.z.saturating_add(3)),
+            );
+            tiles.ready.with_value(|ready| {
+                cached.extend(ready.keys().copied().filter(|&child| {
+                    super::terrain::contains(id, child)
+                        && child.z > id.z
+                        && child.z <= id.z.saturating_add(3)
+                }))
+            });
+        }
+        orbit.screen_first(camera, size, &mut cached);
+        rasters = super::terrain_tiles::prioritize_detail(rasters, cached, &wanted);
         service.demand_layers(
             2,
-            if style.satellite { &wanted } else { &[] },
+            if style.satellite { &rasters } else { &[] },
             &wanted,
             Provider::EsriImagery,
-            !offline.get(),
+            !offline.get_untracked(),
         );
         let mut imagery = std::collections::BTreeMap::new();
         if style.satellite {
-            for &id in &wanted {
+            for &id in &rasters {
                 for z in (id.z.saturating_sub(8)..=id.z).rev() {
                     let shift = id.z - z;
                     let parent = TileId {
@@ -99,25 +115,12 @@ pub fn TerrainView(
             }
         }
         tiles.request(
-            &wanted,
+            &rasters,
             style,
-            s.basemap.archive.get(),
-            !offline.get(),
+            s.basemap.archive.get_untracked(),
+            !offline.get_untracked(),
             &imagery,
         );
-    });
-    let producer = Producer::new();
-    let surface = zgui::elements::surface()
-        .class("terrain-surface")
-        .source(&producer.handle)
-        .into_view();
-    let draw = RenderEffect::new(move |_| {
-        service.revision.track();
-        tiles.revision.track();
-        let camera = camera.get();
-        let orbit = orbit.get();
-        let size = size.get();
-        let ids = ids.get();
         let mut ready = std::collections::BTreeMap::new();
         tiles.ready.with_value(|rasters| {
             for (&id, raster) in rasters {
@@ -157,7 +160,7 @@ pub fn TerrainView(
                 );
             }
         });
-        let old = previous.get_value();
+        let old = scene.get_untracked();
         let selected = Scene::handover(
             &ids,
             &ready,
@@ -167,32 +170,47 @@ pub fn TerrainView(
             orbit,
             size,
         );
-        let scene = Scene::assembled(selected, &old, camera);
+        let next = Scene::assembled(selected, &old, camera);
         has_height.set(
-            scene
-                .tiles
+            next.tiles
                 .iter()
                 .any(|t| t.elevation.as_ref().is_some_and(|e| e.version() != 0)),
         );
-        producer.update(camera, orbit, Arc::new(scene.clone()));
-        previous.set_value(scene);
-        scene_revision.update(|n| *n += 1);
+        scene.set(Arc::new(next));
+    };
+    let work = RenderEffect::new(move |_| {
+        camera.track();
+        orbit.track();
+        size.track();
+        map_style.track();
+        offline.track();
+        s.basemap.archive.track();
+        retry.track();
+        service.revision.track();
+        tiles.revision.track();
+        throttle.run(update);
     });
+    let producer = Producer::new();
+    let surface = zgui::elements::surface()
+        .class("terrain-surface")
+        .source(&producer.handle)
+        .into_view();
+    let draw = RenderEffect::new(move |_| producer.update(camera.get(), orbit.get(), scene.get()));
     on_cleanup_local(move || {
         drop(reset);
-        drop(demands);
+        drop(work);
         drop(draw);
+        throttle.cancel();
         tiles.reset();
         service.demand_layers(2, &[], &[], Provider::OpenStreetMap, false);
     });
     let marker = Memo::new(move |_| {
-        scene_revision.track();
         let (point, _) = s.position.get()?;
         let p = super::camera::project(point.lon, point.lat)?;
         let camera = camera.get();
         let orbit = orbit.get();
         let size = size.get();
-        previous.with_value(|scene| {
+        scene.with(|scene| {
             let height = scene
                 .tiles
                 .iter()
@@ -234,17 +252,51 @@ pub fn TerrainView(
     let down = contacts.clone();
     let moved = contacts.clone();
     let released = contacts.clone();
-    let release = move |id| {
-        let mut c = released.borrow_mut();
-        c.points.remove(&id);
-        c.rebase(camera.get_untracked(), orbit.get_untracked());
+    let pending: StoredValue<Option<zgui::view::FrameHandle>, LocalStorage> =
+        StoredValue::new_local(None);
+    let apply = {
+        let contacts = contacts.clone();
+        move || {
+            if let Some((next, angle)) = contacts.borrow().view(size.get_untracked()) {
+                camera.set(next);
+                orbit.set(angle);
+            }
+        }
+    };
+    let down_apply = apply.clone();
+    let schedule = {
+        let apply = apply.clone();
+        move || {
+            if Timers::current().is_none() {
+                apply();
+                return;
+            }
+            if pending.with_value(Option::is_none) {
+                let apply = apply.clone();
+                pending.set_value(Some(request_frame(move |_| {
+                    pending.set_value(None);
+                    apply();
+                })));
+            }
+        }
+    };
+    let release = {
+        let apply = apply.clone();
+        move |id| {
+            pending.set_value(None);
+            apply();
+            let mut c = released.borrow_mut();
+            c.points.remove(&id);
+            c.rebase(camera.get_untracked(), orbit.get_untracked());
+        }
     };
     let cancel = release.clone();
+    on_cleanup_local(move || pending.set_value(None));
     view! {
         box(class="terrain-view",node_ref=host,a11y:label="3D map: one finger rotates and tilts; two fingers drag and pinch") {
             {surface}
-            box(class="terrain-input",on:pointer_down=move |ev|{ev.capture_pointer();ev.prevent_default();ev.stop_propagation();s.follow.set(false);s.anchored.set(true);let mut c=down.borrow_mut();c.points.insert(ev.id.raw(),point([f64::from(ev.position.x.0),f64::from(ev.position.y.0)]));c.rebase(camera.get_untracked(),orbit.get_untracked());},
-                on:pointer_move=move |ev|{ev.stop_propagation();let mut c=moved.borrow_mut();if let Some(p)=c.points.get_mut(&ev.id.raw()){*p=point([f64::from(ev.position.x.0),f64::from(ev.position.y.0)]);if let Some((next,angle))=c.view(size.get_untracked()){camera.set(next);orbit.set(angle);}}},
+            box(class="terrain-input",on:pointer_down=move |ev|{pending.set_value(None);down_apply();ev.capture_pointer();ev.prevent_default();ev.stop_propagation();s.follow.set(false);s.anchored.set(true);let mut c=down.borrow_mut();c.points.insert(ev.id.raw(),point([f64::from(ev.position.x.0),f64::from(ev.position.y.0)]));c.rebase(camera.get_untracked(),orbit.get_untracked());},
+                on:pointer_move=move |ev|{ev.stop_propagation();let changed={let mut c=moved.borrow_mut();if let Some(p)=c.points.get_mut(&ev.id.raw()){*p=point([f64::from(ev.position.x.0),f64::from(ev.position.y.0)]);true}else{false}};if changed {schedule();}},
                 on:pointer_up=move |ev|{ev.release_pointer();ev.stop_propagation();release(ev.id.raw());},
                 on:pointer_cancel=move |ev|{ev.release_pointer();ev.stop_propagation();cancel(ev.id.raw());}) {}
             if move ||marker.get().is_some() {box(class="gps-dot",style:transform=move ||marker.get().map(|p|format!("translate({}px, {}px)",p[0]-8.,p[1]-8.))) {}}

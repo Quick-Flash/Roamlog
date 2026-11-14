@@ -1,8 +1,9 @@
 //! Vector map and trip overlays rasterized once per tile on workers, then draped on DEM.
 use super::{
     basemap::{self, Kind},
-    camera::{TileId, WORLD},
+    camera::{Camera, TileId, WORLD},
     overlay_tiles::Polyline,
+    terrain::Orbit,
     tiles::{Payload, Raster},
 };
 use crate::pmtiles::Archive;
@@ -67,9 +68,11 @@ impl Tiles {
         let wanted: BTreeMap<_, _> = ids
             .iter()
             .filter_map(|&id| {
-                let source = imagery
+                let incoming = imagery
                     .get(&id)
                     .map(|(id, payload)| (*id, payload.version()));
+                let cached = self.sources.with_value(|s| s.get(&id).copied().flatten());
+                let source = best_source(cached, incoming);
                 (!style.satellite || source.is_some()).then_some((id, (version, id, source)))
             })
             .collect();
@@ -79,8 +82,10 @@ impl Tiles {
                 r.retain(|id, _| wanted.contains_key(id));
             }
         });
-        self.sources
-            .update_value(|r| r.retain(|id, _| wanted.contains_key(id)));
+        self.ready.with_value(|ready| {
+            self.sources
+                .update_value(|sources| sources.retain(|id, _| ready.contains_key(id)))
+        });
         for (id, key) in wanted {
             let source = key.2;
             if self.ready.with_value(|r| r.contains_key(&id))
@@ -138,6 +143,74 @@ impl Tiles {
         }
     }
 }
+/// A cached sharper composite remains useful even when raw source was evicted.
+fn best_source(cached: Option<(TileId, u64)>, incoming: Option<(TileId, u64)>) -> SourceKey {
+    match (cached, incoming) {
+        (Some(old), Some(new)) if old.0.z > new.0.z => Some(old),
+        (_, Some(new)) => Some(new),
+        (old, None) => old,
+    }
+}
+/// Keep cached sharper imagery, but do not let old coarse tiles starve upgrades.
+pub(super) fn prioritize_detail(
+    requested: Vec<TileId>,
+    mut cached: Vec<TileId>,
+    fallback: &[TileId],
+) -> Vec<TileId> {
+    cached.retain(|old| {
+        !requested
+            .iter()
+            .any(|detail| detail.z > old.z && super::terrain::contains(*old, *detail))
+    });
+    cached.extend(requested);
+    cached.extend(fallback.iter().copied());
+    let mut seen = std::collections::BTreeSet::new();
+    cached
+        .into_iter()
+        .filter(|id| seen.insert(*id))
+        .take(256)
+        .collect()
+}
+/// Separate imagery LOD: retain sharp descendants when terrain mesh coarsens.
+pub(super) fn detail_tiles(
+    orbit: Orbit,
+    camera: Camera,
+    size: [f64; 2],
+    dpr: f64,
+    leaves: &[TileId],
+) -> Vec<TileId> {
+    // Split largest projected tiles first. Budget bounds selection work as well as downloads.
+    let score = |tile| orbit.projected_tile_size(camera, size, tile) * dpr;
+    let mut tiles: std::collections::BTreeSet<_> = leaves.iter().copied().collect();
+    let mut queue = std::collections::BinaryHeap::new();
+    for &id in leaves {
+        queue.push((score(id).to_bits(), id));
+    }
+    while let Some((pixels, id)) = queue.pop() {
+        if f64::from_bits(pixels) <= 256. || id.z >= 19 {
+            continue;
+        }
+        if tiles.len() + 3 > 192 {
+            break;
+        }
+        tiles.remove(&id);
+        for y in 0..2 {
+            for x in 0..2 {
+                let child = TileId {
+                    z: id.z + 1,
+                    x: id.x * 2 + x,
+                    y: id.y * 2 + y,
+                };
+                tiles.insert(child);
+                queue.push((score(child).to_bits(), child));
+            }
+        }
+    }
+    let mut tiles: Vec<_> = tiles.into_iter().collect();
+    orbit.screen_first(camera, size, &mut tiles);
+    tiles
+}
+
 fn render(
     archive: Option<&Archive>,
     id: TileId,
@@ -397,5 +470,113 @@ mod satellite_tests {
                 .count()
                 > 200
         );
+    }
+}
+
+#[cfg(test)]
+mod quality_tests {
+    use super::*;
+    #[test]
+    fn cached_detail_survives_coarser_or_evicted_source_and_accepts_upgrades() {
+        let old = (TileId { z: 17, x: 3, y: 4 }, 10);
+        let coarse = (TileId { z: 15, x: 0, y: 1 }, 20);
+        assert_eq!(best_source(Some(old), Some(coarse)), Some(old));
+        assert_eq!(best_source(Some(old), None), Some(old));
+        assert_eq!(best_source(Some(old), Some((old.0, 30))), Some((old.0, 30)));
+        let finer = (TileId { z: 18, x: 6, y: 8 }, 40);
+        assert_eq!(best_source(Some(old), Some(finer)), Some(finer));
+    }
+    #[test]
+    fn imagery_refines_for_device_pixels_with_bounded_work() {
+        let leaf = TileId {
+            z: 14,
+            x: 8192,
+            y: 8192,
+        };
+        let span = WORLD / f64::from(1u32 << leaf.z);
+        let camera = Camera {
+            center: [span / 2., -span / 2.],
+            zoom: 14.,
+        };
+        let orbit = Orbit::default();
+        let size = [400., 700.];
+        let normal = detail_tiles(orbit, camera, size, 1., &[leaf]);
+        let sharp = detail_tiles(orbit, camera, size, 3., &[leaf]);
+        assert!(sharp.len() > normal.len());
+        assert!(
+            sharp
+                .iter()
+                .all(|t| super::super::terrain::contains(leaf, *t))
+        );
+        let leaves = super::super::terrain::Selector::default().select(orbit, camera, size);
+        assert!(detail_tiles(orbit, camera, size, 4., &leaves).len() <= 192);
+    }
+    #[test]
+    fn offscreen_cached_composite_keeps_its_source_quality_metadata() {
+        let window = zgui_testkit_view::Window::open();
+        window.scope.with(|| {
+            let tiles = Tiles::new();
+            let id = TileId { z: 15, x: 0, y: 0 };
+            let source = Some((id, 123));
+            tiles.ready.update_value(|r| {
+                r.insert(
+                    id,
+                    Arc::new(Payload::Raster(Raster {
+                        version: 1,
+                        encoded: vec![],
+                        rgba: vec![0; 4],
+                        width: 1,
+                        height: 1,
+                    })),
+                );
+            });
+            tiles.sources.update_value(|s| {
+                s.insert(id, source);
+            });
+            tiles.request(
+                &[],
+                Arc::new(Style {
+                    dark: false,
+                    satellite: true,
+                    layers: vec![Vec::new(); 9],
+                }),
+                None,
+                false,
+                &BTreeMap::new(),
+            );
+            assert_eq!(
+                tiles.sources.with_value(|s| s.get(&id).copied()),
+                Some(source)
+            );
+        });
+    }
+}
+
+#[cfg(test)]
+mod request_priority_tests {
+    use super::*;
+    #[test]
+    fn stale_coarse_cache_cannot_starve_finer_requests_but_sharp_cache_stays_first() {
+        let parent = TileId {
+            z: 10,
+            x: 10,
+            y: 10,
+        };
+        let children: Vec<_> = (0..4)
+            .map(|i| TileId {
+                z: 11,
+                x: 20 + i % 2,
+                y: 20 + (i / 2) as u32,
+            })
+            .collect();
+        let fine = TileId {
+            z: 12,
+            x: 40,
+            y: 40,
+        };
+        let order = prioritize_detail(children.clone(), vec![parent, fine, fine], &[parent]);
+        assert_eq!(order[0], fine);
+        assert_eq!(&order[1..5], children.as_slice());
+        assert_eq!(order[5], parent);
     }
 }

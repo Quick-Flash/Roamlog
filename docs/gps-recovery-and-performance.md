@@ -33,6 +33,19 @@ workers; orbiting updates uniforms without rerasterizing those tiles. Surface
 producer runs on worker, bounds in-flight work to one submission, and rebuilds
 after device replacement. Tile requests skip work no longer wanted by view.
 
+Contact moves coalesce once per display frame, so two-finger input does not
+present a half-updated pan/pinch between contacts. Camera frames reuse retained
+scene; selection, scene assembly, and download demand update at most once every
+50 ms, including final drag position. Identical camera/scene updates do not
+queue another GPU frame. Terrain tile uniforms share one retained staging
+buffer and one GPU queue write per frame.
+
+Satellite imagery LOD follows projected device pixels independently of terrain
+mesh LOD. Cached fine tiles remain eligible after zooming out in both 2D and
+3D. Coarser or evicted raw imagery does not overwrite sharper composite;
+source-quality metadata lives as long as cached composite. Tile budgets still
+bound retained detail and request work.
+
 Frame rate depends on display mode, thermal state, map view, and cache state.
 Display refresh rate is not measured rendering throughput. Compare identical
 views and gestures with warmed caches; report frame times and missed frames,
@@ -49,3 +62,20 @@ journals without changing them; never commit personal GPS journals or output.
 Android launch and simulated trip rendering have been checked on Pixel 9.
 Outdoor distance accuracy, long screen-lock recordings, process termination,
 and regional map sizes still need field validation.
+
+### Two-finger pan check
+
+One paired Pixel 9 demo run used same 360 two-contact moves over satellite
+terrain, with Android instrumentation and existing Zgui latency trace. Measured
+`f.begin` → `f.painted` during gesture, excluding startup and warm-up:
+
+| UI-frame work | Before | After |
+| --- | ---: | ---: |
+| Mean | 8.40 ms | 5.44 ms |
+| 95th percentile | 16.45 ms | 10.69 ms |
+| Maximum | 49.97 ms | 70.65 ms |
+
+This measures framework frame work, not physical display FPS or complete
+finger-to-display latency. Input-injection handoff time stayed roughly unchanged.
+Average/tail frame cost improved in this pair; isolated stalls remain and need
+further GPU/upload analysis. Raw traces and device screenshots stay private.

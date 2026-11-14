@@ -511,6 +511,10 @@ impl Orbit {
         let pose = self.pose(camera, size);
         [pose.distance + 0.6 * pose.reach, pose.distance + pose.reach]
     }
+    pub fn projected_tile_size(self, camera: Camera, size: [f64; 2], tile: TileId) -> f64 {
+        self.pose(camera, size)
+            .projected_size(camera, tile, size[1], ground_scale(camera))
+    }
     /// Largest on screen first: coarse fallbacks, then detail nearest the eye.
     /// Distance from the orbit focus would rank near-eye and horizon tiles alike.
     pub fn screen_first(self, camera: Camera, size: [f64; 2], tiles: &mut [TileId]) {

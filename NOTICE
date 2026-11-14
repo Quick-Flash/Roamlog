@@ -18,7 +18,7 @@ Test font tests/fixtures/fonts/NotoSans-Regular.ttf: Noto Sans, The Noto Project
 Authors, SIL Open Font License 1.1. License included in same directory.
 
 3D terrain camera/LOD selection, mesh shader, retained texture renderer and GPU
-worker adapt Enlumi src/mapping/{terrain.rs,terrain.wgsl,terrain_gpu.rs,gpu.rs}
+worker adapt Enlumi src/mapping/{terrain.rs,terrain.wgsl,terrain_gpu.rs,gpu.rs,throttle.rs}
 at commit 0e299e3be5b27be966fe7d075fbd419483a4753e. Reused under Apache-2.0
 with project owner’s authorization. Flight telemetry rendering omitted.
 

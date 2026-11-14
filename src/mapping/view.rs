@@ -89,6 +89,35 @@ pub fn MapView() -> impl IntoView {
             Provider::OpenStreetMap
         }
     });
+    let raster_tiles = Memo::new(move |_| {
+        if !raster.get() {
+            return Vec::new();
+        }
+        service.revision.track();
+        let camera = camera.get();
+        let size = size.get();
+        let provider = provider.get();
+        let visible = camera.map_tiles(size);
+        let mut detail = std::collections::BTreeSet::new();
+        for &tile in &visible {
+            detail.extend(
+                service
+                    .cached_raster_children(tile, provider)
+                    .into_iter()
+                    .filter(|child| child.z <= tile.z + 2),
+            );
+        }
+        let mut detail: Vec<_> = detail.into_iter().collect();
+        camera.center_first(&mut detail);
+        detail.truncate(256);
+        detail.sort_unstable();
+        camera
+            .map_fallback_tiles(size)
+            .into_iter()
+            .chain(visible)
+            .chain(detail)
+            .collect::<Vec<_>>()
+    });
     // Without trips or GPS, open offline map at its own center.
     let center = RenderEffect::new(move |_| {
         if let Some(archive) = s.basemap.archive.get()
@@ -101,12 +130,10 @@ pub fn MapView() -> impl IntoView {
     });
     on_cleanup_local(move || drop(center));
     let demand = RenderEffect::new(move |_| {
-        let camera = camera.get();
         // Street raster without offline map, or optional satellite underlay. Visible tiles only.
         let mut tiles = Vec::new();
         if raster.get() {
-            tiles = camera.map_tiles(size.get());
-            tiles.extend(camera.map_fallback_tiles(size.get()));
+            tiles = raster_tiles.get();
         }
         service.demand(1, &tiles, false, provider.get(), !offline.get());
     });
@@ -544,7 +571,7 @@ pub fn MapView() -> impl IntoView {
                     style:left=move ||Some(format!("{}px",(view_size.get()[0]-size.get()[0])/2.0)),style:top=move ||Some(format!("{}px",(view_size.get()[1]-size.get()[1])/2.0)),
                     style:transform=move ||{let b=s.bearing.get();(b!=0.0).then(||format!("rotate({b}rad)"))}) {
                 box(class="map-tiles",class:map-hidden=move ||!raster.get(),class:map-dark=move ||s.dark.get()&&!s.satellite.get()) {
-                    for tile in move ||if raster.get(){camera.get().map_fallback_tiles(size.get()).into_iter().chain(camera.get().map_tiles(size.get())).collect::<Vec<_>>()}else{Vec::new()},key=|tile|*tile {
+                    for tile in move ||raster_tiles.get(),key=|tile|*tile {
                         box(class="map-tile",style:transform=move ||{let[x,y,scale]=camera.get().place(tile,size.get());Some(format!("translate({x}px, {y}px) scale({scale})"))}) {
                             {zgui::elements::image().class("map-tile-image").src(Signal::derive_local(move ||service.url(tile,provider.get()))).alt(Some("Basemap imagery tile".to_string())).into_view()}
                         }
