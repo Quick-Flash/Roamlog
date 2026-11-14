@@ -8,6 +8,7 @@ use super::{
 use crate::pmtiles::Archive;
 use std::{
     collections::{BTreeMap, HashSet},
+    hash::{Hash, Hasher},
     sync::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
@@ -18,31 +19,38 @@ use zgui::prelude::*;
 #[derive(Clone, PartialEq)]
 pub struct Style {
     pub dark: bool,
+    pub satellite: bool,
     pub layers: Vec<Vec<Polyline>>,
 }
+type SourceKey = Option<(TileId, u64)>;
+type RequestKey = (u64, TileId, SourceKey);
+type Imagery = BTreeMap<TileId, (TileId, Arc<Payload>)>;
 #[derive(Clone, Copy)]
 pub struct Tiles {
     pub ready: StoredValue<BTreeMap<TileId, Arc<Payload>>, LocalStorage>,
-    pending: StoredValue<HashSet<(u64, TileId)>, LocalStorage>,
+    pending: StoredValue<HashSet<RequestKey>, LocalStorage>,
+    sources: StoredValue<BTreeMap<TileId, SourceKey>, LocalStorage>,
     pub revision: RwSignal<u64, LocalStorage>,
     pub error: RwSignal<String, LocalStorage>,
     generation: StoredValue<Arc<AtomicU64>, LocalStorage>,
-    wanted: StoredValue<Arc<Mutex<HashSet<TileId>>>, LocalStorage>,
+    wanted: StoredValue<Arc<Mutex<BTreeMap<TileId, RequestKey>>>, LocalStorage>,
 }
 impl Tiles {
     pub fn new() -> Self {
         Self {
             ready: StoredValue::new_local(BTreeMap::new()),
             pending: StoredValue::new_local(HashSet::new()),
+            sources: StoredValue::new_local(BTreeMap::new()),
             revision: RwSignal::new_local(0),
             error: RwSignal::new_local(String::new()),
             generation: StoredValue::new_local(Arc::new(AtomicU64::new(0))),
-            wanted: StoredValue::new_local(Arc::new(Mutex::new(HashSet::new()))),
+            wanted: StoredValue::new_local(Arc::new(Mutex::new(BTreeMap::new()))),
         }
     }
     pub fn reset(self) {
         self.generation.get_value().fetch_add(1, Ordering::Relaxed);
         self.ready.update_value(BTreeMap::clear);
+        self.sources.update_value(BTreeMap::clear);
         self.error.set(String::new());
         self.revision.update(|n| *n += 1);
     }
@@ -52,45 +60,75 @@ impl Tiles {
         style: Arc<Style>,
         archive: Option<Arc<Archive>>,
         online: bool,
+        imagery: &Imagery,
     ) {
         let generation = self.generation.get_value();
         let version = generation.load(Ordering::Relaxed);
-        let wanted: HashSet<_> = ids.iter().copied().collect();
+        let wanted: BTreeMap<_, _> = ids
+            .iter()
+            .filter_map(|&id| {
+                let source = imagery
+                    .get(&id)
+                    .map(|(id, payload)| (*id, payload.version()));
+                (!style.satellite || source.is_some()).then_some((id, (version, id, source)))
+            })
+            .collect();
         *self.wanted.get_value().lock().unwrap() = wanted.clone();
         self.ready.update_value(|r| {
             if r.len() > 192 {
-                r.retain(|id, _| wanted.contains(id));
+                r.retain(|id, _| wanted.contains_key(id));
             }
         });
-        for &id in ids {
+        self.sources
+            .update_value(|r| r.retain(|id, _| wanted.contains_key(id)));
+        for (id, key) in wanted {
+            let source = key.2;
             if self.ready.with_value(|r| r.contains_key(&id))
-                || self.pending.with_value(|p| p.contains(&(version, id)))
+                && self.sources.with_value(|s| s.get(&id) == Some(&source))
+                || self.pending.with_value(|p| p.contains(&key))
             {
                 continue;
             }
             self.pending.update_value(|p| {
-                p.insert((version, id));
+                p.insert(key);
             });
+            let photo = imagery.get(&id).cloned();
             let (style, archive, generation) = (style.clone(), archive.clone(), generation.clone());
             let wanted = self.wanted.get_value();
             spawn_local(async move {
                 let tile = blocking(move || {
                     if generation.load(Ordering::Relaxed) != version
-                        || !wanted.lock().unwrap().contains(&id)
+                        || wanted.lock().unwrap().get(&id) != Some(&key)
                     {
                         return Err("stale".into());
                     }
-                    render(archive.as_deref(), id, &style, online, version)
+                    let mut hash = std::collections::hash_map::DefaultHasher::new();
+                    key.hash(&mut hash);
+                    render(
+                        archive.as_deref(),
+                        id,
+                        &style,
+                        online,
+                        hash.finish(),
+                        photo.as_ref(),
+                    )
                 })
                 .await;
                 self.pending.update_value(|p| {
-                    p.remove(&(version, id));
+                    p.remove(&key);
                 });
-                if self.generation.get_value().load(Ordering::Relaxed) == version {
+                if self.generation.get_value().load(Ordering::Relaxed) == version
+                    && self.wanted.get_value().lock().unwrap().get(&id) == Some(&key)
+                {
                     match tile {
-                        Ok(tile) => self.ready.update_value(|r| {
-                            r.insert(id, Arc::new(tile));
-                        }),
+                        Ok(tile) => {
+                            self.ready.update_value(|r| {
+                                r.insert(id, Arc::new(tile));
+                            });
+                            self.sources.update_value(|s| {
+                                s.insert(id, source);
+                            });
+                        }
                         Err(error) if error != "stale" => self.error.set(error),
                         Err(_) => {}
                     }
@@ -106,11 +144,55 @@ fn render(
     style: &Style,
     online: bool,
     version: u64,
+    imagery: Option<&(TileId, Arc<Payload>)>,
 ) -> Result<Payload, String> {
     use tiny_skia::{
         LineCap, LineJoin, Paint, PathBuilder, PixmapPaint, Stroke, StrokeDash, Transform,
     };
-    let mut map = basemap::terrain_tile(archive, id, style.dark, Kind::Map, online)?;
+    let dark = style.dark || style.satellite;
+    let mut map = if style.satellite {
+        let (source, payload) = imagery.ok_or("Satellite tile unavailable")?;
+        let Payload::Raster(photo) = payload.as_ref() else {
+            return Err("Invalid satellite tile".into());
+        };
+        let rgba = image::RgbaImage::from_raw(photo.width, photo.height, photo.rgba.clone())
+            .ok_or("Invalid satellite pixels")?;
+        let ratio = 1u32 << (id.z - source.z);
+        let width = photo.width / ratio;
+        let height = photo.height / ratio;
+        if width == 0 || height == 0 {
+            return Err("Satellite fallback too coarse".into());
+        }
+        let crop = image::imageops::crop_imm(
+            &rgba,
+            id.canonical_x() % ratio * width,
+            id.y % ratio * height,
+            width,
+            height,
+        );
+        let pixels = image::imageops::resize(
+            &crop.to_image(),
+            512,
+            512,
+            image::imageops::FilterType::Triangle,
+        )
+        .into_raw();
+        let mut map =
+            tiny_skia::Pixmap::from_vec(pixels, tiny_skia::IntSize::from_wh(512, 512).unwrap())
+                .ok_or("Invalid satellite image")?;
+        let roads = basemap::terrain_tile(archive, id, dark, Kind::Roads, online)?;
+        map.draw_pixmap(
+            0,
+            0,
+            roads.as_ref(),
+            &PixmapPaint::default(),
+            Transform::identity(),
+            None,
+        );
+        map
+    } else {
+        basemap::terrain_tile(archive, id, dark, Kind::Map, online)?
+    };
     let span = WORLD / f64::from(1u32 << id.z);
     let left = -WORLD / 2. + id.x as f64 * span;
     let top = WORLD / 2. - f64::from(id.y) * span;
@@ -173,7 +255,7 @@ fn render(
             }
         }
     }
-    let labels = basemap::terrain_tile(archive, id, style.dark, Kind::Labels, online)?;
+    let labels = basemap::terrain_tile(archive, id, dark, Kind::Labels, online)?;
     map.draw_pixmap(
         0,
         0,
@@ -213,13 +295,16 @@ mod tests {
         };
         let mut style = Style {
             dark: false,
+            satellite: false,
             layers: vec![Vec::new(); 9],
         };
-        let Payload::Raster(light) = render(Some(&archive), id, &style, false, 1).unwrap() else {
+        let Payload::Raster(light) = render(Some(&archive), id, &style, false, 1, None).unwrap()
+        else {
             panic!("Expected raster");
         };
         style.dark = true;
-        let Payload::Raster(dark) = render(Some(&archive), id, &style, false, 2).unwrap() else {
+        let Payload::Raster(dark) = render(Some(&archive), id, &style, false, 2, None).unwrap()
+        else {
             panic!("Expected raster");
         };
         assert_ne!(light.rgba, dark.rgba);
@@ -232,7 +317,8 @@ mod tests {
             min: [a[0], a[1]],
             max: [b[0], b[1]],
         });
-        let Payload::Raster(with_path) = render(Some(&archive), id, &style, false, 3).unwrap()
+        let Payload::Raster(with_path) =
+            render(Some(&archive), id, &style, false, 3, None).unwrap()
         else {
             panic!("Expected raster");
         };
@@ -242,5 +328,74 @@ mod tests {
                 .count()
         };
         assert!(blue(&with_path.rgba) > blue(&dark.rgba) + 200);
+    }
+}
+
+#[cfg(test)]
+mod satellite_tests {
+    use super::*;
+    #[test]
+    fn satellite_crops_parent_and_keeps_photography_same_in_both_themes() {
+        let parent = TileId { z: 2, x: 1, y: 1 };
+        let child = TileId { z: 3, x: 3, y: 2 };
+        let mut rgba = vec![0; 256 * 256 * 4];
+        for y in 0..256 {
+            for x in 0..256 {
+                let color = if x >= 128 && y < 128 {
+                    [180, 40, 20, 255]
+                } else {
+                    [20, 60, 180, 255]
+                };
+                rgba[(y * 256 + x) * 4..(y * 256 + x + 1) * 4].copy_from_slice(&color);
+            }
+        }
+        let photo = (
+            parent,
+            Arc::new(Payload::Raster(Raster {
+                version: 99,
+                encoded: Vec::new(),
+                rgba,
+                width: 256,
+                height: 256,
+            })),
+        );
+        let mut style = Style {
+            dark: false,
+            satellite: true,
+            layers: vec![Vec::new(); 9],
+        };
+        let Payload::Raster(light) = render(None, child, &style, false, 1, Some(&photo)).unwrap()
+        else {
+            panic!("Expected raster");
+        };
+        style.dark = true;
+        let Payload::Raster(dark) = render(None, child, &style, false, 2, Some(&photo)).unwrap()
+        else {
+            panic!("Expected raster");
+        };
+        assert_eq!(light.rgba, dark.rgba);
+        assert!(light.rgba.chunks_exact(4).all(|p| p == [180, 40, 20, 255]));
+        let span = WORLD / f64::from(1u32 << child.z);
+        let left = -WORLD / 2. + child.x as f64 * span;
+        let top = WORLD / 2. - f64::from(child.y) * span;
+        let a = [left + 0.1 * span, top - 0.5 * span];
+        let b = [left + 0.9 * span, top - 0.5 * span];
+        style.layers[0].push(Polyline {
+            points: vec![a, b],
+            min: a,
+            max: b,
+        });
+        let Payload::Raster(overlay) = render(None, child, &style, false, 3, Some(&photo)).unwrap()
+        else {
+            panic!("Expected raster");
+        };
+        assert!(
+            overlay
+                .rgba
+                .chunks_exact(4)
+                .filter(|p| *p == [60, 220, 145, 255])
+                .count()
+                > 200
+        );
     }
 }

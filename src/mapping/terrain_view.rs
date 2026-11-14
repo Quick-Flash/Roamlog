@@ -16,11 +16,11 @@ use zgui_ui::prelude::*;
 pub fn TerrainView(
     service: Service,
     offline: RwSignal<bool, LocalStorage>,
+    orbit: RwSignal<Orbit, LocalStorage>,
     map_style: Signal<Arc<Style>, LocalStorage>,
 ) -> impl IntoView {
     let s = UiState::current();
     let camera = s.camera;
-    let orbit = RwSignal::new_local(Orbit::default());
     let host = NodeRef::new();
     let bounds = host.observe_border_box();
     let size = Memo::new(move |_| {
@@ -49,6 +49,10 @@ pub fn TerrainView(
     });
     let demands = RenderEffect::new(move |_| {
         retry.track();
+        let style = map_style.get();
+        if style.satellite {
+            service.revision.track();
+        }
         let ids = ids.get();
         let mut wanted = BTreeSet::new();
         for id in &ids {
@@ -68,12 +72,38 @@ pub fn TerrainView(
         // Coarse tiles first: show terrain promptly rather than wait for all leaves.
         wanted.sort_by_key(|t| t.z);
         wanted.truncate(192);
-        service.demand_layers(2, &[], &wanted, Provider::OpenStreetMap, !offline.get());
+        service.demand_layers(
+            2,
+            if style.satellite { &wanted } else { &[] },
+            &wanted,
+            Provider::EsriImagery,
+            !offline.get(),
+        );
+        let mut imagery = std::collections::BTreeMap::new();
+        if style.satellite {
+            for &id in &wanted {
+                for z in (id.z.saturating_sub(8)..=id.z).rev() {
+                    let shift = id.z - z;
+                    let parent = TileId {
+                        z,
+                        x: id.x.div_euclid(1i64 << shift),
+                        y: id.y >> shift,
+                    };
+                    if let Some(payload) =
+                        service.payload_untracked(Key::raster_from(parent, Provider::EsriImagery))
+                    {
+                        imagery.insert(id, (parent, payload));
+                        break;
+                    }
+                }
+            }
+        }
         tiles.request(
             &wanted,
-            map_style.get(),
+            style,
             s.basemap.archive.get(),
             !offline.get(),
+            &imagery,
         );
     });
     let producer = Producer::new();

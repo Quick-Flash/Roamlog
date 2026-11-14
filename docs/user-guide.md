@@ -166,10 +166,16 @@ center/zoom remain shared; flat-map bearing is retained independently.
 
 Trips, category filters, traveled-road toggles, area outlines, and labels are
 included in terrain map. Position marker follows terrain height. Area drawing
-returns to 2D for corner editing. 3D uses vector basemap; satellite selection
-remains available when returning to 2D.
+returns to 2D for corner editing. **Layers → Satellite** also works in 3D,
+beneath vector roads, labels, and trip overlays. **Map** restores vector background. Satellite imagery uses same tile
+cache as 2D; Offline reuses cached imagery without requesting new tiles.
 
 Elevation downloads on demand into existing tile cache. **Offline** uses cached
 heights only; vector map downloads do not bundle elevation. Until elevation is
 available, flat preview is labeled. Retry control handles failed tile requests.
 Labels follow map surface, so distant or steeply tilted text gets smaller.
+
+Compass remains visible in both modes, even when north up. Its solid arrow
+points north relative to map view. Tap compass to reset north while retaining
+zoom and 3D tilt. Compass reports map/camera heading, rather than phone magnetic
+bearing or direction of travel.

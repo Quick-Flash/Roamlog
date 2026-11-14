@@ -36,6 +36,14 @@ pub fn MapView() -> impl IntoView {
     let s = UiState::current();
     let camera = s.camera;
     let three_d = RwSignal::new_local(false);
+    let orbit = RwSignal::new_local(super::terrain::Orbit::default());
+    let map_bearing = move || {
+        if three_d.get() {
+            f64::from(orbit.get().bearing).to_radians()
+        } else {
+            s.bearing.get()
+        }
+    };
     let service = Service::new(Config {
         cache: s.directory.get_value().join("maps"),
         local: None,
@@ -402,6 +410,7 @@ pub fn MapView() -> impl IntoView {
         layers.push(missing.lines);
         TerrainStyle {
             dark: s.dark.get(),
+            satellite: s.satellite.get(),
             layers,
         }
     });
@@ -528,7 +537,7 @@ pub fn MapView() -> impl IntoView {
             box(class="map-viewport",node_ref=host,a11y:label="Traveled roads map",on:pointer_down=down,on:pointer_move=moved,
                 on:pointer_up=move |ev|{ev.release_pointer();tapped(ev.id.raw(),[f64::from(ev.position.x.0),f64::from(ev.position.y.0)]);release(ev.id.raw());},on:pointer_cancel=move |ev|{ev.release_pointer();cancel(ev.id.raw());}) {
                 if move ||three_d.get() {
-                    TerrainView(service=service,offline=offline,map_style=Signal::derive_local(move ||std::sync::Arc::new(terrain_style.get())))
+                    TerrainView(service=service,offline=offline,orbit=orbit,map_style=Signal::derive_local(move ||std::sync::Arc::new(terrain_style.get())))
                 }
                 box(class="map-rotor",class:map-hidden=move ||three_d.get(),
                     style:width=move ||Some(format!("{}px",size.get()[0])),style:height=move ||Some(format!("{}px",size.get()[1])),
@@ -579,7 +588,7 @@ pub fn MapView() -> impl IntoView {
                     box(class="gps-dot",style:transform=move ||marker.get().map(|m|format!("translate({}px, {}px)",m.x-8.0,m.y-8.0))) {}
                 }
                 }
-                text(class="attribution") {{move ||if three_d.get(){"Protomaps © OpenStreetMap · Terrain: © Mapterhorn"}else if s.satellite.get(){"Imagery: Esri, Vantor, Earthstar Geographics, GIS User Community · Roads: © OpenStreetMap"}else if vector.get(){"Protomaps © OpenStreetMap"}else{"© OpenStreetMap contributors"}}}
+                text(class="attribution") {{move ||if three_d.get()&&s.satellite.get(){"Imagery: Esri, Vantor, Earthstar Geographics · Roads: © OpenStreetMap · Terrain: © Mapterhorn"}else if three_d.get(){"Protomaps © OpenStreetMap · Terrain: © Mapterhorn"}else if s.satellite.get(){"Imagery: Esri, Vantor, Earthstar Geographics, GIS User Community · Roads: © OpenStreetMap"}else if vector.get(){"Protomaps © OpenStreetMap"}else{"© OpenStreetMap contributors"}}}
             }
             if move ||s.area_drawing.get()||s.area_busy.get()||s.area_stats.with(Option::is_some) {
                 AreaBar()
@@ -604,10 +613,8 @@ pub fn MapView() -> impl IntoView {
             if move ||!s.message.get().is_empty() {
                 text(class="map-message",a11y:role=Role::Status,on:click=move |_|s.message.set(String::new())) {{move ||s.message.get()}}
             }
-            if move ||!three_d.get()&&s.bearing.get()!=0.0 {
-                Button(variant=ButtonVariant::Secondary,class="map-button compass",on:click=move |_|s.bearing.set(0.0),a11y:label="Rotate map north up") {
-                    box(class="compass-needle",style:transform=move ||Some(format!("rotate({}rad)",s.bearing.get()))) {Icon(icon=COMPASS)}
-                }
+            Button(variant=ButtonVariant::Secondary,class="map-button compass",on:click=move |_|{if three_d.get_untracked(){orbit.update(|v|v.bearing=0.0);}else{s.bearing.set(0.0);}},a11y:label=move ||format!("Map heading {:.0} degrees; reset north",(-map_bearing().to_degrees()).rem_euclid(360.0))) {
+                box(class="compass-needle",style:transform=move ||Some(format!("rotate({}rad)",map_bearing()))) {Icon(icon=COMPASS)}
             }
             column(class="map-controls") {
                 Button(variant=ButtonVariant::Secondary,class="map-button terrain-toggle",disabled=Signal::derive_local(move ||s.area_drawing.get()),on:click=move |_|three_d.update(|v|*v = !*v),a11y:label=move ||if three_d.get(){"Switch to 2D map"}else{"Switch to 3D terrain map"}) {{move ||if three_d.get(){"2D"}else{"3D"}}}

@@ -262,6 +262,31 @@ fn terrain_toggle_preserves_flat_camera_and_recorded_history() {
     });
     mounted.mount(&window.dom_handle, window.root, None);
     window.frame();
+    let compass = find(&window, "compass");
+    let label = || {
+        window
+            .dom
+            .tree()
+            .semantics(compass)
+            .and_then(|s| s.label)
+            .unwrap_or_default()
+    };
+    let north = || {
+        window.dispatcher().send_to(
+            compass,
+            EventKind::Click,
+            zgui::vocab::Payload::Pointer(zgui::vocab::PointerEvent::mouse(
+                zgui::geom::Point::new(zgui::geom::CssPx(0.), zgui::geom::CssPx(0.)),
+            )),
+        );
+        window.frame();
+    };
+    assert!(label().contains("331"), "{}", label());
+    north();
+    assert_eq!(s.bearing.get_untracked(), 0.0);
+    assert!(label().contains("0 degrees"), "{}", label());
+    s.bearing.set(0.5);
+    window.frame();
     let toggle = find(&window, "terrain-toggle");
     let click = || {
         window.dispatcher().send_to(
@@ -275,6 +300,24 @@ fn terrain_toggle_preserves_flat_camera_and_recorded_history() {
     };
     click();
     find(&window, "terrain-view");
+    assert!(label().contains("25 degrees"), "{}", label());
+    let input = find(&window, "terrain-input");
+    let pointer = |kind, x, y| {
+        window.dispatcher().send_to(
+            input,
+            kind,
+            zgui::vocab::Payload::Pointer(zgui::vocab::PointerEvent::mouse(
+                zgui::geom::Point::new(zgui::geom::CssPx(x), zgui::geom::CssPx(y)),
+            )),
+        )
+    };
+    pointer(EventKind::PointerDown, 100., 100.);
+    pointer(EventKind::PointerMove, 160., 130.);
+    pointer(EventKind::PointerUp, 160., 130.);
+    window.frame();
+    assert!(label().contains("43 degrees"), "{}", label());
+    north();
+    assert!(label().contains("0 degrees"), "{}", label());
     assert_eq!(s.camera.get_untracked(), camera);
     click();
     assert_eq!(s.camera.get_untracked(), camera);
