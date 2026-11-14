@@ -1,4 +1,6 @@
 mod history;
+mod history_dates;
+mod history_trip;
 pub(crate) mod icons;
 mod recorder;
 pub(crate) mod settings;

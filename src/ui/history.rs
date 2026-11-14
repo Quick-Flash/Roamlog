@@ -1,10 +1,12 @@
+use super::{history_dates::HistoryDatesProps, history_trip::HistoryTripProps};
 use super::{state::UiState, tools::StatsTabProps};
-use crate::model::{Status, TripFilter};
+use crate::model::TripFilter;
+use std::collections::BTreeSet;
 use zgui::prelude::*;
 use zgui_ui::prelude::*;
 
 /// "3 min ago", "5 h ago", "2 d ago": no timezone needed.
-fn age(now_ms: u64, then_ms: u64) -> String {
+pub(super) fn age(now_ms: u64, then_ms: u64) -> String {
     let minutes = now_ms.saturating_sub(then_ms) / 60_000;
     match minutes {
         0..60 => format!("{minutes} min ago"),
@@ -13,7 +15,7 @@ fn age(now_ms: u64, then_ms: u64) -> String {
     }
 }
 
-fn duration(ms: u64) -> String {
+pub(super) fn duration(ms: u64) -> String {
     let minutes = ms / 60_000;
     format!("{}:{:02} h", minutes / 60, minutes % 60)
 }
@@ -50,7 +52,7 @@ fn filter_value(filter: TripFilter) -> String {
         TripFilter::Category {
             category_id: Some(id),
         } => format!("category:{id}"),
-        TripFilter::Trip { trip_id } => format!("trip:{trip_id}"),
+        TripFilter::Trip { .. } | TripFilter::Trips { .. } => "all".into(),
     }
 }
 
@@ -64,16 +66,42 @@ fn parse_filter(value: &str) -> Option<TripFilter> {
             category_id: Some(id),
         })
     } else {
-        value
-            .strip_prefix("trip:")
-            .and_then(|id| id.parse().ok())
-            .map(|trip_id| TripFilter::Trip { trip_id })
+        None
     }
 }
 
 #[component]
 fn TripsTab() -> impl IntoView {
     let s = UiState::current();
+    let browse = RwSignal::new_local(filter_value(s.history_filter.get_untracked()));
+    let selected = RwSignal::new_local(match s.history_filter.get_untracked() {
+        TripFilter::Trip { trip_id } => BTreeSet::from([trip_id]),
+        TripFilter::Trips { trip_ids } => trip_ids.into_iter().collect(),
+        _ => BTreeSet::new(),
+    });
+    let period = RwSignal::new_local("all".to_string());
+    let days = RwSignal::new_local("7".to_string());
+    let range = RwSignal::new_local(None::<DateRange>);
+    let listed = move || {
+        let filter = parse_filter(&browse.get()).unwrap_or_default();
+        s.data.with(|d| {
+            d.trips
+                .iter()
+                .rev()
+                .filter(|t| {
+                    filter.matches(t)
+                        && super::history_dates::matches(
+                            t.started_ms,
+                            s.now.get(),
+                            &period.get(),
+                            &days.get(),
+                            range.get(),
+                        )
+                })
+                .map(|t| t.id)
+                .collect::<Vec<_>>()
+        })
+    };
     let coverage = move || {
         if s.coverage_filter.get() != s.history_filter.get() {
             return "Updating road coverage…".to_string();
@@ -93,56 +121,43 @@ fn TripsTab() -> impl IntoView {
     view! {
         column(class="tab-body") {
             row(class="filter-row") {
-                Select(value=Binding::controlled(
-                    Signal::derive_local(move ||filter_value(s.history_filter.get())),
-                    move |value:String| if let Some(filter)=parse_filter(&value) {s.set_history_filter(filter)}
-                )) {
-                    SelectTrigger(label="Trips shown on map",class="history-filter") {SelectValue()}
+                Select(value=browse) {
+                    SelectTrigger(label="Filter history by category",class="history-filter") {SelectValue()}
                     SelectContent {
                         SelectItem(value="all") {"All trips"}
                         SelectItem(value="uncategorized") {"Uncategorized"}
                         for category in move ||s.data.with(|d|d.categories.clone()),key=|c|c.id {
                             SelectItem(value=format!("category:{}",category.id)) {{category.name}}
                         }
-                        for id in move ||match s.history_filter.get(){TripFilter::Trip {trip_id}=>vec![trip_id],_=>vec![]},key=|id|*id {
-                            SelectItem(value=format!("trip:{id}")) {{format!("Trip #{id}")}}
-                        }
                     }
                 }
-                Button(class="show-history",on:click=move |_|s.show_history()) {"Show on map"}
+                Button(variant=ButtonVariant::Outline,class="select-all-trips",on:click=move |_|selected.update(|ids|ids.extend(listed()))) {"Select all"}
+                Button(variant=ButtonVariant::Ghost,class="clear-trip-selection",on:click=move |_|selected.set(BTreeSet::new())) {"Clear"}
             }
-            text(class="muted") {{move ||format!("{} · {}",s.history_summary(),coverage())}}
+            HistoryDates(period=period,days=days,range=range)
+            text(class="muted") {{move ||format!("{} matching · {} selected",listed().len(),selected.with(BTreeSet::len))}}
+            text(class="muted") {{move ||format!("On map: {} · {}",s.history_summary(),coverage())}}
             scroll(class="sheet-scroll") {
                 column(class="list") {
-                    for id in move ||{let filter=s.history_filter.get();s.data.with(|d|d.trips.iter().rev().filter(|t|filter.matches(t)).map(|t|t.id).collect::<Vec<_>>())},key=|id|*id {
-                        row(class="list-row") {
-                            column(class="list-main",on:click=move |_|s.show_trip(id)) {
-                                row(class="trip-title") {
-                                    text(class="list-title") {{move ||s.data.with(|d|{
-                                        let Some(t)=d.trips.iter().find(|t|t.id==id) else {return String::new()};
-                                        let name=d.categories.iter().find(|c|Some(c.id)==t.category_id).map_or("Uncategorized",|c|c.name.as_str());
-                                        format!("{name} · #{id}")
-                                    })}}
-                                    spacer()
-                                    text(class="muted") {{move ||s.data.with(|d|d.trips.iter().find(|t|t.id==id).map(|t|age(s.now.get(),t.started_ms)).unwrap_or_default())}}
-                                }
-                                text(class="muted") {{move ||s.data.with(|d|d.trips.iter().find(|t|t.id==id).map(|t|{
-                                    let inferred=if t.estimated_distance_m>0.0 {format!(" · {} inferred",s.distance(t.estimated_distance_m))}else{String::new()};
-                                    // First-traveled attribution needs all-trip coverage.
-                                    let new=if s.coverage_filter.get()==TripFilter::All&&t.status==Status::Finished {s.sections.with(|_|format!(" · {} new",s.distance(s.new_roads(id))))}else{String::new()};
-                                    let state=if t.status==Status::Finished {String::new()} else {" · in progress".into()};
-                                    format!("{} · {}{inferred}{new}{state}",s.distance(t.distance_m),duration(t.elapsed_at(s.now.get())))
-                                }).unwrap_or_default())}}
-                            }
-                            if move ||s.data.with(|d|d.trips.iter().any(|t|t.id==id&&t.status==Status::Finished)) {
-                                Button(variant=ButtonVariant::Ghost,class="row-action edit-trip",on:click=move |_|s.edit_trip(id)) {"Edit"}
-                            }
-                        }
+                    for id in move ||listed().into_iter(),key=|id|*id {
+                        HistoryTrip(id=id,selected=selected)
                     }
-                    if move ||{let filter=s.history_filter.get();s.data.with(|d|d.trips_for(filter).next().is_none())} {
-                        text(class="empty") {"No trips in this selection. Trips stay on this device."}
+                    if move ||listed().is_empty() {
+                        text(class="empty") {"No trips match these filters. Trips stay on this device."}
                     }
                 }
+            }
+            row(class="actions") {
+                Button(class="show-history",disabled=Signal::derive_local(move ||selected.with(BTreeSet::is_empty)),on:click=move |_|{
+                    let ids=selected.with_untracked(|ids|ids.iter().copied().collect::<Vec<_>>());
+                    let filter=if ids.len()==1 {TripFilter::Trip {trip_id:ids[0]}} else {TripFilter::Trips {trip_ids:ids}};
+                    s.set_history_filter(filter);
+                    s.show_history();
+                }) {{move ||format!("Show selected ({})",selected.with(BTreeSet::len))}}
+                Button(variant=ButtonVariant::Outline,class="show-all-trips",on:click=move |_|{
+                    s.set_history_filter(TripFilter::All);
+                    s.show_history();
+                }) {"Show all trips"}
             }
         }
     }

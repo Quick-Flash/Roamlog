@@ -123,14 +123,21 @@ fn trip_category_and_all_history_keep_individual_routes_totals_and_coverage() {
     let only = TripFilter::Trip { trip_id: 1 };
     let uncategorized = TripFilter::Category { category_id: None };
     let total = |filter| s.state.trips_for(filter).map(|t| t.distance_m).sum::<f64>();
-    assert_eq!(s.state.trips_for(walking).count(), 2);
+    assert_eq!(s.state.trips_for(walking.clone()).count(), 2);
     assert_eq!(
-        s.state.trips_for(only).map(|t| t.id).collect::<Vec<_>>(),
+        s.state
+            .trips_for(only.clone())
+            .map(|t| t.id)
+            .collect::<Vec<_>>(),
         vec![1]
     );
-    assert!((total(walking) - 2.0 * total(only)).abs() < 0.01);
+    assert!((total(walking.clone()) - 2.0 * total(only.clone())).abs() < 0.01);
     assert!(
-        (total(TripFilter::All) - total(walking) - total(biking) - total(uncategorized)).abs()
+        (total(TripFilter::All)
+            - total(walking.clone())
+            - total(biking.clone())
+            - total(uncategorized.clone()))
+        .abs()
             < 0.01
     );
     let roads: Vec<_> = [("walk", 0.0), ("bike", 0.001), ("other", 0.002)]
@@ -148,6 +155,13 @@ fn trip_category_and_all_history_keep_individual_routes_totals_and_coverage() {
         (walking, vec!["walk"]),
         (biking, vec!["bike"]),
         (only, vec!["walk"]),
+        (
+            TripFilter::Trips {
+                trip_ids: vec![1, 3],
+            },
+            vec!["bike", "walk"],
+        ),
+        (TripFilter::Trips { trip_ids: vec![] }, vec![]),
         (uncategorized, vec!["other"]),
         (TripFilter::All, vec!["bike", "other", "walk"]),
     ] {
@@ -541,4 +555,66 @@ fn trip_edits_and_saved_areas_replay_from_journal() {
     assert_eq!(replay.state.trips.len(), 2);
     assert_eq!(replay.state.areas[0].name, "Home");
     assert_eq!(replay.state.trips[1].points.len(), 5);
+}
+
+#[test]
+fn empty_and_short_trips_can_be_renamed_recategorized_and_deleted_after_reopen() {
+    let (dir, mut s) = store();
+    s.commit(Event::Category {
+        name: "Walking".into(),
+    })
+    .unwrap();
+    for n in 0..3 {
+        let time = n * 10_000;
+        start(&mut s, time, None);
+        for i in 0..n {
+            fix(&mut s, time + i * 1000, 0., i as f64 * 0.0001, 3.);
+        }
+        s.commit(Event::Finish {
+            timestamp_ms: time + 3000,
+        })
+        .unwrap();
+        s.commit(Event::RenameTrip {
+            trip_id: n + 1,
+            name: format!("  Short trip {}  ", n + 1),
+        })
+        .unwrap();
+        s.commit(Event::SetCategory {
+            trip_id: n + 1,
+            category_id: Some(1),
+        })
+        .unwrap();
+    }
+    assert!(
+        s.commit(Event::RenameTrip {
+            trip_id: 1,
+            name: "  ".into()
+        })
+        .is_err()
+    );
+    assert!(
+        s.commit(Event::RenameTrip {
+            trip_id: 99,
+            name: "Missing".into()
+        })
+        .is_err()
+    );
+    drop(s);
+    let mut s = Store::open(dir.path().join("trips.jsonl")).unwrap();
+    for t in &s.state.trips {
+        assert_eq!(t.name, format!("Short trip {}", t.id));
+        assert_eq!(t.category_id, Some(1));
+    }
+    assert!(roamlog::gpx::export(&s.state).contains("Short trip 1"));
+    for trip_id in 1..=3 {
+        s.commit(Event::DeleteTrip { trip_id }).unwrap();
+    }
+    drop(s);
+    assert!(
+        Store::open(dir.path().join("trips.jsonl"))
+            .unwrap()
+            .state
+            .trips
+            .is_empty()
+    );
 }

@@ -326,3 +326,99 @@ fn terrain_toggle_preserves_flat_camera_and_recorded_history() {
     assert!(!directory.path().join("trips.jsonl").exists());
     mounted.unmount(&window.dom_handle);
 }
+
+#[test]
+fn history_selects_multiple_trips_keeps_list_and_edits_empty_trips() {
+    use super::tools::TripEditorDialogProps;
+    let directory = tempfile::tempdir().unwrap();
+    let mut store = Store::open(directory.path().join("test-trips.jsonl")).unwrap();
+    for time in [0, 10_000, 20_000] {
+        store
+            .commit(Event::Start {
+                timestamp_ms: time,
+                category_id: None,
+            })
+            .unwrap();
+        store
+            .commit(Event::Finish {
+                timestamp_ms: time + 1000,
+            })
+            .unwrap();
+    }
+    let window = Window::open();
+    let s = window.scope.with(|| {
+        let s = UiState::new(directory.path().to_path_buf());
+        provide_local_context(s);
+        s.data.set(store.state.clone());
+        s.busy.set(true); // Keep backend I/O separate from component test.
+        s
+    });
+    let mut mounted = window.scope.with(|| {
+        view! {ThemeProvider { Recorder() TripEditorDialog() }}
+            .into_view()
+            .build(&mut window.cx.cx())
+    });
+    mounted.mount(&window.dom_handle, window.root, None);
+    let click = |class: &str| {
+        window.dispatcher().send_to(
+            find(&window, class),
+            EventKind::Click,
+            zgui::vocab::Payload::Pointer(zgui::vocab::PointerEvent::mouse(
+                zgui::geom::Point::new(zgui::geom::CssPx(0.), zgui::geom::CssPx(0.)),
+            )),
+        );
+        window.frame();
+    };
+    s.trips_open.set(true);
+    window.frame();
+    click("select-trip-1");
+    click("select-trip-3");
+    assert!(
+        window
+            .dom
+            .tree()
+            .ui_state(find(&window, "select-trip-1"))
+            .contains(zgui::vocab::UiState::CHECKED)
+    );
+    click("show-history");
+    assert_eq!(
+        s.history_filter.get_untracked(),
+        TripFilter::Trips {
+            trip_ids: vec![1, 3]
+        }
+    );
+    assert!(!s.trips_open.get_untracked());
+    s.trips_open.set(true);
+    window.frame();
+    find(&window, "select-trip-2"); // Map selection never hides other history rows.
+    click("select-trip-3");
+    click("show-history");
+    assert_eq!(
+        s.history_filter.get_untracked(),
+        TripFilter::Trip { trip_id: 1 }
+    );
+    s.trips_open.set(true);
+    window.frame();
+    find(&window, "select-trip-2");
+    assert!(
+        !window
+            .dom
+            .tree()
+            .text_content(find(&window, "history-filter"))
+            .contains("Trip #1")
+    );
+    click("edit-trip-2");
+    assert!(s.edit_open.get_untracked());
+    find(&window, "rename-trip");
+    find(&window, "save-category");
+    find(&window, "delete-trip");
+    click("delete-trip");
+    assert_eq!(s.confirm_delete.get_untracked(), Some(2));
+    assert!(
+        window
+            .dom
+            .tree()
+            .text_content(find(&window, "delete-trip"))
+            .contains("Tap again")
+    );
+}

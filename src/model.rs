@@ -54,6 +54,8 @@ pub struct TrackPoint {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct Trip {
     pub id: u64,
+    #[serde(default)]
+    pub name: String,
     pub category_id: Option<u64>,
     pub started_ms: u64,
     pub finished_ms: Option<u64>,
@@ -74,6 +76,14 @@ pub struct Trip {
 }
 
 impl Trip {
+    pub fn title(&self) -> String {
+        if self.name.is_empty() {
+            format!("Trip #{}", self.id)
+        } else {
+            self.name.clone()
+        }
+    }
+
     pub fn elapsed_at(&self, now_ms: u64) -> u64 {
         self.elapsed_ms.saturating_add(
             self.recording_since_ms
@@ -94,7 +104,7 @@ pub struct State {
 }
 
 /// History selection only; recording category remains independent.
-#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum TripFilter {
     #[default]
@@ -105,14 +115,18 @@ pub enum TripFilter {
     Trip {
         trip_id: u64,
     },
+    Trips {
+        trip_ids: Vec<u64>,
+    },
 }
 
 impl TripFilter {
-    pub fn matches(self, trip: &Trip) -> bool {
+    pub fn matches(&self, trip: &Trip) -> bool {
         match self {
             Self::All => true,
-            Self::Category { category_id } => trip.category_id == category_id,
-            Self::Trip { trip_id } => trip.id == trip_id,
+            Self::Category { category_id } => trip.category_id == *category_id,
+            Self::Trip { trip_id } => trip.id == *trip_id,
+            Self::Trips { trip_ids } => trip_ids.contains(&trip.id),
         }
     }
 }
@@ -207,6 +221,14 @@ impl State {
                     return Err("Area needs 3–200 valid corners".into());
                 }
             }
+            Event::RenameTrip { trip_id, name } => {
+                if !self.trips.iter().any(|t| t.id == *trip_id) {
+                    return Err("Unknown trip".into());
+                }
+                if name.trim().is_empty() || name.len() > 80 {
+                    return Err("Trip name needs 1–80 bytes".into());
+                }
+            }
             Event::SetCategory {
                 trip_id,
                 category_id,
@@ -276,6 +298,7 @@ impl State {
                     self.next_trip
                 },
                 category_id,
+                name: String::new(),
                 started_ms: timestamp_ms,
                 finished_ms: None,
                 status: Status::Recording,
@@ -323,6 +346,11 @@ impl State {
             Event::UpdateArea { area_id, points } => {
                 if let Some(area) = self.areas.iter_mut().find(|a| a.id == area_id) {
                     area.points = points;
+                }
+            }
+            Event::RenameTrip { trip_id, name } => {
+                if let Some(trip) = self.trips.iter_mut().find(|t| t.id == trip_id) {
+                    trip.name = name.trim().to_string();
                 }
             }
             Event::SetCategory {
@@ -491,6 +519,10 @@ pub enum Event {
     UpdateArea {
         area_id: u64,
         points: Vec<Point>,
+    },
+    RenameTrip {
+        trip_id: u64,
+        name: String,
     },
     SetCategory {
         trip_id: u64,

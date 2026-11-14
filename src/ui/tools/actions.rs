@@ -378,6 +378,7 @@ impl UiState {
     }
 
     pub fn edit_trip(self, id: u64) {
+        self.confirm_delete.set(None);
         self.trips_open.set(false);
         self.editing.set(Some(id));
         self.edit_open.set(true);

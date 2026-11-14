@@ -15,8 +15,8 @@ pub fn export(state: &State) -> String {
             .map_or("Uncategorized", |c| c.name.as_str());
         let _ = write!(
             out,
-            "<trk><name>Trip {} · {}</name><type>{}</type>",
-            trip.id,
+            "<trk><name>{} · {}</name><type>{}</type>",
+            escape(&trip.title()),
             escape(category),
             escape(category)
         );

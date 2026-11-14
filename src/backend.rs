@@ -243,7 +243,7 @@ pub(crate) fn request(directory: PathBuf, command: Value) -> Result<Value, Strin
             }
             let (mut sections, mut total, mut traveled) = (None, 0.0, 0.0);
             if map {
-                session.update_coverage(filter);
+                session.update_coverage(filter.clone());
                 // Untraveled sections stay in backend; areas can load thousands of tiles.
                 let mut kept = Vec::new();
                 for section in &session.coverage.sections {
@@ -276,7 +276,7 @@ pub(crate) fn request(directory: PathBuf, command: Value) -> Result<Value, Strin
             let detailed = tiles.len() <= AREA_TILES;
             let history = roads::tiles(&session.store.state, z);
             session.load_tiles(if detailed { tiles.clone() } else { history })?;
-            session.update_coverage(filter);
+            session.update_coverage(filter.clone());
             let mut area = crate::area::Area::new(&points);
             let archive = session.archive.as_ref().ok_or("Offline map missing")?;
             let tiles: Vec<_> = tiles.into_iter().collect();
@@ -296,7 +296,7 @@ pub(crate) fn request(directory: PathBuf, command: Value) -> Result<Value, Strin
             let tiles = roads::bbox_tiles(&[from], NEAREST_M, z, AREA_TILES).unwrap_or_default();
             session.store.catch_up()?;
             session.load_tiles(tiles)?;
-            session.update_coverage(filter);
+            session.update_coverage(filter.clone());
             // Prefer roads never traveled; small holes in ridden roads only as fallback.
             let sections = &session.coverage.sections;
             let ridden: std::collections::HashSet<&str> = sections

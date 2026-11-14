@@ -35,6 +35,18 @@ pub fn TripEditor(id: u64) -> impl IntoView {
             .unwrap_or(0)
             .to_string()
     }));
+    let name = RwSignal::new_local(s.data.with_untracked(|d| {
+        d.trips
+            .iter()
+            .find(|t| t.id == id)
+            .map(|t| t.name.clone())
+            .unwrap_or_default()
+    }));
+    let finished = s.data.with_untracked(|d| {
+        d.trips
+            .iter()
+            .any(|t| t.id == id && t.status == Status::Finished)
+    });
     let start = RwSignal::new_local(0.0);
     let end = RwSignal::new_local(n.saturating_sub(1) as f64);
     let split = RwSignal::new_local((n / 2) as f64);
@@ -62,10 +74,16 @@ pub fn TripEditor(id: u64) -> impl IntoView {
     };
     let max = n.saturating_sub(1) as f64;
     view! {
-        if move ||n<4 {
-            DialogHeader {DialogTitle {{format!("Edit trip #{id}")}} DialogDescription {"Trip too short to edit."}}
-        } else {
-        DialogHeader {DialogTitle {{format!("Edit trip #{id}")}} DialogDescription {"Edits are saved with your trips and included in backups."}}
+        DialogHeader {DialogTitle {{format!("Edit trip #{id}")}} DialogDescription {"Changes stay on this device and are included in backups."}}
+        scroll(class="trip-editor-scroll") {
+        column(class="tab-body") {
+        text {"Name"}
+        row(class="category-row") {
+            Input(value=name,label="Trip name",placeholder="Morning walk…",class="category-select")
+            Button(class="rename-trip",disabled=Signal::derive_local(move ||{let value=name.get();value.trim().is_empty()||value.len()>80}),on:click=move |_|{
+                s.send(json!({"op":"rename_trip","trip_id":id,"name":name.get_untracked()}),"Trip renamed.");
+            }) {"Save"}
+        }
         text {"Category"}
         row(class="category-row") {
             Select(value=category) {
@@ -77,11 +95,12 @@ pub fn TripEditor(id: u64) -> impl IntoView {
                     }
                 }
             }
-            Button(class="save-category",on:click=move |_|{
+            Button(class="save-category",disabled=!finished,on:click=move |_|{
                 let category_id=category.get_untracked().parse::<u64>().ok().filter(|c|*c!=0);
                 s.send(json!({"op":"set_category","trip_id":id,"category_id":category_id}),"Category changed.");
             }) {"Save"}
         }
+        if move ||finished && n>=2 {
         text {"Trim start and end"}
         Slider(value=start,min=0.0,max=max,step=1.0,label="Trim start")
         Slider(value=end,min=0.0,max=max,step=1.0,label="Trim end")
@@ -91,6 +110,8 @@ pub fn TripEditor(id: u64) -> impl IntoView {
             s.edit_open.set(false);
             s.send(json!({"op":"trim_trip","trip_id":id,"start_ms":time(a),"end_ms":time(b)}),"Trip trimmed.");
         }) {"Trim"}
+        }
+        if move ||finished && n>=4 {
         text {"Split into two trips"}
         Slider(value=split,min=0.0,max=max,step=1.0,label="Split point")
         text(class="muted") {{move ||{let i=index(split.get());format!("At {} · {} + {}",clock(time(i)),s.distance(length(0,i.saturating_sub(1))),s.distance(length(i,n-1)))}}}
@@ -100,6 +121,8 @@ pub fn TripEditor(id: u64) -> impl IntoView {
             s.history_filter.set(TripFilter::All);
             s.send(json!({"op":"split_trip","trip_id":id,"at_ms":at}),"Trip split.");
         }) {"Split"}
+        }
+        if move ||finished {
         text(class="section-title") {"Delete"}
         Button(variant=ButtonVariant::Destructive,class="delete-trip wide",on:click=move |_|{
             if s.confirm_delete.get_untracked()==Some(id) {
@@ -109,6 +132,8 @@ pub fn TripEditor(id: u64) -> impl IntoView {
                 s.confirm_delete.set(Some(id));
             }
         }) {{move ||if s.confirm_delete.get()==Some(id){"Tap again to delete trip"}else{"Delete trip"}}}
+        }
+        }
         }
     }
 }

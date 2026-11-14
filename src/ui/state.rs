@@ -189,7 +189,7 @@ impl UiState {
         let directory = self.directory.get_value();
         // History actions close their dialog; refresh must survive that owner disappearing.
         zgui::reactive::spawn_detached(async move {
-            let result = super::snapshot::load(directory, filter, map).await;
+            let result = super::snapshot::load(directory, filter.clone(), map).await;
             match result {
                 Ok(value) => {
                     let state = value.state;
@@ -221,7 +221,7 @@ impl UiState {
                             self.road_totals.set(totals);
                         }
                         if self.coverage_filter.get_untracked() != filter {
-                            self.coverage_filter.set(filter);
+                            self.coverage_filter.set(filter.clone());
                         }
                         if filter == TripFilter::All {
                             self.announce_new_roads();
@@ -530,10 +530,6 @@ impl UiState {
                 .map(|t| t.points.iter().map(|p| p.fix.point).collect::<Vec<_>>())
                 .unwrap_or_default()
         });
-        if points.is_empty() {
-            self.message.set("Trip has no GPS path.".into());
-            return;
-        }
         self.set_history_filter(TripFilter::Trip { trip_id: id });
         self.trips_open.set(false);
         self.fit(points);
@@ -560,7 +556,12 @@ impl UiState {
                 .iter()
                 .find(|c| c.id == id)
                 .map_or_else(|| "Category".into(), |c| c.name.clone()),
-            TripFilter::Trip { trip_id } => format!("Trip #{trip_id}"),
+            TripFilter::Trip { trip_id } => d
+                .trips
+                .iter()
+                .find(|t| t.id == trip_id)
+                .map_or_else(|| format!("Trip #{trip_id}"), |t| t.title()),
+            TripFilter::Trips { trip_ids } => format!("{} selected trips", trip_ids.len()),
         })
     }
 
@@ -592,8 +593,19 @@ impl UiState {
 
     pub fn delete_trip(self, id: u64) {
         self.confirm_delete.set(None);
-        if self.history_filter.get_untracked() == (TripFilter::Trip { trip_id: id }) {
-            self.history_filter.set(TripFilter::All);
+        match self.history_filter.get_untracked() {
+            TripFilter::Trip { trip_id } if trip_id == id => {
+                self.history_filter.set(TripFilter::All)
+            }
+            TripFilter::Trips { mut trip_ids } => {
+                trip_ids.retain(|&trip_id| trip_id != id);
+                self.history_filter.set(if trip_ids.is_empty() {
+                    TripFilter::All
+                } else {
+                    TripFilter::Trips { trip_ids }
+                });
+            }
+            _ => {}
         }
         zgui::reactive::spawn_detached(async move {
             match self.request(json!({"op":"delete_trip","trip_id":id})).await {

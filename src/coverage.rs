@@ -187,7 +187,7 @@ impl Coverage {
 
     pub fn update_filtered(&mut self, state: &State, filter: TripFilter) {
         if self.filter != filter {
-            self.filter = filter;
+            self.filter = filter.clone();
             self.reset();
         }
         let result = &mut self.sections;
