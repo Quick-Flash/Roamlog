@@ -1,0 +1,17 @@
+//! Shared Enlumi map foundations, vendored for standalone builds.
+//! Source: Enlumi; reused here under Apache-2.0 by project owner.
+#[allow(dead_code)]
+#[path = "../../vendor/enlumi/camera.rs"]
+pub mod camera;
+#[allow(dead_code)]
+#[allow(clippy::collapsible_match)] // Shared Enlumi source; keep unrelated style unchanged.
+#[path = "../../vendor/enlumi/tiles.rs"]
+pub mod tiles;
+
+pub mod basemap;
+pub mod download;
+mod gestures;
+mod labels;
+mod overlay_tiles;
+mod style;
+pub mod view;

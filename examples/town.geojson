@@ -1,0 +1,7 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {"type":"Feature","id":"demo/main","properties":{"name":"Demo Main Street"},"geometry":{"type":"LineString","coordinates":[[0,0],[0.002,0]]}},
+    {"type":"Feature","id":"demo/cross","properties":{"name":"Demo Cross Street"},"geometry":{"type":"LineString","coordinates":[[0.001,-0.001],[0.001,0.001]]}}
+  ]
+}

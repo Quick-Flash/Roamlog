@@ -1,0 +1,18 @@
+Roamlog basemap style (src/mapping/style.rs) adapts colors and road widths from
+Organic Maps default light/dark styles (data/styles/default), licensed Apache-2.0:
+https://github.com/organicmaps/organicmaps
+
+Offline map data: Protomaps basemap derived from OpenStreetMap, © OpenStreetMap
+contributors, ODbL 1.0. tests/fixtures/downtown.pmtiles is a small Protomaps extract
+(Portland, OR) used by unit tests.
+
+Camera and tile foundations (vendor/enlumi) originate in Kevin Plaizier’s Enlumi,
+commit 0e299e3be5b27be966fe7d075fbd419483a4753e. Reused here under Apache-2.0
+with project owner’s authorization; see vendor/enlumi/README.md.
+
+Android packaging adapts Zgui’s Apache-2.0 example workflow.
+Copyright 2026 Leonard Seibold. See android/LICENSE-ZGUI.
+Apache-2.0 text accompanies adapted code in LICENSES/Apache-2.0.txt.
+
+Test font tests/fixtures/fonts/NotoSans-Regular.ttf: Noto Sans, The Noto Project
+Authors, SIL Open Font License 1.1. License included in same directory.

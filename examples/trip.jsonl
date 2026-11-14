@@ -1,0 +1,8 @@
+{"op":"category","name":"Walking"}
+{"op":"start","timestamp_ms":0,"category_id":1}
+{"op":"fix","fix":{"lat":0,"lon":0,"accuracy_m":3,"timestamp_ms":1000}}
+{"op":"fix","fix":{"lat":0,"lon":0.00025,"accuracy_m":3,"timestamp_ms":11000}}
+{"op":"fix","fix":{"lat":0,"lon":0.0005,"accuracy_m":3,"timestamp_ms":21000}}
+{"op":"fix","fix":{"lat":0,"lon":0.00075,"accuracy_m":3,"timestamp_ms":31000}}
+{"op":"fix","fix":{"lat":0,"lon":0.001,"accuracy_m":3,"timestamp_ms":41000}}
+{"op":"finish","timestamp_ms":42000}

@@ -1,0 +1,18 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="dev.traveler" android:versionCode="1" android:versionName="0.1.0">
+  <uses-sdk android:minSdkVersion="26" android:targetSdkVersion="35" />
+  <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+  <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
+  <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+  <uses-permission android:name="android.permission.INTERNET" />
+  <uses-feature android:name="android.hardware.location.gps" android:required="false" />
+  <application android:label="Roamlog" android:icon="@mipmap/ic_launcher" android:roundIcon="@mipmap/ic_launcher" android:allowBackup="false" android:hasCode="true" android:theme="@android:style/Theme.Material.Light.NoActionBar" android:extractNativeLibs="false">
+    <activity android:name="dev.zgui.android.ZguiActivity" android:exported="true" android:launchMode="singleTop" android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation|uiMode|density|fontScale|locale|layoutDirection">
+      <meta-data android:name="android.app.lib_name" android:value="roamlog" />
+      <intent-filter><action android:name="android.intent.action.MAIN" /><category android:name="android.intent.category.LAUNCHER" /></intent-filter>
+    </activity>
+    <service android:name="dev.zgui.android.ZguiService" android:exported="false" android:foregroundServiceType="location" android:stopWithTask="false" android:process=":recorder" />
+    <receiver android:name="dev.zgui.android.ZguiReceiver" android:exported="false" android:process=":recorder" />
+  </application>
+</manifest>

@@ -1,0 +1,8 @@
+/target
+/.private/
+*.keystore
+*.jks
+.env
+.env.*
+*.apk
+*.aab

@@ -1,0 +1,50 @@
+[package]
+name = "roamlog"
+version = "0.1.0"
+edition = "2024"
+authors = ["Kevin Plaizier"]
+description = "Local-first trip recording and traveled-road history for Android"
+license = "Apache-2.0"
+readme = "README.md"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+flate2 = "1.1"
+libc = "0.2"
+zgui = { git = "https://github.com/Quick-Flash/zgui", rev = "5c13633b92375f72089ac736c339c6c307a33da1", optional = true }
+zgui-ui = { git = "https://github.com/Quick-Flash/zgui", rev = "5c13633b92375f72089ac736c339c6c307a33da1", optional = true }
+zgui-ui-tokens = { git = "https://github.com/Quick-Flash/zgui", rev = "5c13633b92375f72089ac736c339c6c307a33da1", optional = true }
+zgui-ui-icons = { git = "https://github.com/Quick-Flash/zgui", rev = "5c13633b92375f72089ac736c339c6c307a33da1", optional = true }
+zgui-image = { git = "https://github.com/Quick-Flash/zgui", rev = "5c13633b92375f72089ac736c339c6c307a33da1", optional = true }
+plot = { package = "zgui-plot", git = "https://github.com/Quick-Flash/zgui-plot", rev = "40757c406d0384a36434a8baf0fd3fad512b33ed", optional = true }
+kurbo = { version = "0.13.1", optional = true }
+image = { version = "0.25.10", default-features = false, features = ["png", "webp", "jpeg"], optional = true }
+ureq = { version = "3.4.2", default-features = false, features = ["rustls"], optional = true }
+async-channel = { version = "2.5", optional = true }
+tiny-skia = { version = "0.11", optional = true }
+ab_glyph = { version = "0.2", optional = true }
+png = { version = "0.17", optional = true }
+tempfile = "3"
+
+[features]
+default = ["ui"]
+ui = ["dep:zgui", "dep:zgui-ui", "dep:zgui-ui-tokens", "dep:zgui-ui-icons", "dep:zgui-image", "dep:plot", "dep:kurbo", "dep:image", "dep:ureq", "dep:async-channel", "dep:tiny-skia", "dep:ab_glyph", "dep:png"]
+
+[lib]
+crate-type = ["rlib", "cdylib"]
+
+[patch.crates-io]
+fontique = { git = "https://github.com/Quick-Flash/zgui", rev = "5c13633b92375f72089ac736c339c6c307a33da1" }
+accesskit_android = { git = "https://github.com/Quick-Flash/zgui", rev = "5c13633b92375f72089ac736c339c6c307a33da1" }
+
+[patch."https://github.com/zortax/zgui"]
+zgui = { git = "https://github.com/Quick-Flash/zgui", rev = "5c13633b92375f72089ac736c339c6c307a33da1" }
+zgui-ui = { git = "https://github.com/Quick-Flash/zgui", rev = "5c13633b92375f72089ac736c339c6c307a33da1" }
+
+[dev-dependencies]
+zgui-testkit-view = { git = "https://github.com/Quick-Flash/zgui", rev = "5c13633b92375f72089ac736c339c6c307a33da1" }
+
+[[example]]
+name = "demo_data"
+required-features = ["ui"]
