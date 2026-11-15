@@ -486,13 +486,8 @@ fn recorder(event: background::Event) {
             settle(&directory);
         }
         Event::ServiceFailed { action, error } if action == "sharing" => {
-            // Typically after reboot: Android refuses background location service start.
-            let _ = notification::post(&notification::Notification {
-                id: 2,
-                title: "Roamlog".into(),
-                text: "Location sharing paused. Open Roamlog to resume.".into(),
-                ..Default::default()
-            });
+            // After reboot or process death: Android refuses background location start.
+            post_paused();
             status(&directory, &error);
         }
         Event::ServiceFailed { error, .. } => {
@@ -510,8 +505,35 @@ fn recorder(event: background::Event) {
         Event::Boot if sharing::mode(&directory) != Mode::Off => {
             let _ = background::start_service("sharing", "", &sharing_notification());
         }
+        // Watchdog: Android does not restart a killed service; alarm survives the process.
+        Event::Alarm { id } if id == WATCHDOG => {
+            if sharing::mode(&directory) == Mode::Off {
+                return;
+            }
+            if sharing::node_running() {
+                schedule_watchdog();
+            } else if background::start_service("sharing", "", &sharing_notification()).is_err() {
+                post_paused();
+            }
+        }
         _ => {}
     }
+}
+
+const WATCHDOG: i32 = 7;
+
+fn schedule_watchdog() {
+    let at = SystemTime::now() + Duration::from_secs(15 * 60);
+    let _ = background::schedule_alarm(WATCHDOG, at);
+}
+
+fn post_paused() {
+    let _ = notification::post(&notification::Notification {
+        id: 2,
+        title: "Roamlog".into(),
+        text: "Location sharing paused. Open Roamlog to resume.".into(),
+        ..Default::default()
+    });
 }
 
 /// Matches service to recording and sharing mode: runs node, sharing GPS and notification,
@@ -526,6 +548,11 @@ fn settle(directory: &Path) {
             false
         }
     };
+    if running {
+        schedule_watchdog();
+    } else {
+        let _ = background::cancel_alarm(WATCHDOG);
+    }
     if recording {
         // Trip GPS feeds sharing; separate watch would duplicate GPS work.
         SHARE_GPS.lock().expect("sharing lock").take();

@@ -52,7 +52,8 @@ Open **Friends** on map.
 - UI process reads `sharing/friend-locations.json`, written by the service.
   Pairing runs in UI process; service endpoint pauses during pairing.
 - App launch restarts sharing service if mode is not Off (after force-stop or
-  refused start at boot).
+  refused start at boot). A 15-minute watchdog alarm retries after Android kills
+  the service; if Android refuses, it posts "Location sharing paused".
 
 ## Limits
 

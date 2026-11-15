@@ -15,8 +15,11 @@ Reboot (Moto, Android 14): boot event arrives ~1 min after unlock; Android refus
 background location service start, Roamlog posts "Location sharing paused", and
 opening app resumes sharing.
 
-Not yet done: 8-hour stationary and 2-hour driving battery tests, OS process-kill
-recovery, notification "Pause sharing" tap on device (Android files ongoing silent
+Process kill (Moto, debuggable build): Android does not restart killed service
+(START_NOT_STICKY). Added 15-minute watchdog alarm that restarts sharing or posts
+"Location sharing paused"; watchdog firing after kill not yet observed on device.
+
+Not yet done: 8-hour stationary and 2-hour driving battery tests, notification "Pause sharing" tap on device (Android files ongoing silent
 notification in collapsed shelf), external security review.
 Path measured (Friends list shows it): direct on same Wi-Fi, Wi-Fi↔LTE, and LTE↔LTE.
 Identity reset added (Friends → Reset sharing identity); device test pending.
