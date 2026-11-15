@@ -64,8 +64,10 @@ aligns APK for 16 KiB pages, signs it, and verifies signature. `debug` also work
 ## Signing and updates
 
 Both build profiles use development signing by default. Key lives at
-`target/android/debug.keystore`. Preserve key outside disposable build output;
-`cargo clean` removes default key. Set `ROAMLOG_KEYSTORE` to retained key and
+`.private/signing/roamlog.keystore`, outside disposable build output. First build
+retains old `target/android/debug.keystore` when present; `cargo clean` no longer
+removes default signing identity. Back up private key securely. Set
+`ROAMLOG_KEYSTORE` to another existing retained key and
 `ROAMLOG_KEYSTORE_PASSWORD` to its password. Script expects alias
 `androiddebugkey`; CI can use same retained key through encrypted Actions secrets.
 Never commit signing keys or passwords.

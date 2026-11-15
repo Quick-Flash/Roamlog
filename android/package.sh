@@ -91,7 +91,13 @@ PY
 mkdir -p "$target_dir/$profile/apk"
 output="$target_dir/$profile/apk/$name.apk"
 "$build_tools/zipalign" -f -P 16 4 "$work/roamlog.apk" "$output"
-keystore="${ROAMLOG_KEYSTORE:-$target_dir/android/debug.keystore}"
+keystore="${ROAMLOG_KEYSTORE:-$PWD/.private/signing/roamlog.keystore}"
+# Preserve development installs created before durable signing storage.
+if [[ -z "${ROAMLOG_KEYSTORE:-}" && ! -f "$keystore" && -f "$target_dir/android/debug.keystore" ]]; then
+    mkdir -p "$(dirname "$keystore")"
+    cp "$target_dir/android/debug.keystore" "$keystore"
+    chmod 600 "$keystore"
+fi
 export ROAMLOG_KEYSTORE_PASSWORD="${ROAMLOG_KEYSTORE_PASSWORD:-android}"
 if [[ ! -f "$keystore" ]]; then
     if [[ -n "${ROAMLOG_KEYSTORE:-}" ]]; then
@@ -99,7 +105,7 @@ if [[ ! -f "$keystore" ]]; then
         exit 1
     fi
     mkdir -p "$(dirname "$keystore")"
-    keytool -genkeypair -keystore "$keystore" -storepass:env ROAMLOG_KEYSTORE_PASSWORD -keypass:env ROAMLOG_KEYSTORE_PASSWORD -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 10000 -dname 'CN=Android Debug,O=Android,C=US'
+    (umask 077; keytool -genkeypair -keystore "$keystore" -storepass:env ROAMLOG_KEYSTORE_PASSWORD -keypass:env ROAMLOG_KEYSTORE_PASSWORD -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 10000 -dname 'CN=Android Debug,O=Android,C=US')
 fi
 "$build_tools/apksigner" sign --ks "$keystore" --ks-pass env:ROAMLOG_KEYSTORE_PASSWORD "$output"
 "$build_tools/apksigner" verify "$output"
