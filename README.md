@@ -19,13 +19,14 @@ distance; shared road history shows where you have been across all trips.
 Screenshots show synthetic Portland, Oregon demo trips, captured on Android.
 
 - Record, pause, resume, and finish individual trips with GPS foreground service.
-- View one trip, category, or all paths together; compare trip and lifetime totals.
+- Select multiple trips, filter by category/date, rename trips, and compare totals.
 - Toggle GPS paths and traveled roads independently. Line widths and dashes
   distinguish overlays without relying only on color.
 - Download offline vector maps; optionally use online satellite imagery.
 - Switch to optional 3D terrain with vector map, road coverage, and GPS paths.
 - Draw areas to measure road coverage and find nearby untraveled roads.
 - Switch light/dark appearance independently of system theme.
+- Check GitHub APK updates in app; download and install after finishing trip.
 - Back up/restore local journal and export GPX. No account or trip upload service.
 
 ## Build and run
@@ -57,7 +58,8 @@ no sibling source checkouts are needed. See [build guide](docs/building.md),
 
 Trips live in private app storage as append-only `trips.jsonl`. Offline maps and
 tile caches are local. Online maps reveal viewed regions to their providers;
-**Offline** stops map requests and uses downloaded/cached data.
+**Offline** stops map requests and uses downloaded/cached data. Update checks
+contact GitHub separately; disable automatic checks in Settings when desired.
 
 Existing Android IDs remain `dev.traveler` and `dev.traveler.demo`; desktop data
 stays under `~/.local/share/traveler`. Updates preserve history when installed

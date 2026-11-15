@@ -15,6 +15,7 @@ pub fn android_main(app: zgui::app::AndroidApp) {
     if ENTERED.swap(true, Ordering::SeqCst) {
         std::process::exit(0);
     }
+    crate::android_updates::init(&app);
     let directory = app.internal_data_path().expect("Android internal storage");
     default_units(&directory, app.config().country().as_deref());
     crate::ui::run_android(app, directory);

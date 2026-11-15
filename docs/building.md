@@ -5,7 +5,7 @@
 Developed on Linux with Rust nightly (rustc 1.96.0-nightly). Install Rust with
 rustup, a C/C++ linker, pkg-config, Fontconfig development headers, and Vulkan
 runtime/driver. On Debian/Ubuntu, development packages include
-`build-essential pkg-config libfontconfig1-dev`. No Gradle or sibling checkouts
+`build-essential pkg-config libfontconfig1-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-dev libxcb1-dev libxcursor-dev libxi-dev libxrandr-dev`. No Gradle or sibling checkouts
 are required. First build fetches pinned Cargo dependencies.
 
 ```bash
@@ -65,7 +65,7 @@ Both build profiles use development signing by default. Key lives at
 `target/android/debug.keystore`. Preserve key outside disposable build output;
 `cargo clean` removes default key. Set `ROAMLOG_KEYSTORE` to retained key and
 `ROAMLOG_KEYSTORE_PASSWORD` to its password. Script expects alias
-`androiddebugkey`; this workflow is for development APKs, not store publishing.
+`androiddebugkey`; CI can use same retained key through encrypted Actions secrets.
 Never commit signing keys or passwords.
 
 Install with `adb install -r` using same signing key and package ID to retain
@@ -104,3 +104,46 @@ adb exec-out screencap -p > demo.png
 ```
 
 Review captures for private information before adding to documentation.
+
+## Automatic GitHub APK releases
+
+Pushes to default branch run `cargo xtask verify`, then build signed main/demo
+ARM64 APKs and publish a complete `nightly-<versionCode>-<run>-<attempt>` prerelease.
+Pull requests run checks only. Failed checks/builds never publish a release.
+Old prereleases remain available. A draft becomes visible only after both APKs
+and `SHA256SUMS` upload successfully.
+
+Repository Actions secrets:
+
+- `ANDROID_KEYSTORE_BASE64`: base64 encoding of existing signing keystore.
+- `ANDROID_KEYSTORE_PASSWORD`: keystore password.
+
+Keep same private key used for installed apps. Default alias is `androiddebugkey`.
+Never generate a replacement key to repair a CI failure. Preserve private key
+outside `target/` and back it up securely; `.private/signing/` is ignored locally.
+Anyone able to read key can sign trusted app updates. Secrets never belong in Git.
+
+APK version code defaults to `1000 + git rev-list --count HEAD`. CI fetches full
+history. Keep default branch history append-only; rewriting/shallow history can
+reduce version code. Source archives without Git history default to code 1.
+Override `ROAMLOG_VERSION_CODE` and `ROAMLOG_VERSION_NAME` for packaging when
+needed; Android rejects downgrades. Both main/demo use same release version.
+
+## In-app Android updates
+
+Settings → App updates checks published GitHub prereleases. Automatic checks run
+on launch and every six hours while app runs; switch them off in Settings to stop
+automatic requests. Checks contact GitHub, exposing IP address, not trip data.
+Offline map toggle controls map requests; update checks have their own switch.
+
+App chooses highest newer version with matching main/demo asset and SHA-256
+digest. Download runs only on tap. Partial/corrupt downloads cannot be installed.
+Installer bridge rejects wrong package, non-newer APK, or mismatched signing
+certificate. Android performs final package/signature verification and asks for
+installation confirmation. Allow “Install unknown apps” for Roamlog when asked,
+then tap Install again. Recording or paused trip blocks installation; finish trip
+first. APK replacement preserves private trip storage; never uninstall to update.
+
+Host, GPS service, permissions, and file provider still come from Zgui. Small
+`android/src/dev/roamlog/android/Updates.java` bridge handles APK-specific metadata,
+certificate checks, install-source permission, and installer handoff. No Gradle.

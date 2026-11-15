@@ -22,3 +22,9 @@ pub mod ui;
 
 #[cfg(all(target_os = "android", feature = "ui"))]
 mod android;
+
+#[cfg(all(target_os = "android", feature = "ui"))]
+mod android_updates;
+
+#[cfg(feature = "ui")]
+mod updates;

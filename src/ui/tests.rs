@@ -422,3 +422,55 @@ fn history_selects_multiple_trips_keeps_list_and_edits_empty_trips() {
             .contains("Tap again")
     );
 }
+
+#[test]
+fn update_install_stays_disabled_until_recording_or_paused_trip_finishes() {
+    use super::update_controls::UpdateControlsProps;
+    let directory = tempfile::tempdir().unwrap();
+    let window = Window::open();
+    let s = window.scope.with(|| {
+        let s = UiState::new(directory.path().to_path_buf());
+        provide_local_context(s);
+        s
+    });
+    s.updates.available.set(Some(crate::updates::Update {
+        code: 1009,
+        tag: "nightly-1009-1-1".into(),
+        notes: String::new(),
+        url: String::new(),
+        digest: String::new(),
+        size: 1,
+    }));
+    s.updates
+        .ready
+        .set(Some(directory.path().join("update.apk")));
+    let mut mounted = window.scope.with(|| {
+        view! {ThemeProvider {UpdateControls()}}
+            .into_view()
+            .build(&mut window.cx.cx())
+    });
+    mounted.mount(&window.dom_handle, window.root, None);
+    window.frame();
+    let disabled = || {
+        window
+            .dom
+            .tree()
+            .ui_state(find(&window, "install-update"))
+            .contains(zgui::vocab::UiState::DISABLED)
+    };
+    assert!(!disabled());
+    let mut store = Store::open(directory.path().join("test-trips.jsonl")).unwrap();
+    for event in [
+        Event::Start {
+            timestamp_ms: 0,
+            category_id: None,
+        },
+        Event::Pause { timestamp_ms: 1000 },
+        Event::Finish { timestamp_ms: 2000 },
+    ] {
+        store.commit(event).unwrap();
+        s.data.set(store.state.clone());
+        window.frame();
+        assert_eq!(disabled(), store.state.active().is_some());
+    }
+}

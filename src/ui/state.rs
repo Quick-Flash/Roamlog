@@ -20,6 +20,7 @@ use zgui::prelude::*;
 
 #[derive(Clone, Copy)]
 pub struct UiState {
+    pub updates: super::update_state::Updater,
     pub directory: StoredValue<PathBuf, LocalStorage>,
     pub data: RwSignal<State, LocalStorage>,
     pub sections: RwSignal<Vec<Section>, LocalStorage>,
@@ -113,6 +114,7 @@ impl UiState {
             std::fs::read_to_string(directory.join("show-roads")).map_or(true, |v| v != "off");
         let heatmap = std::fs::read_to_string(directory.join("heatmap")).is_ok_and(|v| v == "on");
         Self {
+            updates: super::update_state::Updater::new(&directory),
             basemap: Basemap::new(directory.join("basemap.pmtiles")),
             directory: StoredValue::new_local(directory),
             data: RwSignal::new_local(State::default()),

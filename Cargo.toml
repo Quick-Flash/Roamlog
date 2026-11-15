@@ -30,11 +30,12 @@ async-channel = { version = "2.5", optional = true }
 tiny-skia = { version = "0.11", optional = true }
 ab_glyph = { version = "0.2", optional = true }
 png = { version = "0.17", optional = true }
+sha2 = { version = "0.10.9", optional = true }
 tempfile = "3"
 
 [features]
 default = ["ui"]
-ui = ["dep:zgui", "dep:zgui-ui", "dep:zgui-ui-tokens", "dep:zgui-ui-icons", "dep:zgui-image", "dep:plot", "dep:kurbo", "dep:image", "dep:ureq", "dep:async-channel", "dep:tiny-skia", "dep:ab_glyph", "dep:png"]
+ui = ["dep:zgui", "dep:zgui-ui", "dep:zgui-ui-tokens", "dep:zgui-ui-icons", "dep:zgui-image", "dep:plot", "dep:kurbo", "dep:image", "dep:ureq", "dep:async-channel", "dep:tiny-skia", "dep:ab_glyph", "dep:png", "dep:sha2"]
 
 [lib]
 crate-type = ["rlib", "cdylib"]
@@ -53,3 +54,6 @@ zgui-testkit-view = { git = "https://github.com/Quick-Flash/zgui", rev = "5c1363
 [[example]]
 name = "demo_data"
 required-features = ["ui"]
+
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.22.4"

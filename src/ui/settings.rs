@@ -1,5 +1,5 @@
 //! App settings: appearance, units, offline map, data (backup, restore, GPX).
-use super::state::UiState;
+use super::{state::UiState, update_controls::UpdateControlsProps};
 use zgui::prelude::*;
 use zgui_ui::prelude::*;
 
@@ -44,6 +44,7 @@ pub fn Settings() -> impl IntoView {
                             Button(variant=ButtonVariant::Outline,on:click=move |_|{s.settings_open.set(false);s.import_basemap()}) {"Import file"}
                             Button(class="download-map",disabled=Signal::derive_local(move ||!s.plan_ready.get()),on:click=move |_|s.start_download()) {"Download"}
                         }
+                        if move ||cfg!(target_os="android") {UpdateControls()}
                         text(class="section-title") {"Data"}
                         text(class="muted") {"Backup holds every trip, category, edit and saved area. Restore replaces them; current data is kept aside. GPX exports trips for other apps."}
                         row(class="actions") {

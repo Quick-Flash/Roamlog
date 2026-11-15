@@ -7,12 +7,16 @@ pub(crate) mod settings;
 mod snapshot;
 pub(crate) mod state;
 pub(crate) mod tools;
+mod update_controls;
+mod update_notice;
+mod update_state;
 pub(crate) mod view_options;
 
 use crate::mapping::view::MapViewProps;
 use recorder::RecorderProps;
 use state::{UiState, now_ms};
 use std::{path::PathBuf, time::Duration};
+use update_notice::UpdateNoticeProps;
 use zgui::prelude::*;
 use zgui_ui_tokens::prelude::*;
 
@@ -20,10 +24,12 @@ use zgui_ui_tokens::prelude::*;
 pub fn Roamlog() -> impl IntoView {
     let s = UiState::current();
     let tick = StoredValue::new_local(0_u64);
+    s.updates.tick(now_ms());
     s.refresh(true);
     s.reload_basemap();
     let timer = set_interval(Duration::from_secs(1), move || {
         s.now.set(now_ms());
+        s.updates.tick(now_ms());
         tick.update_value(|t| *t += 1);
         s.refresh(tick.get_value().is_multiple_of(5));
         s.download_status();
@@ -41,6 +47,7 @@ pub fn Roamlog() -> impl IntoView {
         ThemeProvider(light=Signal::stored_local(light_theme()),dark=Signal::stored_local(dark_theme()),scheme=Signal::derive_local(move ||if s.dark.get(){ColorScheme::Dark}else{ColorScheme::Light})) {
             column(class="roamlog") {
                 MapView()
+                UpdateNotice()
                 Recorder()
             }
         }
