@@ -1,0 +1,8 @@
+#!/bin/sh
+set -eu
+cargo xtask pre-commit
+# Never silently stage formatter changes or commit a different tracked source tree.
+if ! git diff --quiet --; then
+    echo "Commit stopped: tracked files differ from index. Review and stage changes, then retry." >&2
+    exit 1
+fi

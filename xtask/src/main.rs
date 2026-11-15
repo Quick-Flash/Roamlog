@@ -14,7 +14,9 @@ const HELP: &str = "Roamlog build tasks
   cargo xtask test --no-default-features  Run tracking core tests without UI
   cargo xtask check                   Check desktop app
   cargo xtask fmt [--check]           Format workspace, or check formatting
-  cargo xtask verify                  Formatting, core/UI tests, Clippy
+  cargo xtask verify                  Check formatting, core/UI tests, Clippy
+  cargo xtask pre-commit              Format, then run all checks
+  cargo xtask install-hooks           Enable repository Git pre-commit hook
   cargo xtask android [--release] [--demo]  Build signed ARM64 APK (default: debug)
 
 Build/run/test/check forward remaining arguments to Cargo.
@@ -76,6 +78,15 @@ fn dispatch(task: &str, args: &[String]) -> Result<(), String> {
                 ],
                 &[],
             )
+        }
+        "pre-commit" if args.is_empty() => {
+            cargo(&["fmt", "--all"], &[])?;
+            dispatch("verify", &[])
+        }
+        "install-hooks" if args.is_empty() => {
+            let mut command = Command::new("git");
+            command.args(["config", "--local", "core.hooksPath", ".githooks"]);
+            execute(command)
         }
         "android" => {
             let (release, demo) = android_options(args)?;
@@ -142,6 +153,7 @@ fn menu() -> Result<(), String> {
         ("Build desktop (release)", "build", vec!["--release".into()]),
         ("Run tests", "test", vec![]),
         ("Run all checks", "verify", vec![]),
+        ("Format and check before commit", "pre-commit", vec![]),
         (
             "Build Android (release)",
             "android",

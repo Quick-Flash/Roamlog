@@ -15,7 +15,9 @@ cargo xtask build --release  # Optimized desktop build
 cargo xtask test             # Workspace tests
 cargo xtask check            # Fast compile check
 cargo xtask fmt              # Format all workspace code
-cargo xtask verify           # Formatting, core/UI tests, Clippy (same as CI)
+cargo xtask verify           # Check formatting, core/UI tests, Clippy (same as CI)
+cargo xtask pre-commit       # Apply formatting, then run verify
+cargo xtask install-hooks    # Once per clone: enforce checks before commits
 ```
 
 Headless command-line recorder uses same journal/tracking core:

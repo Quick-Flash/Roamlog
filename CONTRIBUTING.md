@@ -5,8 +5,14 @@ belong in Zgui framework. Preserve source fixes and append-only journal format.
 Do not change package IDs or signing keys during ordinary app updates.
 
 ```bash
-cargo xtask verify
+cargo xtask install-hooks  # Once per clone
+cargo xtask pre-commit     # Format, then check formatting, core/UI tests, Clippy
 ```
+
+Hook runs same checks before each commit and blocks failures. Formatter changes
+are never staged automatically: review/stage them, then retry commit. Tracked
+working files must match index so checks cover committed source. CI runs
+`cargo xtask verify` without rewriting files.
 
 For Android changes, build APK and verify demo launch, light/dark appearance,
 trip filters, and recording lifecycle. Preserve existing device history.
