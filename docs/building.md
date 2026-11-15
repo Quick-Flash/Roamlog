@@ -2,7 +2,9 @@
 
 ## Desktop
 
-Developed on Linux with Rust nightly (rustc 1.96.0-nightly). Install Rust with
+Developed on Linux with pinned Rust nightly-2026-03-27 (rustc 1.96.0-nightly).
+`rust-toolchain.toml` selects tested compiler and formatting/lint tools automatically;
+CI uses same version. Install Rust with
 rustup, a C/C++ linker, pkg-config, Fontconfig development headers, and Vulkan
 runtime/driver. On Debian/Ubuntu, development packages include
 `build-essential pkg-config libfontconfig1-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-dev libxcb1-dev libxcursor-dev libxi-dev libxrandr-dev`. No Gradle or sibling checkouts
