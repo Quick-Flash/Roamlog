@@ -136,3 +136,16 @@
 /* Sheets scroll vertically only; wide content must never let them drag sideways. */
 .sheet-scroll, .trips-scroll, .area-scroll, .trip-editor-scroll { overflow-x: hidden; overflow-y: auto; }
 .sheet-scroll > *, .trips-scroll > *, .area-scroll > *, .trip-editor-scroll > * { max-width: 100%; min-width: 0; }
+
+/* Friend locations: green live, gray when stale or disconnected. */
+.friend-marker { position: absolute; left: 0; top: 0; flex-direction: row; align-items: center; gap: 4px; pointer-events: none; }
+.friend-dot { width: 16px; height: 16px; box-sizing: border-box; border-radius: 50%; background: #16a34a; border: 2.5px solid #ffffff; }
+.friend-label { padding: 2px 6px; border-radius: 8px; background: var(--zui-color-card); color: var(--zui-color-card-foreground); font-size: 11px; white-space: nowrap; }
+.friend-stale .friend-dot { background: #8a8f98; }
+.friend-stale .friend-label { color: var(--zui-color-muted-foreground); }
+.friend-row { gap: 6px; padding: 10px 0; border-top: 1px solid var(--zui-color-border); }
+.friend-name { font-weight: 600; }
+.qr-frame { align-self: center; padding: 8px; background: #ffffff; border-radius: 8px; }
+.qr-image { width: 280px; height: 280px; }
+.pair-name { font-weight: 600; font-size: 16px; }
+.pair-code { font-size: 26px; font-weight: 700; letter-spacing: 2px; align-self: center; }

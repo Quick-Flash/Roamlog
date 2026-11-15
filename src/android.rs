@@ -2,6 +2,7 @@
 //! and the trip recorder, which runs in the `:recorder` service process so trips continue after
 //! the activity closes.
 use crate::backend::request;
+use crate::sharing::{android_app as sharing, manager::Mode};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -15,6 +16,7 @@ pub fn android_main(app: zgui::app::AndroidApp) {
     if ENTERED.swap(true, Ordering::SeqCst) {
         std::process::exit(0);
     }
+    sharing::install_vm(app.vm_as_ptr());
     crate::android_updates::init(&app);
     let directory = app.internal_data_path().expect("Android internal storage");
     default_units(&directory, app.config().country().as_deref());
@@ -48,13 +50,30 @@ fn status(directory: &Path, message: &str) {
     );
 }
 
-fn trip_notification(text: &str) -> notification::Notification {
+fn trip_notification(directory: &Path, text: &str) -> notification::Notification {
+    let mut actions = vec![("finish".into(), "Finish trip".into())];
+    if sharing::mode(directory) != Mode::Off {
+        actions.push(("pause_sharing".into(), "Pause sharing".into()));
+    }
     notification::Notification {
         id: 1,
         title: "Roamlog".into(),
         text: text.into(),
         ongoing: true,
-        actions: vec![("finish".into(), "Finish trip".into())],
+        actions,
+        ..Default::default()
+    }
+}
+
+/// Foreground notification while sharing runs without a trip. Same id as trip notification:
+/// one service, one notification.
+fn sharing_notification() -> notification::Notification {
+    notification::Notification {
+        id: 1,
+        title: "Roamlog".into(),
+        text: "Location sharing on".into(),
+        ongoing: true,
+        actions: vec![("pause_sharing".into(), "Pause sharing".into())],
         ..Default::default()
     }
 }
@@ -116,7 +135,11 @@ pub(crate) fn record(directory: PathBuf, op: &str, category_id: u64) -> Result<(
     let op = op.to_owned();
     if demo(&directory) {
         // Simulated GPS: no location permission, no device GPS.
-        return background::start_service(&op, &payload, &trip_notification("Demo GPS"));
+        return background::start_service(
+            &op,
+            &payload,
+            &trip_notification(&directory, "Demo GPS"),
+        );
     }
     permission::request(
         &[permission::FINE_LOCATION, permission::COARSE_LOCATION],
@@ -134,8 +157,11 @@ pub(crate) fn record(directory: PathBuf, op: &str, category_id: u64) -> Result<(
             }
             let begin = move || {
                 status(&directory, "");
-                let started =
-                    background::start_service(&op, &payload, &trip_notification("Waiting for GPS"));
+                let started = background::start_service(
+                    &op,
+                    &payload,
+                    &trip_notification(&directory, "Waiting for GPS"),
+                );
                 if let Err(error) = started {
                     status(&directory, &error);
                 }
@@ -313,6 +339,113 @@ pub(crate) fn restore(directory: PathBuf) -> Result<(), String> {
     })
 }
 
+/// Starts or stops the sharing node after the UI changed mode, friends or permissions.
+/// Sharing needs location permission: the service shares fixes and is a location service.
+pub(crate) fn sharing_changed(directory: PathBuf) -> Result<(), String> {
+    if sharing::mode(&directory) == Mode::Off {
+        return background::send_service("sharing", "");
+    }
+    permission::request(
+        &[permission::FINE_LOCATION, permission::COARSE_LOCATION],
+        move |granted| {
+            if !granted {
+                status(&directory, "Location permission needed to share location.");
+                return;
+            }
+            let begin = move || {
+                if let Err(error) =
+                    background::start_service("sharing", "", &sharing_notification())
+                {
+                    status(&directory, &error);
+                }
+            };
+            if permission::granted(permission::NOTIFICATIONS) {
+                begin();
+            } else {
+                let _ = permission::request(&[permission::NOTIFICATIONS], move |_| begin());
+            }
+        },
+    )
+}
+
+/// App launch: restarts sharing after force-stop, process death, or refused boot start.
+pub(crate) fn resume_sharing(directory: PathBuf) {
+    if sharing::mode(&directory) != Mode::Off {
+        let _ = notification::cancel(2);
+        if let Err(error) = sharing_changed(directory.clone()) {
+            status(&directory, &error);
+        }
+    }
+}
+
+/// Wakes the running node after friends or permissions changed in this process.
+pub(crate) fn nudge_sharing(directory: &Path) {
+    if sharing::mode(directory) != Mode::Off {
+        let _ = background::send_service("sharing", "");
+    }
+}
+
+/// Invitation link from an opened `roamlog://pair/` link or a scanned image, for the UI.
+pub(crate) static PENDING_INVITE: Mutex<Option<String>> = Mutex::new(None);
+
+/// Camera apps open scanned invitation links with Roamlog through the manifest filter.
+pub(crate) fn listen_invites() {
+    zgui::app::android::intent::on_intent(|intent| {
+        if let Some(link) = intent
+            .data
+            .or(intent.text)
+            .filter(|l| l.starts_with("roamlog://pair/"))
+        {
+            *PENDING_INVITE.lock().expect("invite lock") = Some(link);
+        }
+    });
+}
+
+/// Decodes invitation QR from a picked photo or screenshot.
+pub(crate) fn scan_invite(directory: PathBuf) -> Result<(), String> {
+    document::open("image/*", move |picked| {
+        let doc = match picked {
+            Ok(Some(doc)) => doc,
+            Ok(None) => return,
+            Err(error) => return status(&directory, &format!("Could not open image: {error}")),
+        };
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let read = std::io::Read::read_to_end(
+                &mut std::io::Read::take(doc.file, 32 * 1024 * 1024),
+                &mut bytes,
+            );
+            match read
+                .map_err(|e| e.to_string())
+                .and_then(|_| sharing::decode_qr_image(&bytes).map_err(|e| e.to_string()))
+            {
+                Ok(link) => *PENDING_INVITE.lock().expect("invite lock") = Some(link),
+                Err(_) => status(&directory, "No Roamlog invitation found in image"),
+            }
+        });
+    })
+}
+
+pub(crate) fn share_text(text: &str) {
+    zgui::app::android::share(text);
+}
+
+/// New sharing identity. Service drops old key before UI deletes it.
+pub(crate) fn reset_identity(directory: &Path) -> Result<(), String> {
+    let _ = background::send_service("identity_reset", "");
+    // Mode file goes with identity; service sees Off and stops node on its own too.
+    sharing::reset_identity(directory).map_err(|e| e.to_string())?;
+    let _ = background::send_service("identity_reset", "");
+    Ok(())
+}
+
+/// Pairing runs its own endpoint with the same identity; close the service's one meanwhile.
+pub(crate) fn suspend_sharing(directory: &Path) {
+    if sharing::mode(directory) != Mode::Off {
+        let _ = background::send_service("sharing_suspend", "");
+    }
+}
+
 pub(crate) fn open_settings() -> Result<(), String> {
     system::open_settings(system::Settings::App)
 }
@@ -322,6 +455,8 @@ pub(crate) fn open_settings() -> Result<(), String> {
 /// GPS watch while recording.
 static GPS: Mutex<Option<Watch>> = Mutex::new(None);
 static GPS_WAITING: AtomicBool = AtomicBool::new(false);
+/// Sharing-only GPS watch and its interval, while sharing Always without a trip.
+static SHARE_GPS: Mutex<Option<(Watch, Duration)>> = Mutex::new(None);
 
 fn recorder(event: background::Event) {
     use background::Event;
@@ -329,19 +464,169 @@ fn recorder(event: background::Event) {
         return;
     };
     match event {
+        Event::Service { action, .. } if action == "sharing" => settle(&directory),
+        Event::Service { action, .. } if action == "identity_reset" => {
+            SHARE_GPS.lock().expect("sharing lock").take();
+            sharing::stop_node();
+            sharing::forget_identity();
+            settle(&directory);
+        }
+        Event::Service { action, .. } if action == "sharing_suspend" => {
+            SHARE_GPS.lock().expect("sharing lock").take();
+            sharing::stop_node();
+        }
         Event::Service { action, payload } => command(directory, &action, &payload),
         Event::Action { action, .. } if action == "finish" => command(directory, "finish", "{}"),
+        Event::Action { action, .. } if action == "pause_sharing" => {
+            // Blocks on Keystore and file lock; receiver runs this on a worker thread.
+            let paused = sharing::manager(&directory).and_then(|m| m.set_mode(Mode::Off));
+            if paused.is_err() {
+                status(&directory, "Could not pause sharing");
+            }
+            settle(&directory);
+        }
+        Event::ServiceFailed { action, error } if action == "sharing" => {
+            // Typically after reboot: Android refuses background location service start.
+            let _ = notification::post(&notification::Notification {
+                id: 2,
+                title: "Roamlog".into(),
+                text: "Location sharing paused. Open Roamlog to resume.".into(),
+                ..Default::default()
+            });
+            status(&directory, &error);
+        }
         Event::ServiceFailed { error, .. } => {
             status(&directory, &error);
             let _ = request(directory, json!({"op": "interrupt"}));
         }
         Event::ServiceStopped => {
+            SHARE_GPS.lock().expect("sharing lock").take();
+            sharing::stop_node();
             let recording = GPS.lock().expect("recorder lock").take().is_some();
             if recording {
                 let _ = request(directory, json!({"op": "interrupt"}));
             }
         }
+        Event::Boot if sharing::mode(&directory) != Mode::Off => {
+            let _ = background::start_service("sharing", "", &sharing_notification());
+        }
         _ => {}
+    }
+}
+
+/// Matches service to recording and sharing mode: runs node, sharing GPS and notification,
+/// or stops the service when neither trip nor sharing needs it.
+fn settle(directory: &Path) {
+    let recording = GPS.lock().expect("recorder lock").is_some();
+    sharing::set_recording(recording);
+    let running = match sharing::sync_node(directory) {
+        Ok(running) => running,
+        Err(error) => {
+            status(directory, &format!("Location sharing unavailable: {error}"));
+            false
+        }
+    };
+    if recording {
+        // Trip GPS feeds sharing; separate watch would duplicate GPS work.
+        SHARE_GPS.lock().expect("sharing lock").take();
+        return;
+    }
+    if !running {
+        SHARE_GPS.lock().expect("sharing lock").take();
+        let _ = background::stop_service();
+        return;
+    }
+    let _ = notification::post(&sharing_notification());
+    if sharing::mode(directory) == Mode::Always {
+        if SHARE_GPS.lock().expect("sharing lock").is_none() {
+            share_gps(directory.to_owned(), Duration::from_secs(30));
+        }
+    } else {
+        SHARE_GPS.lock().expect("sharing lock").take();
+    }
+}
+
+/// Adaptive interval: slow when stationary, user's update interval while moving.
+fn share_interval(directory: &Path, speed: Option<f32>) -> Duration {
+    let moving = Duration::from_millis(
+        sharing::policy(directory)
+            .minimum_interval_ms
+            .clamp(1000, 600_000) as u64,
+    );
+    match speed {
+        Some(speed) if speed >= 5.0 => moving,
+        Some(speed) if speed >= 0.5 => moving.max(Duration::from_secs(30)),
+        _ => Duration::from_secs(300),
+    }
+}
+
+fn share_gps(directory: PathBuf, interval: Duration) {
+    {
+        let mut current = SHARE_GPS.lock().expect("sharing lock");
+        if current.as_ref().is_some_and(|(_, i)| *i == interval) {
+            return;
+        }
+        current.take();
+    }
+    let watched = directory.clone();
+    let request = location::Request {
+        source: location::Source::Any,
+        interval,
+        last_known: false,
+    };
+    // Watch created outside lock: its callback takes the same lock.
+    match watch(&directory, request, move |update| {
+        share_fix(&watched, update)
+    }) {
+        Ok(gps) => *SHARE_GPS.lock().expect("sharing lock") = Some((gps, interval)),
+        Err(error) => status(&directory, &format!("Sharing GPS unavailable: {error}")),
+    }
+}
+
+fn share_fix(directory: &Path, update: location::Update) {
+    let fix = match update {
+        location::Update::Fix(fix) => fix,
+        location::Update::Disabled(_)
+            if !location::enabled(location::Source::Gps)
+                && !location::enabled(location::Source::Network) =>
+        {
+            return sharing::clear_fix();
+        }
+        _ => return,
+    };
+    let Some(accuracy) = fix.accuracy_m else {
+        return;
+    };
+    if fix.age > Duration::from_secs(120) {
+        return;
+    }
+    sharing::fix(
+        crate::model::Fix {
+            point: crate::geo::Point {
+                lat: fix.lat,
+                lon: fix.lon,
+            },
+            timestamp_ms: fix.time_ms,
+            accuracy_m: f64::from(accuracy),
+        },
+        fix.speed.map(f64::from),
+        fix.bearing.map(f64::from),
+        false,
+    );
+    let interval = share_interval(directory, fix.speed);
+    let changed = SHARE_GPS
+        .lock()
+        .expect("sharing lock")
+        .as_ref()
+        .is_some_and(|(_, current)| *current != interval);
+    if changed {
+        // Replace watch outside its own callback.
+        let directory = directory.to_owned();
+        std::thread::spawn(move || {
+            if SHARE_GPS.lock().expect("sharing lock").is_some() {
+                share_gps(directory, interval);
+            }
+        });
     }
 }
 
@@ -361,10 +646,13 @@ fn command(directory: PathBuf, op: &str, payload: &str) {
         return fail(&directory, &error);
     }
     if !matches!(op, "start" | "resume") {
-        let _ = background::stop_service();
+        settle(&directory);
         return;
     }
-    let _ = notification::post(&trip_notification("Recording · waiting for GPS"));
+    let _ = notification::post(&trip_notification(
+        &directory,
+        "Recording · waiting for GPS",
+    ));
     let watch_directory = directory.clone();
     let gps = watch(
         &directory,
@@ -376,7 +664,10 @@ fn command(directory: PathBuf, op: &str, payload: &str) {
         move |update| fix(&watch_directory, update),
     );
     match gps {
-        Ok(gps) => *GPS.lock().expect("recorder lock") = Some(gps),
+        Ok(gps) => {
+            *GPS.lock().expect("recorder lock") = Some(gps);
+            settle(&directory);
+        }
         Err(error) => interrupt(&directory, &error),
     }
 }
@@ -402,6 +693,19 @@ fn fix(directory: &Path, update: location::Update) {
     if accuracy <= 30.0 && GPS_WAITING.swap(false, Ordering::Relaxed) {
         status(directory, "");
     }
+    sharing::fix(
+        crate::model::Fix {
+            point: crate::geo::Point {
+                lat: fix.lat,
+                lon: fix.lon,
+            },
+            timestamp_ms: fix.time_ms,
+            accuracy_m: f64::from(accuracy),
+        },
+        fix.speed.map(f64::from),
+        fix.bearing.map(f64::from),
+        true,
+    );
     let event = json!({"op": "fix", "fix": {"lat": fix.lat, "lon": fix.lon,
         "accuracy_m": accuracy, "timestamp_ms": fix.time_ms}});
     match request(directory.to_owned(), event) {
@@ -424,18 +728,21 @@ fn fix(directory: &Path, update: location::Update) {
             } else {
                 ""
             };
-            let _ = notification::post(&trip_notification(&format!("{distance}{gps}{estimated}")));
+            let _ = notification::post(&trip_notification(
+                directory,
+                &format!("{distance}{gps}{estimated}"),
+            ));
         }
         Err(error) => fail(directory, &error),
     }
 }
 
-/// Ends recording after an error and stops the service.
+/// Ends recording after an error; service stops unless sharing still needs it.
 fn fail(directory: &Path, error: &str) {
     status(directory, error);
     GPS.lock().expect("recorder lock").take();
     let _ = request(directory.to_owned(), json!({"op": "interrupt"}));
-    let _ = background::stop_service();
+    settle(directory);
 }
 
 /// Pauses trip after permission or location-watch failure.

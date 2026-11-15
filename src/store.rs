@@ -124,6 +124,39 @@ impl Store {
         result
     }
 
+    /// Commits events together with one sync; nothing is written unless all validate.
+    pub fn commit_all(&mut self, events: Vec<Event>) -> Result<(), String> {
+        if self.failed {
+            return Err("Storage failed; reopen before recording".into());
+        }
+        self.reopen_if_replaced()?;
+        crate::flock::lock(&self.journal)?;
+        let result = (|| {
+            self.catch_up()?;
+            let mut state = self.state.clone();
+            let mut bytes = Vec::new();
+            for event in events {
+                state.validate(&event)?;
+                bytes.extend(serde_json::to_vec(&event).map_err(|e| e.to_string())?);
+                bytes.push(b'\n');
+                state.apply(event);
+            }
+            if let Err(e) = self
+                .journal
+                .write_all(&bytes)
+                .and_then(|_| self.journal.sync_data())
+            {
+                self.failed = true;
+                return Err(format!("Could not save trip: {e}"));
+            }
+            self.applied += bytes.len() as u64;
+            self.state = state;
+            Ok(())
+        })();
+        crate::flock::unlock(&self.journal);
+        result
+    }
+
     fn commit_locked(&mut self, event: Event) -> Result<(), String> {
         self.catch_up()?;
         self.state.validate(&event)?;

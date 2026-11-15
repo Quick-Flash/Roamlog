@@ -18,6 +18,17 @@ use std::{
 };
 use zgui::prelude::*;
 
+/// Friend position received by the sharing service.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FriendMarker {
+    pub name: String,
+    pub point: Point,
+    pub accuracy_m: f64,
+    pub timestamp_ms: i64,
+    /// Connected and friend currently shares.
+    pub live: bool,
+}
+
 #[derive(Clone, Copy)]
 pub struct UiState {
     pub updates: super::update_state::Updater,
@@ -92,6 +103,16 @@ pub struct UiState {
     pub edit_open: RwSignal<bool, LocalStorage>,
     /// Trips finished since last coverage refresh; announced with their new roads.
     pub(super) announce: StoredValue<Vec<u64>, LocalStorage>,
+    pub friends_open: RwSignal<bool, LocalStorage>,
+    /// Friend overlay, separate from trip layers. Saved in `show-friends` file.
+    pub show_friends: RwSignal<bool, LocalStorage>,
+    pub friend_markers: RwSignal<Vec<FriendMarker>, LocalStorage>,
+    /// Invitation link opened from camera, link or image, awaiting user action.
+    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+    pub invite_link: RwSignal<String, LocalStorage>,
+    /// Friend (peer ID, name) whose trips are being viewed.
+    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+    pub friend_trips: RwSignal<Option<(String, String)>, LocalStorage>,
 }
 
 pub fn now_ms() -> u64 {
@@ -113,6 +134,8 @@ impl UiState {
         let show_roads =
             std::fs::read_to_string(directory.join("show-roads")).map_or(true, |v| v != "off");
         let heatmap = std::fs::read_to_string(directory.join("heatmap")).is_ok_and(|v| v == "on");
+        let show_friends =
+            std::fs::read_to_string(directory.join("show-friends")).map_or(true, |v| v != "off");
         Self {
             updates: super::update_state::Updater::new(&directory),
             basemap: Basemap::new(directory.join("basemap.pmtiles")),
@@ -166,6 +189,11 @@ impl UiState {
             editing: RwSignal::new_local(None),
             edit_open: RwSignal::new_local(false),
             announce: StoredValue::new_local(Vec::new()),
+            friends_open: RwSignal::new_local(false),
+            show_friends: RwSignal::new_local(show_friends),
+            friend_markers: RwSignal::new_local(Vec::new()),
+            invite_link: RwSignal::new_local(String::new()),
+            friend_trips: RwSignal::new_local(None),
         }
     }
 
@@ -475,6 +503,56 @@ impl UiState {
     pub fn set_show_gps(self, visible: bool) {
         self.show_gps.set(visible);
         self.save_preference("show-gps", if visible { "on" } else { "off" });
+    }
+
+    pub fn set_show_friends(self, visible: bool) {
+        self.show_friends.set(visible);
+        self.save_preference("show-friends", if visible { "on" } else { "off" });
+    }
+
+    /// Reads friend positions the sharing service published, and opened invitations.
+    pub fn refresh_friends(self) {
+        #[cfg(target_os = "android")]
+        {
+            if let Some(link) = crate::android::PENDING_INVITE
+                .lock()
+                .ok()
+                .and_then(|mut l| l.take())
+            {
+                self.invite_link.set(link);
+                self.friends_open.set(true);
+            }
+            let directory = self.directory.get_value();
+            zgui::reactive::spawn_detached(async move {
+                let markers = blocking(move || {
+                    let published = crate::sharing::node::read_published(&directory);
+                    let now = now_ms() as i64;
+                    let fresh =
+                        now - published.updated_ms <= crate::sharing::node::HEARTBEAT_MS * 2;
+                    published
+                        .friends
+                        .into_iter()
+                        .filter_map(|f| {
+                            let l = f.location?;
+                            Some(FriendMarker {
+                                name: f.name,
+                                point: Point {
+                                    lat: f64::from(l.latitude_e7) / 1e7,
+                                    lon: f64::from(l.longitude_e7) / 1e7,
+                                },
+                                accuracy_m: f64::from(l.accuracy_cm) / 100.0,
+                                timestamp_ms: l.timestamp_ms,
+                                live: fresh && f.connected && f.sharing_active,
+                            })
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .await;
+                if self.friend_markers.with_untracked(|m| m != &markers) {
+                    self.friend_markers.set(markers);
+                }
+            });
+        }
     }
 
     pub fn set_heatmap(self, on: bool) {

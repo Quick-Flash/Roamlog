@@ -365,6 +365,33 @@ pub fn MapView() -> impl IntoView {
             cover,
         })
     });
+    // Friend markers: name, screen position, label, live. Separate overlay from trips.
+    let friend_marks = Memo::new(move |_| {
+        if !s.show_friends.get() {
+            return Vec::new();
+        }
+        let camera = camera.get();
+        let [w, h] = size.get();
+        let now = s.now.get() as i64;
+        s.friend_markers.with(|markers| {
+            markers
+                .iter()
+                .filter_map(|f| {
+                    let xy = project(f.point.lon, f.point.lat)?;
+                    let x = (xy[0] - camera.center[0]) * camera.scale() + w / 2.0;
+                    let y = h / 2.0 - (xy[1] - camera.center[1]) * camera.scale();
+                    let age = (now - f.timestamp_ms).max(0) / 1000;
+                    let when = match age {
+                        0..60 => "now".to_owned(),
+                        60..3600 => format!("{} min ago", age / 60),
+                        _ => format!("{} h ago", age / 3600),
+                    };
+                    let live = f.live && age < 900;
+                    Some((f.name.clone(), x, y, format!("{} · {when}", f.name), live))
+                })
+                .collect::<Vec<_>>()
+        })
+    });
     // Projection depends on history, not camera. Keep pan frames to affine placement
     // and clipping instead of projecting thousands of GPS/road coordinates again.
     // Layers: traveled by trips on road (1, 2, 3–4, 5+), GPS, inferred, area outline,
@@ -577,6 +604,12 @@ pub fn MapView() -> impl IntoView {
                 for corner in move ||corners.get(),key=|c|(c.0.to_bits(),c.1.to_bits()) {
                     box(class="area-corner",style:transform=format!("translate({}px, {}px)",corner.0-9.0,corner.1-9.0)) {}
                 }
+                for friend in move ||friend_marks.get(),key=|f|(f.0.clone(),f.1.to_bits(),f.2.to_bits(),f.3.clone(),f.4) {
+                    box(class="friend-marker",class:friend-stale=!friend.4,style:transform=format!("translate({}px, {}px)",friend.1-8.0,friend.2-8.0)) {
+                        box(class="friend-dot") {}
+                        text(class="friend-label") {{friend.3.clone()}}
+                    }
+                }
                 if move ||marker.get().is_some() {
                     box(class="gps-dot",style:transform=move ||marker.get().map(|m|format!("translate({}px, {}px)",m.x-8.0,m.y-8.0))) {}
                 }
@@ -595,6 +628,9 @@ pub fn MapView() -> impl IntoView {
             row(class="map-top") {
                 ViewOptions()
                 AreasSheet()
+                if move ||cfg!(target_os="android") {
+                    Button(variant=ButtonVariant::Secondary,class="map-chip friends-chip",on:click=move |_|s.friends_open.set(true)) {"Friends"}
+                }
                 if move ||three_d.get()||raster.get()||outside.get() {
                     Button(variant=ButtonVariant::Secondary,class="map-chip",on:click=move |_|offline.update(|v| *v = !*v)) {{move ||if offline.get(){"Offline"}else{"Online"}}}
                 }

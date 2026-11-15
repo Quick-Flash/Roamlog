@@ -7,14 +7,18 @@
   <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
   <uses-permission android:name="android.permission.INTERNET" />
   <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+  <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
   <uses-feature android:name="android.hardware.location.gps" android:required="false" />
   <application android:label="Roamlog" android:icon="@mipmap/ic_launcher" android:roundIcon="@mipmap/ic_launcher" android:allowBackup="false" android:hasCode="true" android:theme="@android:style/Theme.Material.Light.NoActionBar" android:extractNativeLibs="false">
     <activity android:name="dev.zgui.android.ZguiActivity" android:exported="true" android:launchMode="singleTop" android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation|uiMode|density|fontScale|locale|layoutDirection">
       <meta-data android:name="android.app.lib_name" android:value="roamlog" />
       <intent-filter><action android:name="android.intent.action.MAIN" /><category android:name="android.intent.category.LAUNCHER" /></intent-filter>
+      <intent-filter><action android:name="android.intent.action.VIEW" /><category android:name="android.intent.category.DEFAULT" /><category android:name="android.intent.category.BROWSABLE" /><data android:scheme="roamlog" android:host="pair" /></intent-filter>
     </activity>
     <provider android:name="dev.zgui.android.ZguiFiles" android:authorities="dev.traveler.zgui.files" android:exported="false" android:grantUriPermissions="true" />
     <service android:name="dev.zgui.android.ZguiService" android:exported="false" android:foregroundServiceType="location" android:stopWithTask="false" android:process=":recorder" />
-    <receiver android:name="dev.zgui.android.ZguiReceiver" android:exported="false" android:process=":recorder" />
+    <receiver android:name="dev.zgui.android.ZguiReceiver" android:exported="false" android:process=":recorder">
+      <intent-filter><action android:name="android.intent.action.BOOT_COMPLETED" /></intent-filter>
+    </receiver>
   </application>
 </manifest>

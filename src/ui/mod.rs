@@ -1,3 +1,5 @@
+#[cfg(target_os = "android")]
+mod friends;
 mod history;
 mod history_dates;
 mod history_trip;
@@ -34,7 +36,13 @@ pub fn Roamlog() -> impl IntoView {
         s.refresh(tick.get_value().is_multiple_of(5));
         s.download_status();
         s.start_position();
+        s.refresh_friends();
     });
+    #[cfg(target_os = "android")]
+    {
+        crate::android::listen_invites();
+        crate::android::resume_sharing(s.directory.get_value());
+    }
     on_cleanup_local(move || drop(timer));
     #[cfg(target_os = "android")]
     {
@@ -49,9 +57,19 @@ pub fn Roamlog() -> impl IntoView {
                 MapView()
                 UpdateNotice()
                 Recorder()
+                FriendsSheet()
             }
         }
     }
+}
+
+/// Location sharing exists on Android only.
+#[component]
+fn FriendsSheet() -> impl IntoView {
+    #[cfg(target_os = "android")]
+    return friends::sheet();
+    #[cfg(not(target_os = "android"))]
+    view! {box {}}
 }
 
 /// Night map: cool slate surfaces matching dark basemap; blue for actions and selection,

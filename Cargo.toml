@@ -32,9 +32,17 @@ ab_glyph = { version = "0.2", optional = true }
 png = { version = "0.17", optional = true }
 sha2 = { version = "0.10.9", optional = true }
 tempfile = "3"
+iroh = { version = "1.4.1", default-features = false, features = ["tls-ring"], optional = true }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"], optional = true }
+base64 = { version = "0.22", optional = true }
+qrcodegen = { version = "1.8", optional = true }
+quircs = { version = "0.10", optional = true }
+subtle = { version = "2.6", optional = true }
+postcard = { version = "1.1", default-features = false, features = ["alloc"], optional = true }
 
 [features]
 default = ["ui"]
+sharing = ["dep:iroh", "dep:tokio", "dep:base64", "dep:qrcodegen", "dep:quircs", "dep:subtle", "dep:postcard"]
 ui = ["dep:zgui", "dep:zgui-ui", "dep:zgui-ui-tokens", "dep:zgui-ui-icons", "dep:zgui-image", "dep:plot", "dep:kurbo", "dep:image", "dep:ureq", "dep:async-channel", "dep:tiny-skia", "dep:ab_glyph", "dep:png", "dep:sha2"]
 
 [lib]
@@ -50,6 +58,10 @@ zgui-ui = { git = "https://github.com/Quick-Flash/zgui", rev = "8b27698b2288ec3a
 
 [dev-dependencies]
 zgui-testkit-view = { git = "https://github.com/Quick-Flash/zgui", rev = "8b27698b2288ec3a78fbfd659d87ce3a99b86a09" }
+
+[[example]]
+name = "sharing_probe"
+required-features = ["sharing"]
 
 [[example]]
 name = "demo_data"

@@ -19,7 +19,7 @@ export AR_aarch64_linux_android="$ndk_tools/llvm-ar"
 export CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS="${CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS:-} -C link-arg=-Wl,-z,max-page-size=16384"
 args=()
 if [[ "$profile" == release ]]; then args+=(--release); fi
-cargo build --locked --package roamlog --lib --target aarch64-linux-android "${args[@]}"
+cargo build --locked --package roamlog --lib --features sharing --target aarch64-linux-android "${args[@]}"
 target_dir="$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
@@ -71,10 +71,10 @@ mkdir -p "$work/lib/arm64-v8a" "$work/res/drawable-nodpi"
 cp -R android/res/. "$work/res/"
 # Package original artwork unchanged; adaptive drawable supplies mask-safe padding.
 cp assets/logo.png "$work/res/drawable-nodpi/roamlog_logo.png"
-# Keep prebuilt Zgui host; merge only APK verification/installer glue.
+# Keep prebuilt Zgui host; merge Roamlog platform bridges.
 zgui_dex="$(cargo metadata --format-version 1 | python3 -c 'import json,os,sys; m=json.load(sys.stdin); print(next(os.path.join(os.path.dirname(p["manifest_path"]), "android", "zgui.dex") for p in m["packages"] if p["name"] == "zgui-platform-winit"))')"
 mkdir -p "$work/java" "$work/dex"
-javac --release 11 -cp "$android_jar" -d "$work/java" android/src/dev/roamlog/android/Updates.java
+javac --release 11 -cp "$android_jar" -d "$work/java" android/src/dev/roamlog/android/*.java
 jar cf "$work/updates.jar" -C "$work/java" .
 "$build_tools/d8" --lib "$android_jar" --min-api 26 --output "$work/dex" "$zgui_dex" "$work/updates.jar"
 cp "$work/dex/classes.dex" "$work/classes.dex"

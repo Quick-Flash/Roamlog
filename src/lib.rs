@@ -12,7 +12,10 @@ pub mod roads;
 mod spatial;
 pub mod store;
 
-#[cfg(any(feature = "ui", target_os = "android", test))]
+#[cfg(feature = "sharing")]
+pub mod sharing;
+
+#[cfg(any(feature = "ui", test))]
 mod backend;
 
 #[cfg(feature = "ui")]
@@ -22,6 +25,8 @@ pub mod ui;
 
 #[cfg(all(target_os = "android", feature = "ui"))]
 mod android;
+#[cfg(all(target_os = "android", feature = "ui", not(feature = "sharing")))]
+compile_error!("Android app build needs --features sharing (android/package.sh passes it)");
 
 #[cfg(all(target_os = "android", feature = "ui"))]
 mod android_updates;

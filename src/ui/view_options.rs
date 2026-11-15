@@ -9,6 +9,7 @@ pub fn ViewOptions() -> impl IntoView {
     let gps_label = NodeRef::new();
     let roads_label = NodeRef::new();
     let heat_label = NodeRef::new();
+    let friends_label = NodeRef::new();
     view! {
         Dialog {
             DialogTrigger(variant=ButtonVariant::Secondary,class="map-chip") {"Layers"}
@@ -45,6 +46,16 @@ pub fn ViewOptions() -> impl IntoView {
                         text(class="muted") {"Thin lines; dashes mark inferred gaps."}
                     }
                     Switch(class="show-gps",labelled_by=gps_label,checked=Binding::controlled(s.show_gps,move |value|s.set_show_gps(value)))
+                }
+                if move ||cfg!(target_os="android") {
+                    text(class="section-title") {"Friends"}
+                    row(class="view-toggle") {
+                        column(class="toggle-text") {
+                            Label(node_ref=friends_label) {"Friend locations"}
+                            text(class="muted") {"Positions friends share with you. Gray: not live."}
+                        }
+                        Switch(class="show-friends",labelled_by=friends_label,checked=Binding::controlled(s.show_friends,move |value|s.set_show_friends(value)))
+                    }
                 }
                 text(class="muted") {"Tap a traveled road for trips and first date. Ambiguous routes never mark guessed roads."}
             }

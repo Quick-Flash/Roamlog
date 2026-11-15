@@ -317,6 +317,75 @@ pub(crate) fn request(directory: PathBuf, command: Value) -> Result<Value, Strin
                 .ok_or("No untraveled road in offline map nearby")?;
             Ok(json!({"section": nearest.0, "distance_m": nearest.1}))
         }
+        // Finished trips a friend may view: real fixes only, newest 100.
+        "shared_trips" => {
+            session.store.catch_up()?;
+            let trips: Vec<Value> = session
+                .store
+                .state
+                .trips
+                .iter()
+                .rev()
+                .filter(|t| t.status == crate::model::Status::Finished && !t.points.is_empty())
+                .take(100)
+                .map(|t| {
+                    let fixes: Vec<_> = t
+                        .points
+                        .iter()
+                        .filter(|p| !p.estimated)
+                        .map(|p| p.fix)
+                        .collect();
+                    json!({"name": t.name, "started_ms": t.started_ms, "finished_ms": t.finished_ms,
+                        "distance_m": t.distance_m, "fixes": fixes})
+                })
+                .collect();
+            Ok(json!({"trips": trips}))
+        }
+        // Friend's trip copied into own history as finished trip.
+        "import_trip" => {
+            session.store.catch_up()?;
+            if session.store.state.active().is_some() || recorder_alive(&directory) {
+                return Err("Finish current trip before adding another".into());
+            }
+            let fixes: Vec<crate::model::Fix> =
+                serde_json::from_value(command["fixes"].clone()).map_err(|e| e.to_string())?;
+            let name = command["name"]
+                .as_str()
+                .unwrap_or_default()
+                .chars()
+                .take(120)
+                .collect::<String>();
+            let (Some(first), Some(last)) = (fixes.first(), fixes.last()) else {
+                return Err("Trip has no positions".into());
+            };
+            let trip_id = session
+                .store
+                .state
+                .trips
+                .iter()
+                .map(|t| t.id)
+                .max()
+                .unwrap_or(0)
+                + 1;
+            let mut events = vec![Event::Start {
+                timestamp_ms: first.timestamp_ms,
+                category_id: None,
+            }];
+            let finish = last.timestamp_ms;
+            events.extend(fixes.into_iter().map(|fix| Event::Fix { fix }));
+            events.push(Event::Finish {
+                timestamp_ms: finish,
+            });
+            session.store.commit_all(events)?;
+            let id = session.store.state.trips.last().map_or(trip_id, |t| t.id);
+            if !name.trim().is_empty() {
+                session
+                    .store
+                    .commit(Event::RenameTrip { trip_id: id, name })?;
+            }
+            session.reset_roads();
+            Ok(json!({"ok": true, "trip_id": id}))
+        }
         "backup" => Ok(json!({"journal": String::from_utf8(session.store.backup()?)
             .map_err(|e| e.to_string())?})),
         "restore" => {
@@ -524,6 +593,22 @@ mod tests {
         let restored = call(json!({"op":"snapshot"}));
         assert_eq!(restored["state"]["categories"].as_array().unwrap().len(), 1);
         assert!(path.join("trips.jsonl.before-restore").exists());
+        // Friend's view of finished trips, copied back in as a named finished trip.
+        let shared = call(json!({"op": "shared_trips"}));
+        let trip = shared["trips"][0].clone();
+        assert!(!trip["fixes"].as_array().unwrap().is_empty());
+        let imported =
+            call(json!({"op": "import_trip", "name": "Run (from Alex)", "fixes": trip["fixes"]}));
+        let state = call(json!({"op": "snapshot"}));
+        let copy = state["state"]["trips"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["id"] == imported["trip_id"])
+            .unwrap();
+        assert_eq!(copy["name"], "Run (from Alex)");
+        assert_eq!(copy["status"], "finished");
+        assert!(copy["distance_m"].as_f64().unwrap() > 100.0);
         // Release journal before TempDir cleanup; only this test uses singleton.
         *SESSION.lock().unwrap() = None;
         let persisted = Store::open(path.join("trips.jsonl")).unwrap();

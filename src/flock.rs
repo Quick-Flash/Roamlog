@@ -25,7 +25,7 @@ pub fn unlock(file: &File) {
 }
 
 /// Takes exclusive lock if free; false when another open file holds it.
-#[cfg(any(feature = "ui", target_os = "android", test))]
+#[cfg(any(feature = "ui", test))]
 pub fn try_lock(file: &File) -> bool {
     flock(file, libc::LOCK_EX | libc::LOCK_NB).is_ok()
 }
