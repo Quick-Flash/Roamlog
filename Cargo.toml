@@ -17,11 +17,11 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 flate2 = "1.1"
 libc = "0.2"
-zgui = { git = "https://github.com/Quick-Flash/zgui", rev = "5c13633b92375f72089ac736c339c6c307a33da1", optional = true }
-zgui-ui = { git = "https://github.com/Quick-Flash/zgui", rev = "5c13633b92375f72089ac736c339c6c307a33da1", optional = true }
-zgui-ui-tokens = { git = "https://github.com/Quick-Flash/zgui", rev = "5c13633b92375f72089ac736c339c6c307a33da1", optional = true }
-zgui-ui-icons = { git = "https://github.com/Quick-Flash/zgui", rev = "5c13633b92375f72089ac736c339c6c307a33da1", optional = true }
-zgui-image = { git = "https://github.com/Quick-Flash/zgui", rev = "5c13633b92375f72089ac736c339c6c307a33da1", optional = true }
+zgui = { git = "https://github.com/Quick-Flash/zgui", rev = "8b27698b2288ec3a78fbfd659d87ce3a99b86a09", optional = true }
+zgui-ui = { git = "https://github.com/Quick-Flash/zgui", rev = "8b27698b2288ec3a78fbfd659d87ce3a99b86a09", optional = true }
+zgui-ui-tokens = { git = "https://github.com/Quick-Flash/zgui", rev = "8b27698b2288ec3a78fbfd659d87ce3a99b86a09", optional = true }
+zgui-ui-icons = { git = "https://github.com/Quick-Flash/zgui", rev = "8b27698b2288ec3a78fbfd659d87ce3a99b86a09", optional = true }
+zgui-image = { git = "https://github.com/Quick-Flash/zgui", rev = "8b27698b2288ec3a78fbfd659d87ce3a99b86a09", optional = true }
 plot = { package = "zgui-plot", git = "https://github.com/Quick-Flash/zgui-plot", rev = "40757c406d0384a36434a8baf0fd3fad512b33ed", optional = true }
 kurbo = { version = "0.13.1", optional = true }
 image = { version = "0.25.10", default-features = false, features = ["png", "webp", "jpeg"], optional = true }
@@ -41,15 +41,15 @@ ui = ["dep:zgui", "dep:zgui-ui", "dep:zgui-ui-tokens", "dep:zgui-ui-icons", "dep
 crate-type = ["rlib", "cdylib"]
 
 [patch.crates-io]
-fontique = { git = "https://github.com/Quick-Flash/zgui", rev = "5c13633b92375f72089ac736c339c6c307a33da1" }
-accesskit_android = { git = "https://github.com/Quick-Flash/zgui", rev = "5c13633b92375f72089ac736c339c6c307a33da1" }
+fontique = { git = "https://github.com/Quick-Flash/zgui", rev = "8b27698b2288ec3a78fbfd659d87ce3a99b86a09" }
+accesskit_android = { git = "https://github.com/Quick-Flash/zgui", rev = "8b27698b2288ec3a78fbfd659d87ce3a99b86a09" }
 
 [patch."https://github.com/zortax/zgui"]
-zgui = { git = "https://github.com/Quick-Flash/zgui", rev = "5c13633b92375f72089ac736c339c6c307a33da1" }
-zgui-ui = { git = "https://github.com/Quick-Flash/zgui", rev = "5c13633b92375f72089ac736c339c6c307a33da1" }
+zgui = { git = "https://github.com/Quick-Flash/zgui", rev = "8b27698b2288ec3a78fbfd659d87ce3a99b86a09" }
+zgui-ui = { git = "https://github.com/Quick-Flash/zgui", rev = "8b27698b2288ec3a78fbfd659d87ce3a99b86a09" }
 
 [dev-dependencies]
-zgui-testkit-view = { git = "https://github.com/Quick-Flash/zgui", rev = "5c13633b92375f72089ac736c339c6c307a33da1" }
+zgui-testkit-view = { git = "https://github.com/Quick-Flash/zgui", rev = "8b27698b2288ec3a78fbfd659d87ce3a99b86a09" }
 
 [[example]]
 name = "demo_data"

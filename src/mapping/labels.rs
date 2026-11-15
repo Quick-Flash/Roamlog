@@ -27,32 +27,42 @@ pub fn system_font() -> Option<&'static FontVec> {
     .as_ref()
 }
 
-struct Candidate {
-    priority: u8,
-    text: String,
+pub struct Candidate {
+    pub priority: u8,
+    pub text: String,
     /// CSS px.
-    size: f64,
-    colors: (u32, u32),
-    /// Center and angle (radians) in tile px.
-    at: (f64, f64, f64),
-    /// Straight run length available for text, tile px; None for point labels.
-    room: Option<f64>,
+    pub size: f64,
+    /// Shown from this display zoom.
+    pub min_zoom: f64,
+    /// Place label, else road label.
+    pub place: bool,
+    /// Center and angle (radians, y down) in units of `map`.
+    pub at: (f64, f64, f64),
+    /// Straight run length available for text, `map` units; None for point labels.
+    pub room: Option<f64>,
 }
 
-/// Draws labels for `layers` into `pixmap` placed by `frame`; `unit` maps CSS px to px.
-pub fn draw(
-    pixmap: &mut Pixmap,
-    font: &FontVec,
+impl Candidate {
+    /// (text, halo) colors.
+    pub fn colors(&self, dark: bool) -> (u32, u32) {
+        let theme = usize::from(dark);
+        if self.place {
+            PLACE_LABEL[theme]
+        } else {
+            ROAD_LABEL[theme]
+        }
+    }
+}
+
+/// Label candidates of `layers`, positions mapped by `map` (layer extent -> map fn),
+/// most important first.
+pub fn candidates<M: Fn(f64, f64) -> (f64, f64)>(
     layers: &[Layer],
-    zoom: u8,
-    frame: &Frame,
-    unit: f64,
-    dark: bool,
-) {
-    let theme = usize::from(dark);
+    map: impl Fn(f64) -> M,
+) -> Vec<Candidate> {
     let mut candidates = Vec::new();
     for layer in layers {
-        let map = frame.map(f64::from(layer.extent.max(1)));
+        let map = map(f64::from(layer.extent.max(1)));
         for f in &layer.features {
             let name = layer.str(f, "name");
             if name.is_empty() {
@@ -64,9 +74,6 @@ pub fn draw(
                         Some(crate::mvt::Value::Num(n)) => *n,
                         _ => 0.0,
                     };
-                    if f64::from(zoom) < min_zoom {
-                        continue;
-                    }
                     let kind = layer.str(f, "kind");
                     let (priority, size) = match kind {
                         "country" | "region" => (0, 13.0),
@@ -85,7 +92,8 @@ pub fn draw(
                             priority,
                             text: name.into(),
                             size,
-                            colors: PLACE_LABEL[theme],
+                            min_zoom,
+                            place: true,
                             at,
                             room: None,
                         });
@@ -99,15 +107,13 @@ pub fn draw(
                         "minor_road" => (6, 15),
                         _ => continue,
                     };
-                    if zoom < from {
-                        continue;
-                    }
                     if let Some((at, room)) = straightest(f, &map) {
                         candidates.push(Candidate {
                             priority,
                             text: name.into(),
                             size: 11.0,
-                            colors: ROAD_LABEL[theme],
+                            min_zoom: f64::from(from),
+                            place: false,
                             at,
                             room: Some(room),
                         });
@@ -122,10 +128,27 @@ pub fn draw(
             .cmp(&b.priority)
             .then(b.room.unwrap_or(0.0).total_cmp(&a.room.unwrap_or(0.0)))
     });
+    candidates
+}
+
+/// Draws labels for `layers` into `pixmap` placed by `frame`; `unit` maps CSS px to px.
+pub fn draw(
+    pixmap: &mut Pixmap,
+    font: &FontVec,
+    layers: &[Layer],
+    zoom: u8,
+    frame: &Frame,
+    unit: f64,
+    dark: bool,
+) {
+    let candidates = candidates(layers, |extent| frame.map(extent));
     let edge = f64::from(pixmap.width());
     let mut placed: Vec<Rect> = Vec::new();
     let mut names: Vec<String> = Vec::new();
     for c in candidates {
+        if f64::from(zoom) < c.min_zoom {
+            continue;
+        }
         // One label per road name per tile.
         if c.room.is_some() && names.contains(&c.text) {
             continue;
@@ -166,7 +189,8 @@ pub fn draw(
             anti_alias: true,
             ..Paint::default()
         };
-        let [r, g, b, a] = rgba(c.colors.1);
+        let colors = c.colors(dark);
+        let [r, g, b, a] = rgba(colors.1);
         paint.set_color_rgba8(r, g, b, a);
         let halo = Stroke {
             width: (2.5 * unit) as f32,
@@ -174,7 +198,7 @@ pub fn draw(
             ..Stroke::default()
         };
         pixmap.stroke_path(&path, &paint, &halo, transform, None);
-        let [r, g, b, a] = rgba(c.colors.0);
+        let [r, g, b, a] = rgba(colors.0);
         paint.set_color_rgba8(r, g, b, a);
         pixmap.fill_path(&path, &paint, FillRule::Winding, transform, None);
     }

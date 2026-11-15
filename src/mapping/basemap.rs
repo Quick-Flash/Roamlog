@@ -616,6 +616,89 @@ mod tests {
         );
     }
 
+    /// GPU base map draws fixture tile like CPU tile renderer, at tile's nominal zoom.
+    #[test]
+    fn gpu_tile_matches_cpu_tile() {
+        use crate::mapping::{map_gpu, vector_tiles};
+        let archive = Archive::open(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/downtown.pmtiles"),
+        )
+        .unwrap();
+        let id = TileId {
+            z: 15,
+            x: 5217,
+            y: 11720,
+        };
+        let bytes = archive.tile(id.z, 5217, id.y).unwrap().unwrap();
+        let whole = Frame {
+            px: 512.0,
+            depth: 0,
+            sub: (0, 0),
+        };
+        let cpu = render(&bytes, id.z, &whole, false, Kind::Map, None).unwrap();
+        let cpu = zgui_image::decode(&cpu, Default::default()).unwrap().texels;
+        let span = WORLD / f64::from(1 << id.z);
+        let nw = vector_tiles::corner(id);
+        let camera = Camera {
+            center: [nw[0] + span / 2.0, nw[1] - span / 2.0],
+            zoom: f64::from(id.z + 1),
+        };
+        // Labels are placed differently (across tiles), so compare map without them.
+        let bare = vector_tiles::Tile {
+            labels: Vec::new(),
+            ..vector_tiles::Tile::build(&bytes, id.z).unwrap()
+        };
+        let scene = map_gpu::Scene {
+            tiles: vec![(id, Arc::new(bare))],
+            base: Some(false),
+            ..Default::default()
+        };
+        let Some(gpu) = map_gpu::tests::render(&scene, camera, 512, 512) else {
+            return;
+        };
+        // Antialiasing differs at edges; colours and shapes must agree elsewhere.
+        let differ = cpu
+            .chunks(4)
+            .zip(gpu.chunks(4))
+            .filter(|(c, g)| (0..3).map(|i| c[i].abs_diff(g[i]) as u32).sum::<u32>() > 48)
+            .count();
+        let share = differ as f64 / (512.0 * 512.0);
+        eprintln!("pixels differing from CPU tile: {:.2}%", share * 100.0);
+        assert!(share < 0.03, "{:.2}% pixels differ", share * 100.0);
+
+        // Labels: text and halos absent from bare map.
+        if labels::system_font().is_none() {
+            return;
+        }
+        let scene = map_gpu::Scene {
+            tiles: vec![(
+                id,
+                Arc::new(vector_tiles::Tile::build(&bytes, id.z).unwrap()),
+            )],
+            base: Some(false),
+            ..Default::default()
+        };
+        let labeled = map_gpu::tests::render(&scene, camera, 512, 512).unwrap();
+        if let Ok(path) = std::env::var("MAP_PNG") {
+            let mut out = Vec::new();
+            let mut encoder = png::Encoder::new(&mut out, 512, 512);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder
+                .write_header()
+                .unwrap()
+                .write_image_data(&labeled)
+                .unwrap();
+            std::fs::write(path, out).unwrap();
+        }
+        let added = labeled
+            .chunks(4)
+            .zip(gpu.chunks(4))
+            .filter(|(l, g)| (0..3).map(|i| l[i].abs_diff(g[i]) as u32).sum::<u32>() > 96)
+            .count();
+        assert!(added > 300, "only {added} text pixels");
+    }
+
     #[test]
     fn tiles_cover_viewport() {
         let camera = Camera {

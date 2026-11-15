@@ -2,10 +2,13 @@ use super::{
     basemap::Kind,
     camera::{self, Camera, project},
     gestures::Contacts,
-    overlay_tiles::{OverlayTiles, Polyline},
+    map_gpu::{LineStyle, Lines, Scene},
+    map_surface::Producer as MapProducer,
+    terrain_tiles::Polyline,
     terrain_tiles::Style as TerrainStyle,
     terrain_view::TerrainViewProps,
     tiles::{Config, Provider, Service},
+    vector_tiles::VectorTiles,
 };
 use crate::ui::icons::{COMPASS, EXPLORE, FIT, LOCATE, SLIDERS};
 use crate::ui::{
@@ -14,13 +17,12 @@ use crate::ui::{
     tools::{AreaBarProps, AreaDialogProps, AreasSheetProps, TripEditorDialogProps},
     view_options::ViewOptionsProps,
 };
-use kurbo::BezPath;
 use std::{
     cell::{Cell, RefCell},
     rc::Rc,
+    sync::Arc,
 };
 use zgui::{
-    canvas::{Brush, ShapeBuilder, zgui_color::Color},
     prelude::*,
     reactive::RenderEffect,
     vocab::{Key, NamedKey},
@@ -366,7 +368,7 @@ pub fn MapView() -> impl IntoView {
     // Projection depends on history, not camera. Keep pan frames to affine placement
     // and clipping instead of projecting thousands of GPS/road coordinates again.
     // Layers: traveled by trips on road (1, 2, 3–4, 5+), GPS, inferred, area outline,
-    // nearest-road target. Area untraveled roads render as image tiles instead.
+    // nearest-road target.
     let geometry = Memo::new(move |_| {
         let filter = s.history_filter.get();
         let mut lines: [Polylines; LAYERS] = Default::default();
@@ -448,22 +450,68 @@ pub fn MapView() -> impl IntoView {
         }
     });
     on_cleanup_local(move || drop(flat_edit));
-    let overlay_tiles = OverlayTiles::new();
-    let untraveled = RenderEffect::new(move |_| {
-        let mut lines = Polylines::default();
+    // GPU map: base map tiles and names (offline vector map, not satellite) and trip lines
+    // drawn by own wgpu surface. Geometry uploads once per change; camera moves only update
+    // uniforms and label quads.
+    let gpu_base = Memo::new(move |_| !three_d.get() && vector.get() && !s.satellite.get());
+    let gpu_lines = Memo::new(move |_| {
+        let mut lines = Lines::default();
+        if three_d.get() {
+            return Arc::new(lines);
+        }
         s.area_stats.with(|stats| {
             for section in stats.iter().flat_map(|st| &st.untraveled) {
-                let a = project(section.start.lon, section.start.lat);
-                let b = project(section.end.lon, section.end.lat);
-                if let (Some(a), Some(b)) = (a, b) {
-                    lines.segment(a, b);
+                if let (Some(a), Some(b)) = (
+                    project(section.start.lon, section.start.lat),
+                    project(section.end.lon, section.end.lat),
+                ) {
+                    lines.push(a, b, UNTRAVELED_STYLE);
                 }
             }
         });
-        lines.finish();
-        overlay_tiles.set_lines(lines.lines);
+        geometry.with(|layers| {
+            for (polylines, &style) in layers.iter().zip(&LINE_STYLE) {
+                for line in &polylines.lines {
+                    for pair in line.points.windows(2) {
+                        lines.push(pair[0], pair[1], style);
+                    }
+                }
+            }
+        });
+        Arc::new(lines)
     });
-    on_cleanup_local(move || drop(untraveled));
+    let vector_tiles = VectorTiles::new();
+    let gpu_scene = Memo::new(move |_| {
+        let base = gpu_base.get();
+        let tiles = match s.basemap.archive.get() {
+            Some(archive) if base => {
+                vector_tiles.visible(&archive, camera.get(), size.get(), !offline.get())
+            }
+            _ => Vec::new(),
+        };
+        Arc::new(Scene {
+            tiles,
+            lines: gpu_lines.get(),
+            base: base.then(|| s.dark.get()),
+        })
+    });
+    let map_producer = std::rc::Rc::new(MapProducer::new());
+    let map_surface = zgui::elements::surface()
+        .class("map-overlay")
+        .source(&map_producer.handle)
+        .into_view();
+    let feed = {
+        let producer = map_producer.clone();
+        RenderEffect::new(move |_| {
+            if !three_d.get() {
+                producer.update(camera.get(), gpu_scene.get());
+            }
+        })
+    };
+    on_cleanup_local(move || {
+        drop(feed);
+        drop(map_producer);
+    });
     // Area corners as plain boxes, like GPS marker.
     let corners = Memo::new(move |_| {
         let camera = camera.get();
@@ -481,81 +529,6 @@ pub fn MapView() -> impl IntoView {
                 .collect::<Vec<_>>()
         })
     });
-    let overlay = zgui::elements::canvas()
-        .class("map-overlay")
-        .draw(move |cx| {
-            let camera = camera.get();
-            let [w, h] = [f64::from(cx.size.width.0), f64::from(cx.size.height.0)];
-            let scale = camera.scale();
-            let pixel = |xy: [f64; 2]| {
-                (
-                    (xy[0] - camera.center[0]) * scale + w / 2.0,
-                    h / 2.0 - (xy[1] - camera.center[1]) * scale,
-                )
-            };
-            let mut layers: [Cells; LAYERS] = std::array::from_fn(|_| Cells::new(w, h));
-            // Visible map rectangle (projected metres) with stroke margin.
-            let margin = 16.0 / scale;
-            let view = [
-                camera.center[0] - w / 2.0 / scale - margin,
-                camera.center[1] - h / 2.0 / scale - margin,
-                camera.center[0] + w / 2.0 / scale + margin,
-                camera.center[1] + h / 2.0 / scale + margin,
-            ];
-            geometry.with(|layers_lines| {
-                for (cells, polylines) in layers.iter_mut().zip(layers_lines) {
-                    for line in &polylines.lines {
-                        if line.max[0] < view[0]
-                            || line.max[1] < view[1]
-                            || line.min[0] > view[2]
-                            || line.min[1] > view[3]
-                        {
-                            continue;
-                        }
-                        // Vertices closer than line width add work, not visible detail.
-                        let mut last = pixel(line.points[0]);
-                        let end = line.points.len() - 1;
-                        for (i, &point) in line.points.iter().enumerate().skip(1) {
-                            let next = pixel(point);
-                            if i < end && (next.0 - last.0).hypot(next.1 - last.1) < 3.0 {
-                                continue;
-                            }
-                            cells.segment(last, next);
-                            last = next;
-                        }
-                    }
-                }
-            });
-            let [one, two, few, many, tracks, inferred, outline, target] = layers;
-            for (cells, color, width) in [
-                (one, Color::srgb_u8(60, 220, 145, 255), 5.0),
-                (two, Color::srgb_u8(40, 185, 235, 255), 5.0),
-                (few, Color::srgb_u8(250, 205, 50, 255), 5.0),
-                (many, Color::srgb_u8(240, 100, 60, 255), 5.0),
-                (tracks, Color::srgb_u8(80, 155, 255, 255), 2.0),
-                // Solid: dashing long outline edges costs every frame on Mali.
-                (outline, Color::srgb_u8(170, 110, 255, 255), 2.5),
-                (target, Color::srgb_u8(225, 60, 225, 255), 7.0),
-            ] {
-                for path in cells.paths() {
-                    cx.scene.push(
-                        ShapeBuilder::new(path)
-                            .stroke(Brush::Solid(color), width)
-                            .build(),
-                    );
-                }
-            }
-            for path in inferred.paths() {
-                cx.scene.push(
-                    ShapeBuilder::new(path)
-                        .stroke_styled(
-                            Brush::Solid(Color::srgb_u8(245, 171, 47, 255)),
-                            kurbo::Stroke::new(2.0).with_dashes(0.0, [5.0, 4.0]),
-                        )
-                        .build(),
-                );
-            }
-        });
     // Keep map size available to fits started outside map (trip sheet).
     let remember = RenderEffect::new(move |_| s.map_size.set_value(view_size.get()));
     on_cleanup_local(move || drop(remember));
@@ -578,24 +551,17 @@ pub fn MapView() -> impl IntoView {
                     }
                 }
                 box(class="map-vector-tiles") {
-                    for item in move ||if three_d.get(){Vec::new()}else{s.basemap.visible(camera.get(),size.get(),s.dark.get()||s.satellite.get(),if s.satellite.get(){Kind::Roads}else{Kind::Map},f64::from(host.scale()),!offline.get())},key=|item|item.clone() {
+                    for item in move ||if three_d.get()||!s.satellite.get(){Vec::new()}else{s.basemap.visible(camera.get(),size.get(),true,Kind::Roads,f64::from(host.scale()),!offline.get())},key=|item|item.clone() {
                         // 512 CSS px box: nominal display size of rendered tile; place() scales 256 px boxes.
                         box(class="map-vector-tile",style:transform=move ||{let[x,y,scale]=camera.get().place(item.0,size.get());Some(format!("translate({x}px, {y}px) scale({})",scale/2.0))}) {
                             {zgui::elements::image().class("map-vector-image").src(Some(item.1.clone())).alt(Some("Map tile".to_string())).into_view()}
                         }
                     }
                 }
+                box(class="map-overlay",class:map-hidden=move ||three_d.get()) {{map_surface}}
+                // Satellite mode: street names above trip and area lines.
                 box(class="map-vector-tiles") {
-                    for item in move ||if three_d.get(){Vec::new()}else{overlay_tiles.visible(camera.get(),size.get(),f64::from(host.scale()))},key=|item|item.clone() {
-                        box(class="map-vector-tile",style:transform=move ||{let[x,y,scale]=camera.get().place(item.0,size.get());Some(format!("translate({x}px, {y}px) scale({})",scale/2.0))}) {
-                            {zgui::elements::image().class("map-vector-image").src(Some(item.1.clone())).alt(Some("Untraveled roads in area".to_string())).into_view()}
-                        }
-                    }
-                }
-                {overlay}
-                // Street names above trip and area lines.
-                box(class="map-vector-tiles") {
-                    for item in move ||if three_d.get(){Vec::new()}else{s.basemap.visible(camera.get(),size.get(),s.dark.get()||s.satellite.get(),Kind::Labels,f64::from(host.scale()),!offline.get())},key=|item|item.clone() {
+                    for item in move ||if three_d.get()||!s.satellite.get(){Vec::new()}else{s.basemap.visible(camera.get(),size.get(),true,Kind::Labels,f64::from(host.scale()),!offline.get())},key=|item|item.clone() {
                         box(class="map-vector-tile",style:transform=move ||{let[x,y,scale]=camera.get().place(item.0,size.get());Some(format!("translate({x}px, {y}px) scale({})",scale/2.0))}) {
                             {zgui::elements::image().class("map-vector-image").src(Some(item.1.clone())).alt(Some("Map labels".to_string())).into_view()}
                         }
@@ -663,6 +629,28 @@ pub fn MapView() -> impl IntoView {
 
 const LAYERS: usize = 8;
 
+/// Colour, width (CSS px) and dashed, per line layer: traveled by trips on road (1, 2,
+/// 3–4, 5+), GPS, inferred gap, area outline, nearest-road target.
+const fn line(rgba: [u8; 4], width: f32, dashed: bool) -> LineStyle {
+    LineStyle {
+        rgba,
+        width,
+        dashed,
+    }
+}
+const LINE_STYLE: [LineStyle; LAYERS] = [
+    line([60, 220, 145, 255], 5.0, false),
+    line([40, 185, 235, 255], 5.0, false),
+    line([250, 205, 50, 255], 5.0, false),
+    line([240, 100, 60, 255], 5.0, false),
+    line([80, 155, 255, 255], 2.0, false),
+    line([245, 171, 47, 255], 2.0, true),
+    line([170, 110, 255, 255], 2.5, false),
+    line([225, 60, 225, 255], 7.0, false),
+];
+/// Untraveled roads inside area.
+const UNTRAVELED_STYLE: LineStyle = line([235, 64, 64, 255], 3.0, false);
+
 /// Segments chained into polylines. Coverage sections are 20 m pieces of map edges, so
 /// collinear continuations collapse back to the map's own vertices.
 #[derive(Clone, Default, PartialEq)]
@@ -713,85 +701,9 @@ type Press = (u64, [f64; 2]);
 /// Pointer id, area corner index, press position, moved past slop.
 type Held = (u64, usize, [f64; 2], bool);
 
-/// Overlay lines clipped to viewport and split into small screen cells.
-///
-/// Zgui rasterizes canvas shapes on Mali-G715 at cost of shape area x segments, so one
-/// path spanning screen (or far beyond it when zoomed in) stalls GPU. Small cells keep
-/// each shape's box and segment count small.
-struct Cells {
-    w: f64,
-    h: f64,
-    paths: std::collections::HashMap<(i32, i32), BezPath>,
-}
-
-const CELL: f64 = 32.0;
-
-impl Cells {
-    fn new(w: f64, h: f64) -> Self {
-        Self {
-            w,
-            h,
-            paths: Default::default(),
-        }
-    }
-
-    fn segment(&mut self, a: (f64, f64), b: (f64, f64)) {
-        // Liang-Barsky clip to viewport plus stroke margin.
-        let m = 8.0;
-        let (dx, dy) = (b.0 - a.0, b.1 - a.1);
-        let (mut t0, mut t1) = (0.0_f64, 1.0_f64);
-        for (p, q) in [
-            (-dx, a.0 + m),
-            (dx, self.w + m - a.0),
-            (-dy, a.1 + m),
-            (dy, self.h + m - a.1),
-        ] {
-            if p == 0.0 {
-                if q < 0.0 {
-                    return;
-                }
-            } else if p < 0.0 {
-                t0 = t0.max(q / p);
-            } else {
-                t1 = t1.min(q / p);
-            }
-        }
-        if t0 >= t1 {
-            return;
-        }
-        let (a, b) = (
-            (a.0 + t0 * dx, a.1 + t0 * dy),
-            (a.0 + t1 * dx, a.1 + t1 * dy),
-        );
-        // Long segment: split so each piece stays within roughly one cell.
-        let steps = ((b.0 - a.0).hypot(b.1 - a.1) / CELL).ceil().max(1.0) as usize;
-        for i in 0..steps {
-            let at = |t: f64| (a.0 + t * (b.0 - a.0), a.1 + t * (b.1 - a.1));
-            let (p, q) = (
-                at(i as f64 / steps as f64),
-                at((i + 1) as f64 / steps as f64),
-            );
-            let cell = (
-                ((p.0 + q.0) / 2.0 / CELL).floor() as i32,
-                ((p.1 + q.1) / 2.0 / CELL).floor() as i32,
-            );
-            let path = self.paths.entry(cell).or_default();
-            // Continue path when segments chain, so round joins render.
-            if path.elements().last().and_then(|e| e.end_point()) != Some(p.into()) {
-                path.move_to(p);
-            }
-            path.line_to(q);
-        }
-    }
-
-    fn paths(self) -> impl Iterator<Item = BezPath> {
-        self.paths.into_values()
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{Cells, Polylines};
+    use super::Polylines;
 
     #[test]
     fn chained_collinear_sections_collapse_to_vertices() {
@@ -808,22 +720,6 @@ mod tests {
             vec![[0.0, 0.0], [10.0, 0.0], [10.0, 5.0]]
         );
         assert_eq!(lines.lines[0].max, [10.0, 5.0]);
-    }
-
-    #[test]
-    fn overlay_cells_clip_offscreen_and_split_long_lines() {
-        let mut cells = Cells::new(400.0, 300.0);
-        cells.segment((-5000.0, -5000.0), (-4000.0, -4000.0));
-        assert_eq!(cells.paths().count(), 0);
-        let mut cells = Cells::new(400.0, 300.0);
-        // Zoomed far in: segment spans 100k px, crosses viewport horizontally.
-        cells.segment((-50_000.0, 150.0), (50_000.0, 150.0));
-        let paths: Vec<_> = cells.paths().collect();
-        assert!(paths.len() >= 3);
-        for path in paths {
-            let b = kurbo::Shape::bounding_box(&path);
-            assert!(b.x0 >= -8.0 && b.x1 <= 408.0 && b.width() <= 2.0 * super::CELL + 16.0);
-        }
     }
 }
 

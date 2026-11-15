@@ -41,14 +41,20 @@ GPS only, roads only, both, or neither. Choices persist locally and respect trip
 category selection. GPS uses thin solid lines, inferred gaps use dashes, and
 traveled roads use wide solid lines; controls and legend do not depend on color.
 
-Tiles render on CPU (tiny-skia) into images with Organic Maps' day/night colors,
-road widths per zoom, and label colors (see NOTICE). Labels render as separate
-transparent tile layer above traveled/untraveled road overlays, so names stay readable:
-place names and road names
-along straight stretches, using system font (Android Roboto). Labels crossing tile
-edges are dropped. Zgui canvas paths use coverage rasterizer on Mali-G715, too
-slow for map geometry, hence images. Nearby zoom level prefetches near switch
-points; cached sharper tiles stand in while zooming out.
+Offline map draws on GPU in own wgpu surface: base map, street and place names, and
+trip lines (traveled roads, GPS paths, inferred gaps, area outline, untraveled area
+roads, nearest-road highlight). Vector tiles decode once on worker threads into polygon
+fans and line segments per style, with Organic Maps' day/night colors, road widths per
+zoom and label colors (see NOTICE), scaled continuously so map stays sharp while
+zooming. Fills draw by stencil-then-cover with 4x MSAA; lines are antialiased
+round-ended capsules. Names (system font, Android Roboto) are placed each frame in
+screen space with one collision pass across visible tiles and drawn from a glyph atlas
+rasterized at exact device size with halos, above trip lines. Panning, zooming and
+rotation only update small uniforms and label quads. Coarser or finer cached tiles
+stand in while zooming; nearby zoom level prefetches near switch points.
+
+Satellite roads and names, and 3D terrain textures, still render on CPU (tiny-skia)
+into image tiles.
 
 Two-finger twist rotates map (twists under 19° while pinching are ignored); compass button
 appears while rotated and returns north up. Locate button follows live position while app is visible (network and GPS providers,
@@ -119,8 +125,7 @@ for automatic recovery; permission/service failures still interrupt recording.
 move, tap dot to remove; drag elsewhere still pans; **Undo** or Back steps back. **Done**
 measures every offline-map road inside (up to ~100 km across, streamed tile by tile) and
 reports traveled length ÷ total road length, per road class and named streets (done ≥90%,
-started, total). Areas under ~20 km across also show untraveled roads in red, rendered
-into image tiles on worker threads so panning stays at display rate. **Edit** reshapes
+started, total). Areas under ~20 km across also show untraveled roads in red. **Edit** reshapes
 shown area; saved area can be updated or saved as new. Each side of divided road is separate map road, so one direction covers
 half. Percentage follows Trips selection. **Save area…** keeps it; **Areas** lists saved
 areas with last measured percentage.

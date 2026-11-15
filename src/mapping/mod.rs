@@ -12,8 +12,11 @@ pub mod basemap;
 pub mod download;
 mod gestures;
 mod labels;
-mod overlay_tiles;
+mod labels_gpu;
+pub mod map_gpu;
+mod map_surface;
 mod style;
+mod vector_tiles;
 pub mod view;
 
 mod terrain;

@@ -2,7 +2,6 @@
 use super::{
     basemap::{self, Kind},
     camera::{Camera, TileId, WORLD},
-    overlay_tiles::Polyline,
     terrain::Orbit,
     tiles::{Payload, Raster},
 };
@@ -16,6 +15,14 @@ use std::{
     },
 };
 use zgui::prelude::*;
+
+/// Projected polyline with bounding box.
+#[derive(Clone, Default, PartialEq)]
+pub struct Polyline {
+    pub points: Vec<[f64; 2]>,
+    pub min: [f64; 2],
+    pub max: [f64; 2],
+}
 
 #[derive(Clone, PartialEq)]
 pub struct Style {
@@ -151,21 +158,30 @@ fn best_source(cached: Option<(TileId, u64)>, incoming: Option<(TileId, u64)>) -
         (old, None) => old,
     }
 }
-/// Keep cached sharper imagery, but do not let old coarse tiles starve upgrades.
+/// Order: a few coarsest fallbacks (coarse first), so whole view has terrain quickly;
+/// cached sharper imagery; requested detail; other fallbacks. Old coarse tiles must not
+/// starve upgrades, and cache never crowds out requested detail: requested tiles cover
+/// the view, so a cut one is a hole in terrain until the view changes.
 pub(super) fn prioritize_detail(
     requested: Vec<TileId>,
     mut cached: Vec<TileId>,
     fallback: &[TileId],
 ) -> Vec<TileId> {
+    const COARSE: usize = 16;
     cached.retain(|old| {
         !requested
             .iter()
             .any(|detail| detail.z > old.z && super::terrain::contains(*old, *detail))
     });
-    cached.extend(requested);
-    cached.extend(fallback.iter().copied());
+    cached.dedup();
+    let coarse = &fallback[..fallback.len().min(COARSE)];
+    cached.truncate(256_usize.saturating_sub(requested.len() + coarse.len()));
+    let mut order = coarse.to_vec();
+    order.extend(cached);
+    order.extend(requested);
+    order.extend(fallback.iter().copied());
     let mut seen = std::collections::BTreeSet::new();
-    cached
+    order
         .into_iter()
         .filter(|id| seen.insert(*id))
         .take(256)
@@ -556,7 +572,7 @@ mod quality_tests {
 mod request_priority_tests {
     use super::*;
     #[test]
-    fn stale_coarse_cache_cannot_starve_finer_requests_but_sharp_cache_stays_first() {
+    fn coarse_fallback_then_sharp_cache_then_detail_never_crowded_out() {
         let parent = TileId {
             z: 10,
             x: 10,
@@ -575,8 +591,18 @@ mod request_priority_tests {
             y: 40,
         };
         let order = prioritize_detail(children.clone(), vec![parent, fine, fine], &[parent]);
-        assert_eq!(order[0], fine);
-        assert_eq!(&order[1..5], children.as_slice());
-        assert_eq!(order[5], parent);
+        assert_eq!(order, [&[parent, fine][..], &children].concat());
+        // Many cached tiles: all requested detail still fits in budget.
+        let many: Vec<_> = (0..600).map(|i| TileId { z: 16, x: i, y: 0 }).collect();
+        let requested: Vec<_> = (0..190)
+            .map(|i| TileId {
+                z: 14,
+                x: i,
+                y: 100,
+            })
+            .collect();
+        let order = prioritize_detail(requested.clone(), many, &[parent]);
+        assert_eq!(order.len(), 256);
+        assert!(requested.iter().all(|r| order.contains(r)));
     }
 }

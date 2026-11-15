@@ -2,7 +2,9 @@
 /* Map-first: map fills screen under status bar; trip bar sits above navigation bar. */
 .roamlog { height: 100%; width: 100%; box-sizing: border-box; gap: 0; padding: 0 var(--zgui-safe-area-right, 0px) max(var(--zgui-safe-area-bottom, 0px), var(--zgui-keyboard-height, 0px)) var(--zgui-safe-area-left, 0px); }
 .muted { color: var(--zui-color-muted-foreground); font-size: 12px; }
-.zui-button, .zui-input { min-height: 44px; }
+/* Explicit heights: framework button height is 34px, and raising only min-height centers
+   content in old 34px box, leaving labels and icons high. */
+.zui-button, .zui-input { height: 44px; min-height: 44px; }
 /* Dropdowns match 44 px buttons beside them (framework trigger is 34 px). */
 .zui-select { height: 44px !important; }
 
@@ -17,12 +19,12 @@
 .map-dark { filter: invert(1) hue-rotate(180deg) brightness(0.95) contrast(0.9) saturate(0.6); }
 
 .map-top { position: absolute; top: calc(10px + var(--zgui-safe-area-top, 0px)); left: 10px; max-width: calc(100% - 126px); flex-wrap: wrap; gap: 8px; align-items: center; }
-.map-chip { min-height: 40px; padding: 0 14px; border-radius: 20px; font-size: 13px; }
+.map-chip { height: 40px; min-height: 40px; padding: 0 14px; border-radius: 20px; font-size: 13px; }
 .map-message { position: absolute; top: calc(58px + var(--zgui-safe-area-top, 0px)); left: 10px; right: 64px; padding: 8px 12px; border-radius: 12px; background: var(--zui-color-card); color: var(--zui-color-foreground); font-size: 12px; }
 .map-controls { position: absolute; top: calc(10px + var(--zgui-safe-area-top, 0px)); right: 10px; gap: 8px; }
-.map-button { width: 44px; min-height: 44px; padding: 0; border-radius: 22px; font-size: 18px; }
+.map-button { width: 44px; height: 44px; min-height: 44px; padding: 0; border-radius: 22px; font-size: 18px; }
 .map-fit { font-size: 12px; }
-.map-history { position: absolute; bottom: 42px; left: 10px; max-width: calc(100% - 20px); min-height: 36px; padding: 6px 12px; border-radius: 18px; font-size: 12px; }
+.map-history { position: absolute; bottom: 42px; left: 10px; max-width: calc(100% - 20px); height: 36px; min-height: 36px; padding: 6px 12px; border-radius: 18px; font-size: 12px; }
 .history-actions { gap: 8px; }
 .history-actions .zui-button { flex: 1; }
 .gps-cover { position: absolute; inset: 0; background: rgba(66, 133, 244, 0.16); pointer-events: none; }
@@ -44,22 +46,22 @@
 .map-sizes .zui-button { flex: 1; }
 .trips-dialog { width: 92%; max-width: 460px; gap: 10px; }
 .units-row { align-items: center; gap: 8px; }
-.units-row .unit { min-height: 32px; padding: 0 12px; font-size: 13px; }
+.units-row .unit { height: 32px; min-height: 32px; padding: 0 12px; font-size: 13px; }
 .trips-scroll { max-height: 320px; }
 .history-content { gap: 4px; }
 .history-row { align-items: center; gap: 12px; font-size: 12px; }
 .trip-row { gap: 2px; padding: 6px 0; border-bottom: 1px solid var(--zui-color-border); }
 .trip-text { gap: 2px; min-width: 0; }
 .trip-buttons { gap: 4px; justify-content: flex-end; }
-.trip-row .zui-button { min-height: 36px; padding: 0 8px; font-size: 12px; }
+.trip-row .zui-button { height: 36px; min-height: 36px; padding: 0 8px; font-size: 12px; }
 
 .view-choices { gap: 8px; }
 .view-choices .zui-button { flex: 1; }
 
 .view-toggle { align-items: center; justify-content: space-between; gap: 12px; min-height: 44px; }
 .area-bar { position: absolute; bottom: 36px; left: 10px; right: 10px; gap: 6px; align-items: center; padding: 6px 8px; border-radius: 16px; background: var(--zui-color-card); color: var(--zui-color-foreground); font-size: 12px; }
-.area-bar .area-button { min-height: 36px; padding: 0 10px; font-size: 12px; }
-.area-result { min-height: 36px; padding: 0 6px; font-size: 13px; font-weight: 600; }
+.area-bar .area-button { height: 36px; min-height: 36px; padding: 0 10px; font-size: 12px; }
+.area-result { height: 36px; min-height: 36px; padding: 0 6px; font-size: 13px; font-weight: 600; }
 .area-corner { position: absolute; left: 0; top: 0; width: 18px; height: 18px; box-sizing: border-box; border-radius: 50%; background: #aa6eff; border: 2px solid #ffffff; pointer-events: none; }
 .area-scroll { max-height: 200px; }
 .stat-row { gap: 3px; padding: 4px 0; }
@@ -73,8 +75,8 @@
 .map-chip, .map-button, .map-history { background: var(--zui-color-card); color: var(--zui-color-card-foreground); }
 /* Segmented choice: selected option raised inside sunken track. */
 .segmented { gap: 3px; padding: 3px; border-radius: 12px; background: var(--zui-color-muted); border: 1px solid var(--zui-color-border); }
-.segmented .zui-button { flex: 1; min-height: 38px; border: none; box-shadow: none; }
-.segmented .unit { min-height: 32px; }
+.segmented .zui-button { flex: 1; height: 38px; min-height: 38px; border: none; box-shadow: none; }
+.segmented .unit { height: 32px; min-height: 32px; }
 /* Over Button variant fill. */
 .segmented .zui-button.seg-on { background-color: var(--zui-color-accent) !important; color: var(--zui-color-accent-foreground) !important; font-weight: 600; }
 .trip-distance { letter-spacing: -0.3px; }
@@ -92,7 +94,7 @@
 .list-main { flex: 1; min-width: 0; gap: 3px; }
 .list-title { font-size: 15px; font-weight: 600; }
 .trip-title { align-items: baseline; gap: 8px; }
-.row-action { min-height: 36px; padding: 0 10px; font-size: 13px; }
+.row-action { height: 36px; min-height: 36px; padding: 0 10px; font-size: 13px; }
 .empty { color: var(--zui-color-muted-foreground); font-size: 13px; padding: 16px 4px; text-align: center; }
 .wide { width: 100%; }
 .actions { gap: 8px; }
@@ -128,3 +130,9 @@
 .trip-editor-scroll { max-height: 56vh; }
 
 .update-notice { align-items: center; gap: 8px; padding: 6px 12px; background: var(--zui-color-accent); }
+/* Icons fill no line box: block layout centers exactly in buttons. Zgui pulls a button's first
+   icon 4px outward for icon+word buttons; ours hold icon alone, so that shifted it 2px left. */
+.zui-button .zui-icon { display: block; margin: 0 !important; }
+/* Sheets scroll vertically only; wide content must never let them drag sideways. */
+.sheet-scroll, .trips-scroll, .area-scroll, .trip-editor-scroll { overflow-x: hidden; overflow-y: auto; }
+.sheet-scroll > *, .trips-scroll > *, .area-scroll > *, .trip-editor-scroll > * { max-width: 100%; min-width: 0; }
