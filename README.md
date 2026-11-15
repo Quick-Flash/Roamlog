@@ -33,8 +33,11 @@ Screenshots show synthetic Portland, Oregon demo trips, captured on Android.
 Linux desktop development:
 
 ```bash
-cargo run --locked
+cargo xtask run
 ```
+
+Run `cargo xtask` for interactive build menu, or `cargo xtask help` for commands.
+Run `cargo xtask verify` for formatting, core/UI tests, and Clippy; CI uses same task.
 
 Android ARM64 build needs SDK 35, Build-Tools 35.0.0, NDK 28c, and JDK 17+:
 
@@ -42,7 +45,7 @@ Android ARM64 build needs SDK 35, Build-Tools 35.0.0, NDK 28c, and JDK 17+:
 rustup target add aarch64-linux-android
 export ANDROID_HOME=/path/to/android-sdk
 export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/28.2.13676358"
-android/package.sh release
+cargo xtask android --release
 adb install --no-incremental -r target/release/apk/roamlog.apk
 ```
 

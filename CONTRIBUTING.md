@@ -5,10 +5,7 @@ belong in Zgui framework. Preserve source fixes and append-only journal format.
 Do not change package IDs or signing keys during ordinary app updates.
 
 ```bash
-cargo fmt --check
-cargo test --locked --no-default-features
-cargo test --locked
-cargo clippy --locked --all-targets -- -D warnings
+cargo xtask verify
 ```
 
 For Android changes, build APK and verify demo launch, light/dark appearance,

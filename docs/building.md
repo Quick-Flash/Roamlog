@@ -9,16 +9,19 @@ runtime/driver. On Debian/Ubuntu, development packages include
 are required. First build fetches pinned Cargo dependencies.
 
 ```bash
-cargo run --locked
-cargo test --locked
-cargo clippy --locked --all-targets -- -D warnings
-cargo fmt --check
+cargo xtask                  # Interactive menu; help when stdin is piped
+cargo xtask run              # Desktop app
+cargo xtask build --release  # Optimized desktop build
+cargo xtask test             # Workspace tests
+cargo xtask check            # Fast compile check
+cargo xtask fmt              # Format all workspace code
+cargo xtask verify           # Formatting, core/UI tests, Clippy (same as CI)
 ```
 
 Headless command-line recorder uses same journal/tracking core:
 
 ```bash
-cargo test --locked --no-default-features
+cargo xtask test --no-default-features
 # Choose unused journal path for each replay.
 cargo run --locked --no-default-features -- /tmp/roamlog-example.jsonl examples/town.geojson < examples/trip.jsonl
 ```
@@ -36,10 +39,20 @@ JDK 17+, Python 3, SDK Platform 35, Build-Tools 35.0.0, and NDK
 rustup target add aarch64-linux-android
 export ANDROID_HOME=/path/to/android-sdk
 export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/28.2.13676358"
-android/package.sh release
+cargo xtask android --release
 adb install --no-incremental -r target/release/apk/roamlog.apk
 adb shell am start -n dev.traveler/dev.zgui.android.ZguiActivity
 ```
+
+`cargo xtask android` builds debug APK; add `--release` for optimized APK.
+`--demo` selects separate demo app explicitly. Set SDK/NDK environment variables
+before running Android tasks; Linux packaging requires Bash. Tasks do not install
+SDKs, modify phone, or seed demo data. Build failure stops task with nonzero exit.
+Desktop tasks forward Cargo arguments; e.g. `cargo xtask test history` runs matching
+tests, and `cargo xtask run -- --help` passes `--help` to app.
+
+Runner uses only Rust standard library. Existing `android/package.sh` remains
+available directly; xtask calls it for APK packaging.
 
 Script locates Zgui’s dex through Cargo metadata, packages native library/icon,
 aligns APK for 16 KiB pages, signs it, and verifies signature. `debug` also works.
@@ -64,7 +77,7 @@ Never point setup commands at main package.
 
 ```bash
 cargo run --release --locked --example demo_data -- /tmp/roamlog-demo
-ROAMLOG_DEMO=1 android/package.sh release
+cargo xtask android --release --demo
 adb install -r target/release/apk/roamlog-demo.apk
 ```
 
