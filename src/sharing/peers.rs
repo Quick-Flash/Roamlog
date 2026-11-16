@@ -15,7 +15,10 @@ const MAX_GROUPS: usize = 32;
 /// Leaving members get a few seconds for running sessions to deliver the tombstone.
 pub const LEAVE_GRACE_MS: u64 = 20_000;
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// Ordered by how much it shares: Off < TripsOnly < Always.
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum Permission {
     #[default]
@@ -55,6 +58,13 @@ pub struct Group {
     /// Local user is leaving: tombstone still being delivered.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub leaving_since_ms: Option<u64>,
+    /// What every member may see of own location. Local choice; members choose their own.
+    #[serde(default = "always")]
+    pub share: Permission,
+}
+
+fn always() -> Permission {
+    Permission::Always
 }
 
 /// Group view sent to a member over an authenticated session.
@@ -102,20 +112,22 @@ fn untag(records: &mut Records, group: &str, pred: impl Fn(&Friend) -> bool) {
 }
 
 impl Friend {
-    /// Sharing grant: own choice, or Always through an active group.
+    /// Highest of this friend's own grant and the grants of active groups they share.
     pub fn effective_permission(&self, groups: &[Group]) -> Permission {
-        let grouped = self.groups.iter().any(|id| {
-            groups
-                .iter()
-                .any(|g| &g.id == id && g.leaving_since_ms.is_none())
-        });
         if self.blocked {
-            Permission::Off
-        } else if grouped {
-            Permission::Always
-        } else {
-            self.permission
+            return Permission::Off;
         }
+        self.group_permission(groups).max(self.permission)
+    }
+
+    /// Highest grant from active groups this friend belongs to.
+    pub fn group_permission(&self, groups: &[Group]) -> Permission {
+        groups
+            .iter()
+            .filter(|g| self.groups.contains(&g.id) && g.leaving_since_ms.is_none())
+            .map(|g| g.share)
+            .max()
+            .unwrap_or(Permission::Off)
     }
 }
 
@@ -308,6 +320,18 @@ impl Friends {
         self.write(&records)
     }
 
+    pub fn set_group_permission(&self, id: &str, share: Permission) -> Result<()> {
+        let _lock = self.lock()?;
+        let mut records = self.read()?;
+        records
+            .groups
+            .iter_mut()
+            .find(|g| g.id == id)
+            .ok_or("unknown group")?
+            .share = share;
+        self.write(&records)
+    }
+
     pub fn groups(&self) -> Result<Vec<Group>> {
         let _lock = self.lock()?;
         Ok(self.read()?.groups)
@@ -337,6 +361,7 @@ impl Friends {
             me: me.to_owned(),
             left: vec![],
             leaving_since_ms: None,
+            share: Permission::Always,
         });
         self.write(&records)?;
         Ok(id)
@@ -371,6 +396,7 @@ impl Friends {
                 me: me.to_owned(),
                 left: vec![],
                 leaving_since_ms: None,
+                share: Permission::Always,
             }),
         }
         let friend = records
@@ -676,5 +702,33 @@ mod tests {
         records.friends[0].peer_id = owner;
         std::fs::write(&path, serde_json::to_vec(&records).unwrap()).unwrap();
         assert!(store.list().is_err());
+    }
+}
+
+#[cfg(test)]
+mod group_permission_tests {
+    use super::*;
+    use iroh::SecretKey;
+
+    #[test]
+    fn friend_sees_highest_of_own_and_group_grant() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Friends::open(dir.path(), SecretKey::generate().public()).unwrap();
+        let peer = SecretKey::generate().public();
+        store.add_confirmed(peer, "Mum".into()).unwrap();
+        let group = store.create_group("Family", "Me").unwrap();
+        store.join_group(&group, "Family", "Me", peer).unwrap();
+        assert!(store.may_share(peer, false).unwrap());
+        store
+            .set_group_permission(&group, Permission::TripsOnly)
+            .unwrap();
+        assert!(!store.may_share(peer, false).unwrap());
+        assert!(store.may_share(peer, true).unwrap());
+        store.set_group_permission(&group, Permission::Off).unwrap();
+        assert!(!store.may_share(peer, true).unwrap());
+        store.set_permission(peer, Permission::Always).unwrap();
+        assert!(store.may_share(peer, false).unwrap());
+        store.block(peer).unwrap();
+        assert!(!store.may_share(peer, true).unwrap());
     }
 }

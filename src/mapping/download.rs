@@ -129,7 +129,26 @@ pub fn remote() -> Result<Arc<Archive>, String> {
     Ok(archive)
 }
 
-pub fn plan(bounds: [f64; 4]) -> Result<Plan, String> {
+/// Drops tiles `existing` map already holds; `fetch` copies those from it unchanged.
+/// An incompatible or missing map keeps every tile, since `fetch` cannot reuse it.
+fn skip_existing(
+    tiles: &mut Vec<(u64, u64, u32)>,
+    existing: &Path,
+    remote: &Archive,
+) -> Result<(), String> {
+    let Ok(old) = Archive::open(existing) else {
+        return Ok(());
+    };
+    if !old.compatible(remote) {
+        return Ok(());
+    }
+    let have: std::collections::HashSet<u64> = old.entries()?.iter().map(|e| e.0).collect();
+    tiles.retain(|t| !have.contains(&t.0));
+    Ok(())
+}
+
+/// Plans download of `bounds`, skipping tiles `existing` offline map already has.
+pub fn plan(bounds: [f64; 4], existing: &Path) -> Result<Plan, String> {
     // Directory lookups per tile get slow for huge areas; refuse before network use.
     let (x0, y0, x1, y1) = range(bounds, 15);
     if u64::from(x1 - x0 + 1) * u64::from(y1 - y0 + 1) > 20_000 {
@@ -150,6 +169,10 @@ pub fn plan(bounds: [f64; 4]) -> Result<Plan, String> {
                 }
             }
         }
+    }
+    skip_existing(&mut tiles, existing, &remote)?;
+    if tiles.is_empty() {
+        return Err("Area already downloaded".into());
     }
     let mut unique: Vec<(u64, u32)> = tiles.iter().map(|t| (t.1, t.2)).collect();
     unique.sort_unstable();
@@ -298,6 +321,25 @@ mod tests {
             "new area added"
         );
         assert_eq!(merged.entries().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn planning_skips_tiles_the_offline_map_already_has() {
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/downtown.pmtiles");
+        let remote = Archive::open(&fixture).unwrap();
+        let entries = remote.entries().unwrap();
+        let mut tiles = entries.clone();
+        tiles.push((u64::MAX, 0, 1));
+        skip_existing(&mut tiles, &fixture, &remote).unwrap();
+        assert_eq!(
+            tiles,
+            vec![(u64::MAX, 0, 1)],
+            "only the tile not held locally remains"
+        );
+        let mut tiles = entries.clone();
+        skip_existing(&mut tiles, &fixture.with_extension("missing"), &remote).unwrap();
+        assert_eq!(tiles.len(), entries.len(), "no local map: fetch everything");
     }
 
     #[test]

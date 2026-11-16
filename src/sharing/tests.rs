@@ -236,3 +236,25 @@ async fn unknown_peers_cannot_request_or_receive_locations() {
     a.close().await;
     stranger.close().await;
 }
+
+#[test]
+fn shared_trips_replay_as_friend_journal_oldest_first() {
+    let fix = |t: u64, lat: f64| serde_json::json!({"lat": lat, "lon": -111.0, "timestamp_ms": t, "accuracy_m": 4.0});
+    let walk = |start: u64, name: &str| serde_json::json!({"name": name, "fixes": (0..10).map(|i| fix(start + i * 2000, 40.0 + i as f64 * 1e-4)).collect::<Vec<_>>()});
+    // Newest first, as friends send them, plus one empty trip that is skipped.
+    let reply = serde_json::json!({"trips": [walk(1_000_000, "Later"), walk(1_000, "Earlier"), {"fixes": []}]});
+    let journal = super::transport::history_journal(&serde_json::to_vec(&reply).unwrap()).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("friend.jsonl");
+    std::fs::write(&path, journal).unwrap();
+    let store = crate::store::Store::open(&path).unwrap();
+    let names: Vec<_> = store.state.trips.iter().map(|t| t.name.as_str()).collect();
+    assert_eq!(names, ["Earlier", "Later"]);
+    assert!(
+        store
+            .state
+            .trips
+            .iter()
+            .all(|t| t.status == crate::model::Status::Finished && t.distance_m > 50.0)
+    );
+}

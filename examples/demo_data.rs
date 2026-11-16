@@ -207,7 +207,7 @@ fn main() -> Result<(), String> {
     std::fs::create_dir_all(&out).map_err(|e| e.to_string())?;
     let map = out.join("basemap.pmtiles");
     if !map.exists() {
-        let plan = download::plan(download::square([center.lon, center.lat], side))?;
+        let plan = download::plan(download::square([center.lon, center.lat], side), &map)?;
         eprintln!("downloading {} MB map", plan.bytes >> 20);
         let partial = out.join("basemap.pmtiles.tmp");
         download::fetch(plan, &map, &partial, &download::Progress::default())?;

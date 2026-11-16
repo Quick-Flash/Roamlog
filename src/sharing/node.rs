@@ -328,6 +328,13 @@ mod tests {
                 .unwrap(),
             );
         }
+        // Friend 1 has a profile picture; friend 0 should fetch it on connect.
+        let picture = b"\x89PNG\r\n\x1a\nfake".to_vec();
+        std::fs::write(
+            crate::sharing::transport::own_avatar_path(&dirs[1].path().join("sharing")),
+            &picture,
+        )
+        .unwrap();
         managers[0]
             .update_fix(sample(40.0), false, now_ms())
             .unwrap();
@@ -355,6 +362,13 @@ mod tests {
                 std::time::Instant::now() < deadline,
                 "nodes did not exchange"
             );
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        let avatar =
+            crate::sharing::transport::friend_avatar_path(&dirs[0].path().join("sharing"), ids[1]);
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while std::fs::read(&avatar).ok() != Some(picture.clone()) {
+            assert!(std::time::Instant::now() < deadline, "avatar not fetched");
             std::thread::sleep(Duration::from_millis(200));
         }
         // Converged: stays connected (no replacement loop) over a few dial periods.

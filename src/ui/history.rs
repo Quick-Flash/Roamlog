@@ -3,7 +3,9 @@ use super::{state::UiState, tools::StatsTabProps};
 use crate::model::TripFilter;
 use std::collections::BTreeSet;
 use zgui::prelude::*;
+use zgui::reactive::UnsyncCallback;
 use zgui_ui::prelude::*;
+use zgui_ui_icons::{prelude::*, set::chevron::CHEVRON_DOWN, set::mark::CHECK};
 
 /// "3 min ago", "5 h ago", "2 d ago": no timezone needed.
 pub(super) fn age(now_ms: u64, then_ms: u64) -> String {
@@ -27,11 +29,12 @@ pub fn History() -> impl IntoView {
     view! {
         Dialog(open=s.trips_open) {
             DialogTrigger(variant=ButtonVariant::Outline) {"History"}
-            DialogContent(class="sheet") {
+            DialogContent(class="sheet history-sheet") {
                 DialogHeader {
                     DialogTitle {"History"}
                     DialogDescription {{move ||s.data.with(|d|format!("{} trips · {} lifetime",d.trips.len(),s.distance(d.total_distance(None))))}}
                 }
+                PersonPicker()
                 Tabs(default_value="trips".to_string(),class="history-tabs") {
                     TabsList(class="tabs-list") {
                         TabsTrigger(value="trips") {"Trips"}
@@ -82,8 +85,32 @@ fn TripsTab() -> impl IntoView {
     let period = RwSignal::new_local("all".to_string());
     let days = RwSignal::new_local("7".to_string());
     let range = RwSignal::new_local(None::<DateRange>);
+    // Friend and group filters: trips added from friends' history.
+    let sources = RwSignal::new_local(Vec::<(String, String, Vec<u64>)>::new());
+    let directory = s.directory.get_value();
+    spawn_local(async move {
+        #[cfg(target_os = "android")]
+        let found = blocking(move || super::friends::history_sources(&directory)).await;
+        #[cfg(not(target_os = "android"))]
+        let found = {
+            let _ = directory;
+            Vec::new()
+        };
+        sources.set(found);
+    });
     let listed = move || {
-        let filter = parse_filter(&browse.get()).unwrap_or_default();
+        let value = browse.get();
+        let filter = parse_filter(&value)
+            .or_else(|| {
+                sources.with(|all| {
+                    all.iter()
+                        .find(|source| source.0 == value)
+                        .map(|source| TripFilter::Trips {
+                            trip_ids: source.2.clone(),
+                        })
+                })
+            })
+            .unwrap_or_default();
         s.data.with(|d| {
             d.trips
                 .iter()
@@ -122,12 +149,15 @@ fn TripsTab() -> impl IntoView {
         column(class="tab-body") {
             row(class="filter-row") {
                 Select(value=browse) {
-                    SelectTrigger(label="Filter history by category",class="history-filter") {SelectValue()}
+                    SelectTrigger(label="Filter history by category, friend or group",class="history-filter") {SelectValue()}
                     SelectContent {
                         SelectItem(value="all") {"All trips"}
                         SelectItem(value="uncategorized") {"Uncategorized"}
                         for category in move ||s.data.with(|d|d.categories.clone()),key=|c|c.id {
                             SelectItem(value=format!("category:{}",category.id)) {{category.name}}
+                        }
+                        for source in move ||if s.people.with(|p|!p.is_empty()){Vec::new()}else{sources.get()},key=|source|source.0.clone() {
+                            SelectItem(value=source.0.clone()) {{source.1.clone()}}
                         }
                     }
                 }
@@ -173,5 +203,110 @@ mod tests {
         assert_eq!(age(5 * 3_600_000, 0), "5 h ago");
         assert_eq!(age(50 * 3_600_000, 0), "2 d ago");
         assert_eq!(duration(95 * 60_000), "1:35 h");
+    }
+}
+
+/// Whose trips History and map show: you by default; tap friends to add them, or a group
+/// to show you and all its members together.
+#[component]
+fn PersonPicker() -> impl IntoView {
+    let s = UiState::current();
+    type People = Vec<(String, String)>;
+    let people = RwSignal::new_local(People::new());
+    let groups = RwSignal::new_local(Vec::<(String, People)>::new());
+    let directory = s.directory.get_value();
+    spawn_local(async move {
+        #[cfg(target_os = "android")]
+        let found = blocking(move || {
+            (
+                super::friends::people(&directory),
+                super::friends::groups_with_trips(&directory),
+            )
+        })
+        .await;
+        #[cfg(not(target_os = "android"))]
+        let found = {
+            let _ = directory;
+            (People::new(), Vec::new())
+        };
+        people.set(found.0);
+        groups.set(found.1);
+    });
+    let me = || ("me".to_string(), "Me".to_string());
+    // Empty selection means own trips only.
+    let shown = move |id: &str| {
+        s.people.with(|p| {
+            if p.is_empty() {
+                id == "me"
+            } else {
+                p.iter().any(|x| x.0 == id)
+            }
+        })
+    };
+    let toggle = move |person: (String, String)| {
+        let mut current = s.people.get_untracked();
+        if current.is_empty() {
+            current.push(me());
+        }
+        if let Some(at) = current.iter().position(|p| p.0 == person.0) {
+            current.remove(at);
+        } else {
+            current.push(person);
+        }
+        s.set_people(current);
+    };
+    let label = move || {
+        let names = s.people_label();
+        if names.is_empty() {
+            "Showing: My trips".to_string()
+        } else if s.people.with(Vec::len) > 3 {
+            format!("Showing: {} people", s.people.with(Vec::len))
+        } else {
+            format!("Showing: {names}")
+        }
+    };
+    view! {
+        if move ||!people.with(Vec::is_empty) {
+            DropdownMenu {
+                DropdownMenuTrigger(variant=ButtonVariant::Outline,class="person-select",a11y:label="Choose whose trips to show") {
+                    text(class="person-select-label") {{label}}
+                    Icon(icon=CHEVRON_DOWN)
+                }
+                DropdownMenuContent(class="person-menu") {
+                    MenuLabel {"People"}
+                    MenuItem(close_on_select=false,class="person-item",on_select=UnsyncCallback::new(move |()|toggle(me()))) {
+                        CheckSquare(on=Signal::derive_local(move ||shown("me")))
+                        text {"Me"}
+                    }
+                    for person in move ||people.get(),key=|p|p.0.clone() {
+                        MenuItem(close_on_select=false,class="person-item",on_select=UnsyncCallback::new({let p=person.clone();move |()|toggle(p.clone())})) {
+                            CheckSquare(on=Signal::derive_local({let id=person.0.clone();move ||shown(&id)}))
+                            text {{person.1.clone()}}
+                        }
+                    }
+                    if move ||!groups.with(Vec::is_empty) {
+                        MenuSeparator()
+                        MenuLabel {"Groups"}
+                    }
+                    for group in move ||groups.get(),key=|g|g.0.clone() {
+                        MenuItem(close_on_select=false,on_select=UnsyncCallback::new({let members=group.1.clone();move |()|{let mut all=vec![me()];all.extend(members.clone());s.set_people(all)}})) {{format!("Me + {}",group.0)}}
+                    }
+                    MenuSeparator()
+                    MenuItem(close_on_select=false,on_select=UnsyncCallback::new(move |()|s.set_people(Vec::new()))) {"Only my trips"}
+                }
+            }
+        }
+    }
+}
+
+/// Always-visible checkbox square for menu rows; filled with a tick when on.
+#[component]
+fn CheckSquare(on: Signal<bool, LocalStorage>) -> impl IntoView {
+    view! {
+        box(class="check-square",class:check-square-on=move ||on.get()) {
+            if move ||on.get() {
+                Icon(icon=CHECK,class="check-square-tick")
+            }
+        }
     }
 }

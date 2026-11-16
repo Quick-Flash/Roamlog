@@ -37,7 +37,9 @@ pub fn HistoryTrip(id: u64, selected: RwSignal<BTreeSet<u64>, LocalStorage>) -> 
                     format!("{inferred}{new}{state}").trim_start_matches(" · ").to_string()
                 }).unwrap_or_default())}}
             }
-            Button(variant=ButtonVariant::Ghost,class=format!("row-action edit-trip edit-trip-{id}"),on:click=move |_|s.edit_trip(id),a11y:label=format!("Edit trip #{id}")) {"Edit"}
+            if move ||s.people.with(Vec::is_empty) {
+                Button(variant=ButtonVariant::Ghost,class=format!("row-action edit-trip edit-trip-{id}"),on:click=move |_|s.edit_trip(id),a11y:label=format!("Edit trip #{id}")) {"Edit"}
+            }
         }
     }
 }

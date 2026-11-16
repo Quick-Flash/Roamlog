@@ -134,11 +134,13 @@
    icon 4px outward for icon+word buttons; ours hold icon alone, so that shifted it 2px left. */
 .zui-button .zui-icon { display: block; margin: 0 !important; }
 /* Sheets scroll vertically only; wide content must never let them drag sideways. */
-.sheet-scroll, .trips-scroll, .area-scroll, .trip-editor-scroll { overflow-x: hidden; overflow-y: auto; }
-.sheet-scroll > *, .trips-scroll > *, .area-scroll > *, .trip-editor-scroll > * { max-width: 100%; min-width: 0; }
+.sheet-scroll, .trips-scroll, .area-scroll, .trip-editor-scroll { overflow-x: clip; overflow-y: auto; }
+/* Content clips its own sideways overhang (e.g. a border past 100% width), so a scrolling
+   sheet has nothing to the side to scroll to. `clip` here is not a scroll container. */
+.sheet-scroll > *, .trips-scroll > *, .area-scroll > *, .trip-editor-scroll > * { max-width: 100%; min-width: 0; overflow-x: clip; }
 
 /* Friend locations: green live, gray when stale or disconnected. */
-.friend-marker { position: absolute; left: 0; top: 0; flex-direction: row; align-items: center; gap: 4px; pointer-events: none; }
+.friend-marker { position: absolute; left: 0; top: 0; flex-direction: column; align-items: center; gap: 3px; pointer-events: none; }
 .friend-dot { width: 16px; height: 16px; box-sizing: border-box; border-radius: 50%; background: #16a34a; border: 2.5px solid #ffffff; }
 .friend-label { padding: 2px 6px; border-radius: 8px; background: var(--zui-color-card); color: var(--zui-color-card-foreground); font-size: 11px; white-space: nowrap; }
 .friend-stale .friend-dot { background: #8a8f98; }
@@ -149,3 +151,60 @@
 .qr-image { width: 280px; height: 280px; }
 .pair-name { font-weight: 600; font-size: 16px; }
 .pair-code { font-size: 26px; font-weight: 700; letter-spacing: 2px; align-self: center; }
+.share-card { gap: 6px; padding: 10px 12px; border-radius: 12px; background: var(--zui-color-muted); border: 1px solid var(--zui-color-border); }
+.friends-scroll { max-height: 50vh; }
+.row-actions { gap: 6px; flex-wrap: wrap; }
+.row-actions .zui-button { flex: 1; min-width: 0; height: 34px; min-height: 34px; padding: 0 8px; font-size: 13px; }
+.create-row { gap: 8px; align-items: center; }
+.create-row .grow { flex: 1; min-width: 0; }
+.history-sheet { height: min(88vh, 820px); }
+/* Dropdown list at least as wide as its button. */
+.zui-select__list { min-width: var(--zui-popper-anchor-width, 128px) !important; }
+/* History fills its fixed-height sheet; only the trip list scrolls. */
+.history-sheet .history-tabs { flex: 1; min-height: 0; }
+.history-sheet .history-tabs > * { min-height: 0; }
+.history-sheet .tab-body { flex: 1; min-height: 0; }
+.history-sheet .sheet-scroll { flex: 1; min-height: 0; max-height: none; }
+.friends-sheet { height: min(88vh, 820px); }
+.friends-sheet .friends-tabs { flex: 1; min-height: 0; }
+.friends-sheet .friends-scroll { flex: 1; min-height: 0; max-height: none; }
+.person-select { align-self: stretch; justify-content: space-between; gap: 8px; }
+.person-select-label { flex: 1; min-width: 0; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.person-menu { min-width: var(--zui-popper-anchor-width, 200px) !important; }
+.map-chip.person-chip { gap: 6px; }
+.back-to-history { align-self: flex-start; gap: 4px; height: 32px; min-height: 32px; padding: 0 8px; }
+.person-item { gap: 10px; padding-left: 8px; }
+.check-square { width: 18px; height: 18px; flex-shrink: 0; box-sizing: border-box; border-radius: 4px; border: 2px solid var(--zui-color-muted-foreground); align-items: center; justify-content: center; }
+.check-square-on { background: var(--zui-color-primary); border-color: var(--zui-color-primary); color: var(--zui-color-primary-foreground); }
+.check-square-tick { width: 14px; height: 14px; }
+.friend-line { gap: 8px; align-items: center; }
+.friend-text { flex: 1; min-width: 0; gap: 1px; }
+.small { font-size: 12px; }
+.access-select { width: 104px; height: 34px; min-height: 34px; font-size: 13px; }
+.row-menu, .icon-button { width: 36px; height: 36px; min-height: 36px; padding: 0; }
+.friend-row { padding: 8px 0; gap: 4px; }
+.confirm-line { gap: 6px; align-items: center; }
+.confirm-line .zui-button { height: 32px; min-height: 32px; padding: 0 12px; }
+.pair-panel { gap: 8px; padding: 10px 12px; border-radius: 12px; border: 1px solid var(--zui-color-border); }
+.pair-head { align-items: center; }
+.grow { flex: 1; min-width: 0; }
+.add-friend { gap: 6px; }
+.list-body { gap: 0; }
+.friend-avatar { width: 36px; height: 36px; border-radius: 18px; overflow: hidden; border: 2.5px solid #16a34a; box-sizing: border-box; background: var(--zui-color-card); }
+.friend-avatar-image { width: 100%; height: 100%; object-fit: cover; }
+.friend-stale .friend-avatar { border-color: #8a8f98; opacity: 0.75; }
+.settings-avatar { width: 40px; height: 40px; border-radius: 20px; flex-shrink: 0; }
+.people-menu { min-width: 200px; }
+.friend-pin { position: absolute; left: 0; top: 0; pointer-events: none; }
+.friend-dot.friend-stale { background: #8a8f98; }
+.friend-label.friend-stale { color: var(--zui-color-muted-foreground); }
+.friend-avatar.friend-stale { border-color: #8a8f98; opacity: 0.75; }
+.friend-label.friend-pin { padding: 1px 6px; border-radius: 6px; line-height: 14px; }
+.own-avatar { border-color: #4285f4; }
+.people-item { gap: 10px; }
+.menu-avatar { width: 28px; height: 28px; border-radius: 14px; overflow: hidden; flex-shrink: 0; }
+.menu-avatar-empty { width: 14px; height: 14px; border-radius: 7px; margin: 7px; background: #16a34a; border: 2px solid #ffffff; box-sizing: border-box; }
+.sheet { overflow-x: clip; touch-action: pan-y; }
+.sheet-scroll, .trips-scroll, .area-scroll, .trip-editor-scroll { touch-action: pan-y; }
+.you-avatar { width: 48px; height: 48px; min-height: 48px; padding: 0; border-radius: 24px; }
+.avatar-empty { align-items: center; justify-content: center; border: 2px dashed var(--zui-color-muted-foreground); box-sizing: border-box; }

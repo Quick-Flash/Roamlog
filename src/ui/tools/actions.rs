@@ -37,7 +37,9 @@ impl UiState {
                 .iter()
                 .filter(|s| s.first_trip == Some(id))
                 .map(|s| s.start.distance(s.end))
-                .sum()
+                .sum::<f64>()
+                // Empty float sum is -0.0, which prints as "-0.00".
+                .max(0.0)
         })
     }
 

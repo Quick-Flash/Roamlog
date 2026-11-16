@@ -9,6 +9,7 @@ pub(crate) mod settings;
 mod snapshot;
 pub(crate) mod state;
 pub(crate) mod tools;
+mod trip_sources;
 mod update_controls;
 mod update_notice;
 mod update_state;
@@ -37,6 +38,9 @@ pub fn Roamlog() -> impl IntoView {
         s.download_status();
         s.start_position();
         s.refresh_friends();
+        if tick.get_value().is_multiple_of(5) {
+            s.auto_map();
+        }
     });
     #[cfg(target_os = "android")]
     {

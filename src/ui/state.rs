@@ -21,7 +21,11 @@ use zgui::prelude::*;
 /// Friend position received by the sharing service.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FriendMarker {
+    /// Peer ID.
+    pub id: String,
     pub name: String,
+    /// Profile picture URL while its image handle lives in `UiState::avatars`.
+    pub avatar: Option<String>,
     pub point: Point,
     pub accuracy_m: f64,
     pub timestamp_ms: i64,
@@ -110,6 +114,25 @@ pub struct UiState {
     /// Invitation link opened from camera, link or image, awaiting user action.
     #[cfg_attr(not(target_os = "android"), allow(dead_code))]
     pub invite_link: RwSignal<String, LocalStorage>,
+    /// Whose trips History and map show: empty is own only; else ("me" or peer ID, name),
+    /// merged read-only.
+    pub people: RwSignal<Vec<(String, String)>, LocalStorage>,
+    /// Friend pictures by peer ID: file time and registered image.
+    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+    avatars: StoredValue<
+        std::collections::HashMap<String, (std::time::SystemTime, zgui_image::ImageBytes)>,
+        LocalStorage,
+    >,
+    /// Automatic offline map downloads: "off", "wifi" (unmetered only), or "any".
+    /// Saved in `auto-map` file.
+    pub auto_map_mode: RwSignal<String, LocalStorage>,
+    /// Own profile picture URL, shown on own map dot and in Friends.
+    pub own_avatar: RwSignal<Option<String>, LocalStorage>,
+    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+    own_avatar_handle:
+        StoredValue<Option<(std::time::SystemTime, zgui_image::ImageBytes)>, LocalStorage>,
+    /// Map centers where an automatic map download was already tried (z10 tile).
+    map_tried: StoredValue<std::collections::HashSet<(u32, u32)>, LocalStorage>,
     /// Friend (peer ID, name) whose trips are being viewed.
     #[cfg_attr(not(target_os = "android"), allow(dead_code))]
     pub friend_trips: RwSignal<Option<(String, String)>, LocalStorage>,
@@ -134,6 +157,10 @@ impl UiState {
         let show_roads =
             std::fs::read_to_string(directory.join("show-roads")).map_or(true, |v| v != "off");
         let heatmap = std::fs::read_to_string(directory.join("heatmap")).is_ok_and(|v| v == "on");
+        let auto_map_mode = std::fs::read_to_string(directory.join("auto-map"))
+            .ok()
+            .filter(|v| matches!(v.as_str(), "off" | "wifi" | "any"))
+            .unwrap_or_else(|| "wifi".into());
         let show_friends =
             std::fs::read_to_string(directory.join("show-friends")).map_or(true, |v| v != "off");
         Self {
@@ -194,6 +221,12 @@ impl UiState {
             friend_markers: RwSignal::new_local(Vec::new()),
             invite_link: RwSignal::new_local(String::new()),
             friend_trips: RwSignal::new_local(None),
+            people: RwSignal::new_local(Vec::new()),
+            avatars: StoredValue::new_local(Default::default()),
+            map_tried: StoredValue::new_local(Default::default()),
+            own_avatar: RwSignal::new_local(None),
+            auto_map_mode: RwSignal::new_local(auto_map_mode),
+            own_avatar_handle: StoredValue::new_local(None),
         }
     }
 
@@ -219,7 +252,8 @@ impl UiState {
         let directory = self.directory.get_value();
         // History actions close their dialog; refresh must survive that owner disappearing.
         zgui::reactive::spawn_detached(async move {
-            let result = super::snapshot::load(directory, filter.clone(), map).await;
+            let people = self.people.get_untracked();
+            let result = super::snapshot::load(directory, filter.clone(), map, people).await;
             match result {
                 Ok(value) => {
                     let state = value.state;
@@ -348,6 +382,17 @@ impl UiState {
         }
     }
 
+    /// Moves map to `point` and stops following own position.
+    pub fn center_on(self, point: Point) {
+        let Some(center) = project(point.lon, point.lat) else {
+            return;
+        };
+        self.follow.set(false);
+        self.anchored.set(true);
+        let zoom = self.camera.get_untracked().zoom.max(15.0);
+        self.camera.set(Camera { center, zoom });
+    }
+
     fn center_on_position(self) {
         let Some((point, _)) = self.position.get_untracked() else {
             return;
@@ -396,7 +441,8 @@ impl UiState {
             .set(format!("Checking size of {side_km:.0} km area…"));
         // Detached: dialog closing disposes its scope, which would cancel scoped task.
         zgui::reactive::spawn_detached(async move {
-            let result = blocking(move || download::plan(bounds)).await;
+            let existing = self.directory.get_value().join("basemap.pmtiles");
+            let result = blocking(move || download::plan(bounds, &existing)).await;
             if seq != self.plan_seq.get_value() {
                 return;
             }
@@ -416,6 +462,11 @@ impl UiState {
 
     /// Downloads sized plan and merges it into offline map.
     pub fn start_download(self) {
+        self.settings_open.set(false);
+        self.begin_download();
+    }
+
+    fn begin_download(self) {
         let mut plan = None;
         self.plan.update_value(|p| plan = p.take());
         let Some(plan) = plan else {
@@ -423,7 +474,6 @@ impl UiState {
         };
         self.plan_ready.set(false);
         self.plan_info.set(String::new());
-        self.settings_open.set(false);
         if self.download.with_value(Option::is_some) {
             self.message.set("Map download already running.".into());
             return;
@@ -505,6 +555,13 @@ impl UiState {
         self.save_preference("show-gps", if visible { "on" } else { "off" });
     }
 
+    pub fn set_auto_map(self, mode: &'static str) {
+        self.auto_map_mode.set(mode.to_owned());
+        // A new mode may allow areas skipped before (e.g. on mobile data).
+        self.map_tried.set_value(Default::default());
+        self.save_preference("auto-map", mode);
+    }
+
     pub fn set_show_friends(self, visible: bool) {
         self.show_friends.set(visible);
         self.save_preference("show-friends", if visible { "on" } else { "off" });
@@ -522,20 +579,43 @@ impl UiState {
                 self.invite_link.set(link);
                 self.friends_open.set(true);
             }
+            self.reload_own_avatar();
             let directory = self.directory.get_value();
+            let known: std::collections::HashMap<String, std::time::SystemTime> = self
+                .avatars
+                .with_value(|a| a.iter().map(|(k, v)| (k.clone(), v.0)).collect());
             zgui::reactive::spawn_detached(async move {
-                let markers = blocking(move || {
+                let (markers, pictures) = blocking(move || {
                     let published = crate::sharing::node::read_published(&directory);
                     let now = now_ms() as i64;
                     let fresh =
                         now - published.updated_ms <= crate::sharing::node::HEARTBEAT_MS * 2;
-                    published
+                    let sharing = directory.join("sharing");
+                    // Pictures: (peer, file time, new bytes when changed since last read).
+                    let mut pictures = Vec::new();
+                    for f in &published.friends {
+                        let path =
+                            crate::sharing::transport::friend_avatar_path(&sharing, f.peer_id);
+                        let Ok(time) = std::fs::metadata(&path).and_then(|m| m.modified()) else {
+                            continue;
+                        };
+                        let id = f.peer_id.to_string();
+                        let bytes = if known.get(&id) == Some(&time) {
+                            None
+                        } else {
+                            std::fs::read(&path).ok()
+                        };
+                        pictures.push((id, time, bytes));
+                    }
+                    let markers = published
                         .friends
                         .into_iter()
                         .filter_map(|f| {
                             let l = f.location?;
                             Some(FriendMarker {
+                                id: f.peer_id.to_string(),
                                 name: f.name,
+                                avatar: None,
                                 point: Point {
                                     lat: f64::from(l.latitude_e7) / 1e7,
                                     lon: f64::from(l.longitude_e7) / 1e7,
@@ -545,14 +625,137 @@ impl UiState {
                                 live: fresh && f.connected && f.sharing_active,
                             })
                         })
-                        .collect::<Vec<_>>()
+                        .collect::<Vec<_>>();
+                    (markers, pictures)
                 })
                 .await;
+                self.avatars.update_value(|avatars| {
+                    avatars.retain(|id, _| pictures.iter().any(|p| &p.0 == id));
+                    for (id, time, bytes) in pictures {
+                        if let Some(bytes) = bytes {
+                            avatars.insert(id, (time, zgui_image::ImageBytes::new(bytes)));
+                        }
+                    }
+                });
+                let markers: Vec<_> = markers
+                    .into_iter()
+                    .map(|mut m| {
+                        m.avatar = self.avatars.with_value(|a| a.get(&m.id).map(|v| v.1.url()));
+                        m
+                    })
+                    .collect();
                 if self.friend_markers.with_untracked(|m| m != &markers) {
                     self.friend_markers.set(markers);
                 }
             });
         }
+    }
+
+    /// Re-registers own picture only when its file changed, so the image is not
+    /// replaced (and reloaded) while it is showing.
+    #[cfg(target_os = "android")]
+    pub fn reload_own_avatar(self) {
+        let path =
+            crate::sharing::transport::own_avatar_path(&self.directory.get_value().join("sharing"));
+        let time = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+        let known = self
+            .own_avatar_handle
+            .with_value(|h| h.as_ref().map(|h| h.0));
+        if time == known {
+            return;
+        }
+        let image = time.and_then(|time| {
+            std::fs::read(&path)
+                .ok()
+                .map(|bytes| (time, zgui_image::ImageBytes::new(bytes)))
+        });
+        self.own_avatar.set(image.as_ref().map(|i| i.1.url()));
+        self.own_avatar_handle.set_value(image);
+    }
+
+    /// Downloads offline map for the viewed area when it has none, so vector map and
+    /// road coverage work without a manual download. Unmetered networks only on Android.
+    pub fn auto_map(self) {
+        if self.download.with_value(Option::is_some) || self.plan_ready.get_untracked() {
+            return;
+        }
+        let mode = self.auto_map_mode.get_untracked();
+        if mode == "off" {
+            return;
+        }
+        #[cfg(target_os = "android")]
+        {
+            let usable = zgui::app::android::system::network()
+                .ok()
+                .flatten()
+                .is_some_and(|n| n.validated && (mode == "any" || !n.metered));
+            if !usable {
+                return;
+            }
+        }
+        // Web Mercator tile of a point at zoom z.
+        let tile = |p: Point, z: u8| {
+            let n = f64::from(1u32 << z);
+            let x = ((p.lon + 180.0) / 360.0 * n).floor().clamp(0.0, n - 1.0) as u32;
+            let y = ((1.0 - p.lat.to_radians().tan().asinh() / std::f64::consts::PI) / 2.0 * n)
+                .floor()
+                .clamp(0.0, n - 1.0) as u32;
+            (x, y)
+        };
+        let archive = self.basemap.archive.get_untracked();
+        // Offline map has data at `p` (deepest level, where roads come from).
+        let covered = |p: Point| {
+            archive.as_ref().is_some_and(|a| {
+                let (x, y) = tile(p, a.max_zoom);
+                a.entry(a.max_zoom, x, y).ok().flatten().is_some()
+            })
+        };
+        // Tried areas: viewed (z10 tile) and history pieces (z12 tile, marked by top bit).
+        let fresh = |key: (u32, u32)| !self.map_tried.with_value(|t| t.contains(&key));
+        let camera = self.camera.get_untracked();
+        let [lon, lat] = geographic(camera.center);
+        let center = Point { lat, lon };
+        let mut wanted = None;
+        if camera.zoom >= 11.0 && fresh(tile(center, 10)) && !covered(center) {
+            wanted = Some((tile(center, 10), center));
+        }
+        if wanted.is_none() {
+            // Road coverage needs map under every trip shown (own or friends'):
+            // fetch next missing ~10 km piece, one per call.
+            let mut seen = std::collections::HashSet::new();
+            self.data.with_untracked(|d| {
+                for point in d.trips.iter().flat_map(|t| t.points.iter()) {
+                    let p = point.fix.point;
+                    let (x, y) = tile(p, 12);
+                    let key = (x | 1 << 31, y);
+                    // One archive lookup per area, not per GPS fix.
+                    if !seen.insert(key) {
+                        continue;
+                    }
+                    if fresh(key) && !covered(p) {
+                        wanted = Some((key, p));
+                        return;
+                    }
+                }
+            });
+        }
+        let Some((key, point)) = wanted else {
+            return;
+        };
+        self.map_tried.update_value(|t| {
+            t.insert(key);
+        });
+        let bounds = download::square([point.lon, point.lat], 10.0);
+        zgui::reactive::spawn_detached(async move {
+            let existing = self.directory.get_value().join("basemap.pmtiles");
+            if let Ok(plan) = blocking(move || download::plan(bounds, &existing)).await {
+                if self.download.with_value(Option::is_some) {
+                    return;
+                }
+                self.plan.set_value(Some(plan));
+                self.begin_download();
+            }
+        });
     }
 
     pub fn set_heatmap(self, on: bool) {
@@ -615,6 +818,33 @@ impl UiState {
         self.fit(points);
     }
 
+    /// Shows several people's trips together (miles, map, coverage), read-only; empty or
+    /// only "me" is own history.
+    pub fn set_people(self, mut people: Vec<(String, String)>) {
+        if people.iter().all(|p| p.0 == "me") {
+            people.clear();
+        }
+        if self.people.with_untracked(|old| *old == people) {
+            return;
+        }
+        self.people.set(people);
+        self.history_filter.set(TripFilter::All);
+        self.data.set(State::default());
+        self.sections.set(Vec::new());
+        self.refresh(true);
+    }
+
+    /// "Megan, Mum" for viewed people.
+    pub fn people_label(self) -> String {
+        self.people.with(|people| {
+            people
+                .iter()
+                .map(|p| p.1.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+    }
+
     pub fn set_history_filter(self, filter: TripFilter) {
         self.history_filter.set(filter);
         self.refresh(true);
@@ -652,8 +882,15 @@ impl UiState {
                 (count + 1, total + trip.distance_m)
             })
         });
+        let whose = self.people.with(|people| {
+            if people.is_empty() {
+                String::new()
+            } else {
+                format!("{}: ", self.people_label())
+            }
+        });
         format!(
-            "{} · {count} {} · {}",
+            "{whose}{} · {count} {} · {}",
             self.history_label(),
             if count == 1 { "trip" } else { "trips" },
             self.distance(distance)

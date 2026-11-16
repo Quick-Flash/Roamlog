@@ -426,6 +426,52 @@ pub(crate) fn scan_invite(directory: PathBuf) -> Result<(), String> {
     })
 }
 
+/// Profile picture: center square of picked photo, 128 px PNG, sent to friends.
+pub(crate) fn pick_avatar(directory: PathBuf) -> Result<(), String> {
+    document::open("image/*", move |picked| {
+        let doc = match picked {
+            Ok(Some(doc)) => doc,
+            Ok(None) => return,
+            Err(error) => return status(&directory, &format!("Could not open image: {error}")),
+        };
+        std::thread::spawn(move || {
+            let saved = (|| -> Result<(), String> {
+                let mut bytes = Vec::new();
+                std::io::Read::read_to_end(
+                    &mut std::io::Read::take(doc.file, 32 * 1024 * 1024),
+                    &mut bytes,
+                )
+                .map_err(|e| e.to_string())?;
+                let image = image::load_from_memory(&bytes).map_err(|e| e.to_string())?;
+                let side = image.width().min(image.height());
+                let square = image.crop_imm(
+                    (image.width() - side) / 2,
+                    (image.height() - side) / 2,
+                    side,
+                    side,
+                );
+                let small = square.resize_exact(128, 128, image::imageops::FilterType::Lanczos3);
+                let mut png = Vec::new();
+                small
+                    .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+                    .map_err(|e| e.to_string())?;
+                let path = crate::sharing::transport::own_avatar_path(&directory.join("sharing"));
+                let partial = path.with_extension("tmp");
+                std::fs::write(&partial, png)
+                    .and_then(|()| std::fs::rename(&partial, &path))
+                    .map_err(|e| e.to_string())
+            })();
+            status(
+                &directory,
+                &saved.map_or_else(
+                    |e| format!("Could not use picture: {e}"),
+                    |()| "Profile picture saved; friends see it within 30 minutes.".into(),
+                ),
+            );
+        });
+    })
+}
+
 pub(crate) fn share_text(text: &str) {
     zgui::app::android::share(text);
 }

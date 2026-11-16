@@ -33,7 +33,14 @@ pub fn Settings() -> impl IntoView {
                             }
                         }
                         text(class="section-title") {"Offline map"}
-                        text(class="muted") {"Download square around map center. Areas you already have are kept. Road coverage needs offline map."}
+                        text(class="muted") {"Road coverage and offline use need offline map. Areas you already have are kept; only missing tiles download."}
+                        text(class="muted") {"Download automatically where you look and along trips shown in History."}
+                        row(class="segmented") {
+                            Button(variant=ButtonVariant::Ghost,class:seg-on=move ||s.auto_map_mode.get()=="off",on:click=move |_|s.set_auto_map("off")) {"Off"}
+                            Button(variant=ButtonVariant::Ghost,class:seg-on=move ||s.auto_map_mode.get()=="wifi",on:click=move |_|s.set_auto_map("wifi")) {"Wi‑Fi only"}
+                            Button(variant=ButtonVariant::Ghost,class:seg-on=move ||s.auto_map_mode.get()=="any",on:click=move |_|s.set_auto_map("any")) {"Any network"}
+                        }
+                        text(class="muted") {"Or download a square around map center now:"}
                         row(class="segmented") {
                             Button(variant=ButtonVariant::Ghost,on:click=move |_|s.plan_download(10.0)) {"10 km"}
                             Button(variant=ButtonVariant::Ghost,on:click=move |_|s.plan_download(30.0)) {"30 km"}

@@ -25,11 +25,12 @@ pub(super) async fn load(
     directory: PathBuf,
     filter: TripFilter,
     map: bool,
+    people: Vec<(String, String)>,
 ) -> Result<Snapshot, String> {
     zgui::prelude::blocking(move || {
         let value = backend::request(
             directory,
-            json!({"op":"snapshot","map":map,"trip_filter":filter}),
+            json!({"op":"snapshot","map":map,"trip_filter":filter,"people":people}),
         )?;
         serde_json::from_value(value).map_err(|e| e.to_string())
     })

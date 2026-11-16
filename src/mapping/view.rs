@@ -10,7 +10,7 @@ use super::{
     tiles::{Config, Provider, Service},
     vector_tiles::VectorTiles,
 };
-use crate::ui::icons::{COMPASS, EXPLORE, FIT, LOCATE, SLIDERS};
+use crate::ui::icons::{COMPASS, EXPLORE, FIT, LOCATE, PEOPLE, SLIDERS};
 use crate::ui::{
     settings::SettingsProps,
     state::UiState,
@@ -30,7 +30,7 @@ use zgui::{
 use zgui_ui::prelude::*;
 use zgui_ui_icons::{
     prelude::*,
-    set::mark::{MINUS, PLUS},
+    set::mark::{CROSS, MINUS, PLUS},
 };
 
 #[component]
@@ -387,7 +387,14 @@ pub fn MapView() -> impl IntoView {
                         _ => format!("{} h ago", age / 3600),
                     };
                     let live = f.live && age < 900;
-                    Some((f.name.clone(), x, y, format!("{} · {when}", f.name), live))
+                    Some((
+                        f.name.clone(),
+                        x,
+                        y,
+                        format!("{} · {when}", f.name),
+                        live,
+                        f.avatar.clone(),
+                    ))
                 })
                 .collect::<Vec<_>>()
         })
@@ -604,14 +611,20 @@ pub fn MapView() -> impl IntoView {
                 for corner in move ||corners.get(),key=|c|(c.0.to_bits(),c.1.to_bits()) {
                     box(class="area-corner",style:transform=format!("translate({}px, {}px)",corner.0-9.0,corner.1-9.0)) {}
                 }
-                for friend in move ||friend_marks.get(),key=|f|(f.0.clone(),f.1.to_bits(),f.2.to_bits(),f.3.clone(),f.4) {
-                    box(class="friend-marker",class:friend-stale=!friend.4,style:transform=format!("translate({}px, {}px)",friend.1-8.0,friend.2-8.0)) {
-                        box(class="friend-dot") {}
-                        text(class="friend-label") {{friend.3.clone()}}
-                    }
+                // Marker box is 160 px wide; its dot or picture sits centered on the position
+                // and the label centered underneath.
+                for friend in move ||friend_marks.get(),key=|f|(f.0.clone(),f.1.to_bits(),f.2.to_bits(),f.3.clone(),f.4,f.5.clone()) {
+                    FriendPin(name=friend.0.clone(),x=friend.1,y=friend.2,label=friend.3.clone(),live=friend.4,avatar=friend.5.clone())
                 }
                 if move ||marker.get().is_some() {
-                    box(class="gps-dot",style:transform=move ||marker.get().map(|m|format!("translate({}px, {}px)",m.x-8.0,m.y-8.0))) {}
+                    if move ||s.own_avatar.get().is_none() {
+                        box(class="gps-dot",style:transform=move ||marker.get().map(|m|format!("translate({}px, {}px)",m.x-8.0,m.y-8.0))) {}
+                    }
+                    if move ||s.own_avatar.get().is_some() {
+                        box(class="friend-avatar own-avatar friend-pin",style:transform=move ||marker.get().map(|m|format!("translate({}px, {}px)",m.x-18.0,m.y-18.0))) {
+                            {zgui::elements::image().class("friend-avatar-image").src(Signal::derive_local(move ||s.own_avatar.get())).alt(Some("You".to_string())).into_view()}
+                        }
+                    }
                 }
                 }
                 text(class="attribution") {{move ||if three_d.get()&&s.satellite.get(){"Imagery: Esri, Vantor, Earthstar Geographics · Roads: © OpenStreetMap · Terrain: © Mapterhorn"}else if three_d.get(){"Protomaps © OpenStreetMap · Terrain: © Mapterhorn"}else if s.satellite.get(){"Imagery: Esri, Vantor, Earthstar Geographics, GIS User Community · Roads: © OpenStreetMap"}else if vector.get(){"Protomaps © OpenStreetMap"}else{"© OpenStreetMap contributors"}}}
@@ -630,6 +643,12 @@ pub fn MapView() -> impl IntoView {
                 AreasSheet()
                 if move ||cfg!(target_os="android") {
                     Button(variant=ButtonVariant::Secondary,class="map-chip friends-chip",on:click=move |_|s.friends_open.set(true)) {"Friends"}
+                }
+                if move ||s.people.with(|p|!p.is_empty()) {
+                    Button(class="map-chip person-chip",on:click=move |_|s.set_people(Vec::new()),a11y:label=move ||format!("Showing trips of {}; tap for only yours",s.people_label())) {
+                        text {{move ||s.people_label()}}
+                        Icon(icon=CROSS)
+                    }
                 }
                 if move ||three_d.get()||raster.get()||outside.get() {
                     Button(variant=ButtonVariant::Secondary,class="map-chip",on:click=move |_|offline.update(|v| *v = !*v)) {{move ||if offline.get(){"Offline"}else{"Online"}}}
@@ -658,6 +677,21 @@ pub fn MapView() -> impl IntoView {
                 Button(variant=ButtonVariant::Secondary,class="map-button",on:click=move |_|fit(),a11y:label="Fit selected paths") {Icon(icon=FIT)}
                 Button(variant=ButtonVariant::Secondary,class="map-button",on:click=move |_|s.settings_open.set(true),a11y:label="Settings") {Icon(icon=SLIDERS)}
                 Button(variant=ButtonVariant::Secondary,class="map-button",on:click=move |_|s.nearest_road(),a11y:label="Nearest untraveled road") {Icon(icon=EXPLORE)}
+                if move ||s.show_friends.get()&&!s.friend_markers.with(Vec::is_empty) {
+                    DropdownMenu {
+                        DropdownMenuTrigger(variant=ButtonVariant::Secondary,class="map-button",a11y:label="Find a friend on map") {Icon(icon=PEOPLE)}
+                        DropdownMenuContent(class="people-menu") {
+                            MenuLabel {"Center map on"}
+                            for friend in move ||s.friend_markers.get(),key=|f|(f.id.clone(),f.name.clone(),f.timestamp_ms) {
+                                MenuItem(class="people-item",on_select=zgui::reactive::UnsyncCallback::new({let point=friend.point;move |()|s.center_on(point)})) {
+                                    {friend.avatar.clone().map(|url|view!{box(class="menu-avatar") {{zgui::elements::image().class("friend-avatar-image").src(Some(url)).alt(Some(String::new())).into_view()}}})}
+                                    {friend.avatar.is_none().then(||view!{box(class="menu-avatar menu-avatar-empty") {}})}
+                                    text {{format!("{}{}",friend.name,if friend.live {""} else {" (last seen)"})}}
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -766,4 +800,33 @@ struct Marker {
     radius: f64,
     /// Accuracy circle covers whole viewport.
     cover: bool,
+}
+
+/// Friend on map: dot or picture placed exactly on the position (like own GPS dot), label
+/// centered underneath by its own width.
+#[component]
+fn FriendPin(
+    name: String,
+    x: f64,
+    y: f64,
+    label: String,
+    live: bool,
+    avatar: Option<String>,
+) -> impl IntoView {
+    let radius = if avatar.is_some() { 18.0 } else { 8.0 };
+    let picture = avatar.map(|url| {
+        view! {
+            box(class="friend-avatar friend-pin",class:friend-stale=!live,style:transform=format!("translate({}px, {}px)",x-radius,y-radius)) {
+                {zgui::elements::image().class("friend-avatar-image").src(Some(url)).alt(Some(format!("{name} picture"))).into_view()}
+            }
+        }
+    });
+    let dot = picture.is_none().then(|| {
+        view! {box(class="friend-dot friend-pin",class:friend-stale=!live,style:transform=format!("translate({}px, {}px)",x-radius,y-radius)) {}}
+    });
+    view! {
+        {picture}
+        {dot}
+        text(class="friend-label friend-pin",class:friend-stale=!live,style:transform=format!("translate({x}px, {}px) translateX(-50%)",y+radius+3.0)) {{label}}
+    }
 }

@@ -12,26 +12,38 @@ Open **Friends** on map.
   connections. During trips sends only while recording; friends' positions still
   arrive. Always sends in background. Any mode other than Off keeps a foreground
   notification with **Pause sharing**.
-- **Update while moving**: shortest gap between sent positions (15/30/60 s).
-  Stationary phones sample every 5 minutes and send at most every 10 minutes.
-- **Add friend**: enter your name, tap **Show invitation**. Friend scans the QR with
+- **You** card (top of Friends): tap your picture to choose one; ⋯ changes name,
+  update interval while moving (15/30/60 s), removes picture, or resets identity. Stationary phones sample every 5 minutes and send
+  at most every 10 minutes.
+- **+ Add friend** (Friends tab): tap **Show my QR**. Friend scans the QR with
   phone camera (opens Roamlog), opens shared link, or uses **Scan QR image**. Both
   phones show a code; tap **Codes match** only when codes are identical.
-- New direct friends see nothing until you pick **Trips** or **Always** for them.
-- **Groups**: create a group (e.g. Family), tap **Invite**, pair as above. Group
-  members share with every other member automatically; members you never paired
-  with are introduced by other members. **Leave** stops sharing with the group and
+- Each friend and each group has an access dropdown: **Hidden**, **Trips**, or
+  **Always**. A person sees the higher of their own access and their groups' access;
+  their row says when a group grants more. New direct friends start Hidden; new
+  groups start Always. ⋯ on a row holds Their trips, Rename, Block, Remove (or Invite,
+  Rename, Leave for groups).
+- **Groups**: create a group (e.g. Family), ⋯ → **Invite someone**, pair as above.
+  Members you never paired with are introduced by other members. **Leave** stops sharing with the group and
   tells members still connected; others learn through members.
-- **Trips** on a friend: lists their finished trips. **Add to my trips** copies one
-  into your history (e.g. a road trip where you forgot to record).
+- Friends' finished trips sync automatically on connect and every 6 hours, kept apart
+  from yours. **History → Showing** picks whose trips (several people, or you plus a
+  group) to see together with their miles, map paths, and road coverage; read-only.
+  ⋯ → **Their trips** → **Add to my trips** copies one into your own history.
 - **Rename**: local labels for friends and groups; nobody else sees them.
 - **Layers → Friend locations** toggles map markers. Gray marker: not live.
+- People button (map controls) lists friends with a location; tap one to center the
+  map on them. ⋯ → **Show on map** on a friend does the same. Friends list shows a
+  search box once you have four or more friends.
+- Profile picture: center square of chosen photo, 128 px. Your own map dot uses it;
+  friends fetch it on connect and every 30 minutes and show it instead of your dot,
+  and in the People list. Remove deletes it; friends drop it on their next fetch.
 - Friend status shows connection path: **direct** or **via relay**.
 
 ## Privacy rules
 
 - Permissions are checked on the sending phone before every packet.
-- Group membership means Always for each member (still subject to your mode).
+- Group access applies to every member (still subject to your mode).
   Any member can admit new members; only join groups of people you trust.
 - Friend trips are shared only with friends who can currently see your location,
   and only while your mode is not Off. Estimated gap segments are not shared.

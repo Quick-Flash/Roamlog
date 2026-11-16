@@ -184,3 +184,12 @@ Compass remains visible in both modes, even when north up. Its solid arrow
 points north relative to map view. Tap compass to reset north while retaining
 zoom and 3D tilt. Compass reports map/camera heading, rather than phone magnetic
 bearing or direction of travel.
+
+## Automatic offline maps
+
+Settings → Offline map → **Off / Wi-Fi only / Any network** (default Wi-Fi only).
+When on, Roamlog downloads about 10 × 10 km of map in the background wherever you
+look at street zoom (11+) and along every trip shown in History (own or friends'),
+one piece at a time, so road coverage works without manual downloads. Each area is
+tried once per app session; changing the setting retries. Every download, automatic
+or manual, fetches only tiles your offline map lacks and keeps the rest.

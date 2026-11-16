@@ -40,3 +40,11 @@ pub const FIT: IconData = IconData::new(
     24.0,
     "M3 3h7v2H5v5H3z M14 3h7v7h-2V5h-5z M3 14h2v5h5v2H3z M19 14h2v7h-7v-2h5z",
 );
+
+/// Find friends: two heads and shoulders.
+pub const PEOPLE: IconData = IconData::new(
+    "people",
+    24.0,
+    "M5.5 8a3.5 3.5 0 1 1 7 0a3.5 3.5 0 1 1 -7 0z M1 20c0-4 3-6.5 8-6.5s8 2.5 8 6.5z \
+     M14 5.2a3.2 3.2 0 1 1 3 5.6a5.5 5.5 0 0 0 -3 -5.6z M17.5 13.6c3.3.6 5.5 2.7 5.5 6.4h-4.2c0-2.6-.5-4.7-1.3-6.4z",
+);
