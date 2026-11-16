@@ -69,10 +69,42 @@ Open **Friends** on map.
 
 ## Limits
 
-- Serverless does not mean always reachable: relays may be needed.
-- Sharing is best-effort. Force-stop, power-off, or battery restrictions stop it.
-  After reboot Android may refuse a background location service start; Roamlog then
-  posts "Location sharing paused" and resumes when opened.
+- **Platform and connectivity:** sharing is Android only. Both phones need network
+  access at the same time to exchange data. Direct connections are not always
+  possible; public Iroh discovery and relays are external dependencies, and
+  restrictive networks or outages can prevent sharing. Relays forward encrypted
+  traffic; they are not an offline mailbox for missed updates.
+- **Background availability:** force-stop, power-off, or battery restrictions can
+  stop sharing. After reboot Android may refuse a background location service
+  start; Roamlog then posts "Location sharing paused" and resumes when opened.
+  The 15-minute watchdog retries service recovery, but cannot guarantee a restart
+  or uninterrupted delivery. Pairing temporarily pauses the service endpoint.
+- **Update frequency and accuracy:** the moving interval (15/30/60 s) is a target,
+  not a promise of a new location at each interval. Movement filtering, GPS
+  availability, Android scheduling, and network conditions affect updates.
+  Stationary phones sample every 5 minutes and send at most every 10 minutes.
+  Datagram delivery is not guaranteed, and reconnection retries back off from
+  15 seconds to 2 minutes. An authenticated sender can still provide an inaccurate
+  or fabricated GPS position.
+- **Old positions:** a marker is the latest received fix, not proof that someone
+  is still there or reachable. Fixes older than 15 minutes are marked stale;
+  only the newest position per friend is retained for up to 24 hours. Location
+  sharing does not provide a continuous history of a friend's movements.
+- **Permission scope:** During trips sends only while recording; Off also stops
+  receiving. A group grant can give someone access despite their individual
+  Hidden setting. New groups default to Always, and any member can admit others.
+  Leaving-group notifications propagate through connected members, so disconnected
+  phones may learn about the departure later.
+- **Copies cannot be recalled:** blocking, removing, leaving, or reducing access
+  stops future sharing under those permissions; it cannot erase data already
+  received or copied. The 24-hour location retention rule does not expire received
+  finished trips, screenshots, exports, or copies kept by someone else.
+- **Trip and profile sync:** finished trips sync on connection and every 6 hours,
+  not continuously. Trip access follows current location permission and requires
+  sharing to be enabled; there is no independent trip-only access setting.
+  Estimated gap segments are excluded. Trip responses are limited to 16 MiB, so
+  oversized transfers can fail. Profile pictures refresh on connection and every
+  30 minutes; changes and removals may remain visible until the next fetch.
 - **Reset sharing identity** (Friends sheet) makes a new key and deletes friends,
   groups, and received data; everyone pairs again. Use after a lost or exposed key,
   or when identity cannot load. Reinstall also loses identity. No cloud backup.
