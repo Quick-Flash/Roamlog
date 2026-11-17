@@ -808,7 +808,7 @@ struct Marker {
 /// Friend on map: dot or picture placed exactly on the position (like own GPS dot), label
 /// centered underneath by its own width.
 #[component]
-fn FriendPin(
+pub(super) fn FriendPin(
     name: String,
     x: f64,
     y: f64,

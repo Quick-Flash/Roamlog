@@ -6,7 +6,7 @@ use crate::sharing::{android_app as sharing, manager::Mode};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::time::{Duration, SystemTime};
 use zgui::app::android::{background, document, location, notification, permission, system};
 
@@ -502,6 +502,7 @@ pub(crate) fn open_settings() -> Result<(), String> {
 static GPS: Mutex<Option<Watch>> = Mutex::new(None);
 static GPS_WAITING: AtomicBool = AtomicBool::new(false);
 /// Sharing-only GPS watch and its interval, while sharing Always without a trip.
+static FRESH_UNTIL: AtomicI64 = AtomicI64::new(0);
 static SHARE_GPS: Mutex<Option<(Watch, Duration)>> = Mutex::new(None);
 
 fn recorder(event: background::Event) {
@@ -511,6 +512,12 @@ fn recorder(event: background::Event) {
     };
     match event {
         Event::Service { action, .. } if action == "sharing" => settle(&directory),
+        Event::Service { action, .. } if action == "locate" => refresh_gps(&directory),
+        Event::Alarm { id } if id == LOCATE_DONE => {
+            FRESH_UNTIL.store(0, Ordering::Relaxed);
+            SHARE_GPS.lock().expect("sharing lock").take();
+            settle(&directory);
+        }
         Event::Service { action, .. } if action == "identity_reset" => {
             SHARE_GPS.lock().expect("sharing lock").take();
             sharing::stop_node();
@@ -566,7 +573,24 @@ fn recorder(event: background::Event) {
     }
 }
 
+fn refresh_gps(directory: &Path) {
+    if sharing::mode(directory) != Mode::Off && GPS.lock().expect("recorder lock").is_none() {
+        FRESH_UNTIL.store(
+            crate::sharing::manager::now_ms() + 20_000,
+            Ordering::Relaxed,
+        );
+        share_gps(directory.to_owned(), Duration::from_secs(1));
+        let _ =
+            background::schedule_alarm(LOCATE_DONE, SystemTime::now() + Duration::from_secs(20));
+    }
+}
+
 const WATCHDOG: i32 = 7;
+const LOCATE_DONE: i32 = 8;
+
+pub(crate) fn sharing_timer_expired() {
+    let _ = background::send_service("sharing", "");
+}
 
 fn schedule_watchdog() {
     let at = SystemTime::now() + Duration::from_secs(15 * 60);
@@ -686,7 +710,11 @@ fn share_fix(directory: &Path, update: location::Update) {
         fix.bearing.map(f64::from),
         false,
     );
-    let interval = share_interval(directory, fix.speed);
+    let interval = if crate::sharing::manager::now_ms() < FRESH_UNTIL.load(Ordering::Relaxed) {
+        Duration::from_secs(1)
+    } else {
+        share_interval(directory, fix.speed)
+    };
     let changed = SHARE_GPS
         .lock()
         .expect("sharing lock")

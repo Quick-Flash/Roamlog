@@ -22,6 +22,7 @@ pub mod view;
 mod terrain;
 mod terrain_gestures;
 mod terrain_gpu;
+mod terrain_markers;
 mod terrain_surface;
 mod terrain_tiles;
 mod terrain_view;

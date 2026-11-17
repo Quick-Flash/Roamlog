@@ -308,7 +308,7 @@ pub async fn session(
                     let message = protocol::decode(&packet?, now_ms())?;
                     if !manager.ingest(connection.remote_id(), &message, now_ms())? { continue; }
                     match message {
-                        Message::LocationRequest => requested = true,
+                        Message::LocationRequest => { manager.refresh_requested(connection.remote_id(), now_ms())?; requested = true; },
                         Message::Ping { nonce } => manager.control(&connection, &Message::Pong { nonce })?,
                         Message::Hello => return Err("unexpected hello".into()),
                         _ => {},
@@ -325,6 +325,7 @@ pub async fn session(
                 last_status = Some(status);
             }
             manager.send_latest(&connection, now_ms(), requested)?;
+            manager.send_battery(&connection, now_ms())?;
             let directory = manager.friends().directory().to_owned();
             // Sync friend's trips on connect and every 6 hours; UI can also ask for a refresh.
             let auto = last_sync.is_none_or(|at: Instant| at.elapsed() >= TRIP_SYNC);

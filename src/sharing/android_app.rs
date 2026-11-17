@@ -10,7 +10,7 @@ use super::{
 use iroh::SecretKey;
 use jni::{
     JavaVM, jni_sig, jni_str,
-    objects::{Global, JObject},
+    objects::{Global, JObject, JString, JValue},
 };
 use std::{
     path::Path,
@@ -80,13 +80,19 @@ pub fn reset_identity(directory: &Path) -> Result<()> {
         "friend-locations.json",
         "group-notices.postcard",
         "group-fixes.postcard",
+        "places.json",
     ] {
         match std::fs::remove_file(sharing.join(name)) {
             Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error.into()),
             _ => {}
         }
     }
-    for name in ["friend-trips", "trip-requests", "groups"] {
+    for name in [
+        "friend-trips",
+        "trip-requests",
+        "location-requests",
+        "groups",
+    ] {
         let _ = std::fs::remove_dir_all(sharing.join(name));
     }
     Ok(())
@@ -108,11 +114,19 @@ pub fn mode(directory: &Path) -> Mode {
     #[derive(serde::Deserialize)]
     struct State {
         mode: Mode,
+        #[serde(default)]
+        expires_at_ms: Option<i64>,
     }
     std::fs::read(directory.join("sharing").join("location-state.json"))
         .ok()
         .and_then(|bytes| serde_json::from_slice::<State>(&bytes).ok())
-        .map_or(Mode::Off, |s| s.mode)
+        .map_or(Mode::Off, |s| {
+            if s.expires_at_ms.is_some_and(|until| now_ms() >= until) {
+                Mode::Off
+            } else {
+                s.mode
+            }
+        })
 }
 
 /// Service process has no android-activity glue; iroh reads DNS servers through this context.
@@ -147,6 +161,9 @@ pub fn sync_node(directory: &Path) -> Result<bool> {
     install_dns()?;
     let manager = manager(directory)?;
     let journal = directory.to_owned();
+    manager.set_refresh_source(std::sync::Arc::new(|| {
+        zgui::app::android::background::send_service("locate", "").map_err(Into::into)
+    }));
     manager.set_trip_source(std::sync::Arc::new(move || {
         let trips =
             crate::backend::request(journal.clone(), serde_json::json!({"op": "shared_trips"}))?;
@@ -413,4 +430,28 @@ pub fn qr_png(rows: &[String]) -> Result<Vec<u8>> {
     encoder.set_color(png::ColorType::Grayscale);
     encoder.write_header()?.write_image_data(&pixels)?;
     Ok(out)
+}
+
+/// BatteryManager reports percentage without a new Android permission.
+pub fn battery_percent() -> Result<Option<u8>> {
+    with_application(|env, application| {
+        let name = JString::from_str(env, "batterymanager")?;
+        let service = env
+            .call_method(
+                application,
+                jni_str!("getSystemService"),
+                jni_sig!("(Ljava/lang/String;)Ljava/lang/Object;"),
+                &[JValue::Object(name.as_ref())],
+            )?
+            .l()?;
+        let percent = env
+            .call_method(
+                &service,
+                jni_str!("getIntProperty"),
+                jni_sig!("(I)I"),
+                &[JValue::Int(4)],
+            )?
+            .i()?;
+        Ok((0..=100).contains(&percent).then_some(percent as u8))
+    })
 }

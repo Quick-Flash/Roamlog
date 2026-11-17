@@ -309,6 +309,42 @@ impl Scene {
         }
         leaves
     }
+    /// Project marker onto loaded terrain using same camera transform as GPU mesh.
+    pub fn screen_position(
+        &self,
+        point: crate::geo::Point,
+        camera: Camera,
+        orbit: Orbit,
+        size: [f64; 2],
+    ) -> Option<[f64; 2]> {
+        if size.iter().any(|v| !v.is_finite() || *v <= 0.) {
+            return None;
+        }
+        let p = super::camera::project(point.lon, point.lat)?;
+        let height = self
+            .tiles
+            .iter()
+            .filter_map(|tile| tile.mesh_height_at(p).map(|h| (tile.id.z, h)))
+            .max_by_key(|(z, _)| *z)?
+            .1;
+        let scale = ground_scale(camera);
+        let v = [
+            ((p[0] - camera.center[0]) * scale) as f32,
+            (height - self.center_height(camera)) * orbit.exaggeration,
+            ((camera.center[1] - p[1]) * scale) as f32,
+            1.,
+        ];
+        let m = orbit.matrix(camera, size);
+        let clip: [f32; 4] =
+            std::array::from_fn(|row| (0..4).map(|col| m[col * 4 + row] * v[col]).sum());
+        if clip[3] <= 0. || clip[2] < 0. || clip[2] > clip[3] {
+            return None;
+        }
+        let x = f64::from(clip[0] / clip[3]);
+        let y = f64::from(clip[1] / clip[3]);
+        (x.abs() <= 1. && y.abs() <= 1.)
+            .then_some([(x + 1.) * size[0] / 2., (1. - y) * size[1] / 2.])
+    }
     pub fn center_height(&self, camera: Camera) -> f32 {
         self.anchor
             .as_ref()
@@ -719,6 +755,53 @@ mod retention_tests {
                 .map(|tile| 1_u64 << (2 * (2 - tile.id.z)))
                 .sum::<u64>(),
             16
+        );
+    }
+    #[test]
+    fn markers_project_independently_on_terrain_and_clip_outside_view() {
+        let scene = Scene {
+            tiles: vec![tile(TileId { z: 0, x: 0, y: 0 }, vec![0.; 4])],
+            ..Default::default()
+        };
+        let camera = Camera {
+            zoom: 12.,
+            ..Default::default()
+        };
+        let orbit = Orbit {
+            bearing: 0.,
+            pitch: 45.,
+            ..Default::default()
+        };
+        let size = [800., 600.];
+        let own = crate::geo::Point { lon: 0., lat: 0. };
+        let friend = crate::geo::Point {
+            lon: 0.001,
+            lat: 0.,
+        };
+        let center = scene.screen_position(own, camera, orbit, size).unwrap();
+        let other = scene.screen_position(friend, camera, orbit, size).unwrap();
+        assert!((center[0] - 400.).abs() < 0.1);
+        assert!((center[1] - 300.).abs() < 0.1);
+        assert!(other[0] > center[0]);
+        assert!(
+            scene
+                .screen_position(
+                    crate::geo::Point { lon: 120., lat: 0. },
+                    camera,
+                    orbit,
+                    size
+                )
+                .is_none()
+        );
+        assert!(
+            scene
+                .screen_position(own, camera, orbit, [0., 600.])
+                .is_none()
+        );
+        assert!(
+            Scene::default()
+                .screen_position(own, camera, orbit, size)
+                .is_none()
         );
     }
     fn tile(id: TileId, heights: Vec<f32>) -> Tile {

@@ -4,6 +4,8 @@ mod history;
 mod history_dates;
 mod history_trip;
 pub(crate) mod icons;
+#[cfg(target_os = "android")]
+mod place_alerts;
 mod recorder;
 pub(crate) mod settings;
 mod snapshot;

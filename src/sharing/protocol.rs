@@ -3,7 +3,7 @@ use super::{Result, groups::GroupId};
 use iroh::{EndpointId, SecretKey, Signature};
 use serde::{Deserialize, Serialize};
 
-pub const ALPN: &[u8] = b"roamlog/location/2";
+pub const ALPN: &[u8] = b"roamlog/location/3";
 pub const MAX_FRAME: usize = 256;
 /// Above sender's current-fix window; sequence numbers, not age, prevent replay.
 pub const MAX_AGE_MS: i64 = 1_200_000;
@@ -39,6 +39,24 @@ impl LocationUpdate {
             || self.heading_cdeg.is_some_and(|heading| heading >= 36_000)
         {
             return Err("invalid or stale location update".into());
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BatteryStatus {
+    pub percent: Option<u8>,
+    pub timestamp_ms: i64,
+}
+impl BatteryStatus {
+    pub fn validate(&self, now: i64) -> Result<()> {
+        if self.percent.is_some_and(|p| p > 100)
+            || self.timestamp_ms <= 0
+            || self.timestamp_ms > now.saturating_add(FUTURE_SKEW_MS)
+            || self.timestamp_ms < now.saturating_sub(120_000)
+        {
+            return Err("invalid battery status".into());
         }
         Ok(())
     }
@@ -116,9 +134,10 @@ impl SignedGroupFix {
     }
 }
 
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Message {
     Hello,
+    BatteryStatus(BatteryStatus),
     LocationUpdate(LocationUpdate),
     GroupFix(SignedGroupFix),
     LocationRequest,
@@ -163,6 +182,7 @@ pub fn decode(frame: &[u8], now_ms: i64) -> Result<Message> {
     match &envelope.message {
         Message::LocationUpdate(location) => location.validate(now_ms)?,
         Message::GroupFix(fix) => fix.validate(now_ms)?,
+        Message::BatteryStatus(status) => status.validate(now_ms)?,
         _ => {}
     }
     Ok(envelope.message)

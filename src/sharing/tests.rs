@@ -578,3 +578,131 @@ async fn relay_admission_cutoff_block_gate_and_trip_withdrawal() {
     b.close().await;
     c_endpoint.close().await;
 }
+
+#[tokio::test]
+async fn refresh_requests_collect_fresh_fix_under_permissions_and_report_result() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    let a = endpoint().await;
+    let b = endpoint().await;
+    let da = tempfile::tempdir().unwrap();
+    let db = tempfile::tempdir().unwrap();
+    let ma = manager(da.path(), a.secret_key(), b.id());
+    let mb = manager(db.path(), b.secret_key(), a.id());
+    let (client, server) = tokio::join!(a.connect(b.addr(), protocol::ALPN), async {
+        b.accept().await.unwrap().await
+    });
+    let client = client.unwrap();
+    let server = server.unwrap();
+    ma.register(&client, true).unwrap();
+    let calls = Arc::new(AtomicUsize::new(0));
+    mb.set_refresh_source(Arc::new({
+        let calls = calls.clone();
+        move || {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }));
+    let now = now_ms();
+    assert!(!mb.refresh_requested(a.id(), now).unwrap());
+    mb.set_mode(Mode::Always).unwrap();
+    mb.friends()
+        .set_permission(a.id(), Permission::Always)
+        .unwrap();
+    mb.update_fix(sample(now - 1000), false, now).unwrap();
+    assert!(mb.send_latest(&server, now, true).unwrap());
+    let old = protocol::decode(&client.read_datagram().await.unwrap(), now).unwrap();
+    ma.ingest(b.id(), &old, now).unwrap();
+    ma.set_mode(Mode::Always).unwrap();
+    super::requests::queue(ma.friends(), b.id(), now).unwrap();
+    ma.poll_requests(now).unwrap();
+    assert_eq!(
+        protocol::decode(&server.read_datagram().await.unwrap(), now).unwrap(),
+        Message::LocationRequest
+    );
+    assert!(mb.refresh_requested(a.id(), now).unwrap());
+    assert!(!mb.refresh_requested(a.id(), now + 1).unwrap());
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    mb.update_fix(sample(now + 1), false, now + 1).unwrap();
+    assert!(mb.send_latest(&server, now + 1, false).unwrap()); // Fresh request bypasses 30s movement cadence once.
+    let fresh = protocol::decode(&client.read_datagram().await.unwrap(), now + 1).unwrap();
+    ma.ingest(b.id(), &fresh, now + 1).unwrap();
+    ma.poll_requests(now + 1).unwrap();
+    assert_eq!(
+        super::requests::read(ma.friends(), b.id()).unwrap().status,
+        "Fresh location received"
+    );
+    assert!(!mb.send_latest(&server, now + 2, false).unwrap());
+    assert!(super::requests::queue(ma.friends(), b.id(), now + 2).is_err());
+    mb.friends().block(a.id()).unwrap();
+    assert!(!mb.refresh_requested(a.id(), now + 70_000).unwrap());
+}
+
+#[tokio::test]
+async fn battery_is_opt_in_permission_gated_and_cleared_when_disabled() {
+    let a = endpoint().await;
+    let b = endpoint().await;
+    let da = tempfile::tempdir().unwrap();
+    let db = tempfile::tempdir().unwrap();
+    let ma = manager(da.path(), a.secret_key(), b.id());
+    let mb = manager(db.path(), b.secret_key(), a.id());
+    let (client, server) = tokio::join!(a.connect(b.addr(), protocol::ALPN), async {
+        b.accept().await.unwrap().await
+    });
+    let client = client.unwrap();
+    let server = server.unwrap();
+    let mut now = now_ms();
+    ma.set_mode(Mode::Always).unwrap();
+    ma.friends()
+        .set_permission(b.id(), Permission::Always)
+        .unwrap();
+    ma.update_battery(Some(73), now).unwrap();
+    assert!(!ma.shares_battery().unwrap());
+    for (enabled, permission, expected) in [
+        (false, Permission::Always, None),
+        (true, Permission::Always, Some(73)),
+        (true, Permission::Off, None),
+        (true, Permission::TripsOnly, None),
+        (false, Permission::Always, None),
+    ] {
+        now += 30_000;
+        ma.update_battery(Some(73), now).unwrap();
+        ma.set_share_battery(enabled).unwrap();
+        ma.friends().set_permission(b.id(), permission).unwrap();
+        ma.send_battery(&client, now).unwrap();
+        let message = protocol::decode(&server.read_datagram().await.unwrap(), now).unwrap();
+        assert_eq!(
+            message,
+            Message::BatteryStatus(protocol::BatteryStatus {
+                percent: expected,
+                timestamp_ms: now
+            })
+        );
+        mb.ingest(a.id(), &message, now).unwrap();
+        assert_eq!(
+            mb.snapshots(now).unwrap()[0].battery.unwrap().percent,
+            expected
+        );
+    }
+    // A received battery packet must not trigger an endless reply loop.
+    ma.send_battery(&client, now + 1).unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), server.read_datagram())
+            .await
+            .is_err()
+    );
+    assert!(ma.update_battery(Some(101), now).is_err());
+    assert!(
+        protocol::decode(
+            &protocol::encode(&Message::BatteryStatus(protocol::BatteryStatus {
+                percent: Some(255),
+                timestamp_ms: now
+            }))
+            .unwrap(),
+            now
+        )
+        .is_err()
+    );
+}

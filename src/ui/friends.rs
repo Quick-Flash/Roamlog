@@ -1,6 +1,7 @@
 //! Friends sheet: sharing mode, pairing by invitation, per-friend access, block and remove.
 // view! needs `move ||` closures for reactive `if`/`for`, even around plain functions.
 #![allow(clippy::redundant_closure)]
+use super::place_alerts::PlaceAlertsProps;
 use super::state::{UiState, now_ms};
 use crate::sharing::{
     android_app::{self as sharing, PairStep, Pairing},
@@ -64,6 +65,8 @@ struct MemberRow {
 #[derive(Clone, PartialEq)]
 struct Loaded {
     mode: Mode,
+    expires_at_ms: Option<i64>,
+    share_battery: bool,
     rows: Vec<Row>,
     groups: Vec<GroupRow>,
 }
@@ -129,7 +132,7 @@ fn load(directory: PathBuf) -> Result<Loaded, String> {
     let now = now_ms() as i64;
     let friends = manager.friends().list().map_err(|e| e.to_string())?;
     let groups = manager.friends().groups().map_err(|e| e.to_string())?;
-    let rows = friends
+    let rows: Vec<Row> = friends
         .iter()
         .map(|f| {
             let state = published.friends.iter().find(|p| p.peer_id == f.peer_id);
@@ -216,8 +219,33 @@ fn load(directory: PathBuf) -> Result<Loaded, String> {
             })
         })
         .collect::<Result<Vec<_>, String>>()?;
+    let rows = rows
+        .into_iter()
+        .map(|mut row: Row| {
+            if let Some(state) = published
+                .friends
+                .iter()
+                .find(|f| f.peer_id.to_string() == row.id)
+                && let Some(battery) = state
+                    .battery
+                    .filter(|b| now.saturating_sub(b.timestamp_ms) <= 120_000)
+                && let Some(percent) = battery.percent
+            {
+                row.status.push_str(&format!(" · Battery {percent}%"));
+            }
+            if let Ok(peer) = row.id.parse()
+                && let Some(request) = crate::sharing::requests::read(manager.friends(), peer)
+                && now.saturating_sub(request.at_ms) < 60_000
+            {
+                row.status.push_str(&format!(" · {}", request.status));
+            }
+            row
+        })
+        .collect();
     Ok(Loaded {
         mode: manager.mode().map_err(|e| e.to_string())?,
+        expires_at_ms: manager.expires_at_ms().map_err(|e| e.to_string())?,
+        share_battery: manager.shares_battery().map_err(|e| e.to_string())?,
         rows,
         groups,
     })
@@ -361,6 +389,10 @@ pub fn Friends() -> impl IntoView {
         }
     };
     let set_mode = move |mode: Mode| change(s, loaded, true, move |m| m.set_mode(mode));
+    let options_open = RwSignal::new_local(false);
+    let duration = RwSignal::new_local("1".to_string());
+    let duration_unit = RwSignal::new_local("60".to_string());
+    let places_open = RwSignal::new_local(false);
     let group_name = RwSignal::new_local(String::new());
     let group_policy = RwSignal::new_local("managed".to_string());
     let group_access = RwSignal::new_local(Permission::Always);
@@ -428,6 +460,44 @@ pub fn Friends() -> impl IntoView {
                         Mode::TripsOnly=>"Sends only while recording a trip. Friends still show.",
                         Mode::Always=>"Sends in background; slower when you are still.",
                     }}}
+                }
+                row(class="row-actions") {
+                    Button(variant=ButtonVariant::Outline,on:click=move |_|options_open.update(|v| *v = !*v)) {"Sharing options"}
+                    Button(variant=ButtonVariant::Outline,on:click=move |_|places_open.set(true)) {"Place alerts"}
+                }
+                if move ||options_open.get()&&!adding.get()&&idle() {
+                row(class="row-actions") {
+                    Input(value=duration,label="Sharing duration",placeholder="Amount")
+                    Select(value=duration_unit) {
+                        SelectTrigger(label="Duration unit") {SelectValue()}
+                        SelectContent {
+                            SelectItem(value="1") {"Minutes"}
+                            SelectItem(value="60") {"Hours"}
+                            SelectItem(value="1440") {"Days"}
+                        }
+                    }
+                    Button(variant=ButtonVariant::Outline,on:click=move |_|{
+                        let minutes = duration.get_untracked().trim().parse::<u32>().ok()
+                            .and_then(|amount| amount.checked_mul(duration_unit.get_untracked().parse::<u32>().unwrap_or(60)));
+                        let Some(minutes) = minutes.filter(|m| (1..=525_600).contains(m)) else {
+                            s.message.set("Enter a whole-number duration from 1 minute to 365 days".into());
+                            return;
+                        };
+                        change(s, loaded, true, move |m|m.set_timed(minutes));
+                    }) {"Share for this long"}
+                }
+                text(class="muted small") {{move ||loaded.with(|l|l.as_ref().and_then(|l|l.expires_at_ms)).map(|until|{
+                    format!("Sharing stops in {} min, including group grants and receiving.", ((until - s.now.get() as i64).max(0) + 59_999) / 60_000)
+                }).unwrap_or_else(||"Timer uses existing friend/group access. Choosing Off, During trips or Always cancels timer.".into())}}
+                row(class="row-actions") {
+                    Button(variant=ButtonVariant::Outline,on:click=move |_|{
+                        let enabled = !loaded.with_untracked(|l|l.as_ref().is_some_and(|l|l.share_battery));
+                        change(s, loaded, false, move |m|m.set_share_battery(enabled));
+                    },a11y:label="Toggle sharing battery percentage") {{move ||if loaded.with(|l|l.as_ref().is_some_and(|l|l.share_battery)){"Battery sharing: On"}else{"Battery sharing: Off"}}}
+                }
+                }
+                if move ||!options_open.get()&&loaded.with(|l|l.as_ref().and_then(|l|l.expires_at_ms)).is_some() {
+                    text(class="muted small") {{move ||loaded.with(|l|l.as_ref().and_then(|l|l.expires_at_ms)).map(|until|format!("Sharing stops in {} min",((until-s.now.get() as i64).max(0)+59_999)/60_000)).unwrap_or_default()}}
                 }
                 if move ||adding.get()||!idle() {
                     column(class="pair-panel") {
@@ -544,6 +614,7 @@ pub fn Friends() -> impl IntoView {
                 }
             }
         }
+        PlaceAlerts(open=places_open)
     }
 }
 
@@ -655,6 +726,19 @@ fn FriendRow(
                 None => s.message.set(format!("No location from {menu_name} yet")),
             }
         }
+        "locate" => {
+            let id = menu_id.clone();
+            change(s, loaded, false, move |m| {
+                if m.mode()? == Mode::Off {
+                    return Err("Enable sharing connections first".into());
+                }
+                crate::sharing::requests::queue(
+                    m.friends(),
+                    id.parse()?,
+                    crate::sharing::manager::now_ms(),
+                )
+            });
+        }
         "trips" => s
             .friend_trips
             .set(Some((menu_id.clone(), menu_name.clone()))),
@@ -667,6 +751,7 @@ fn FriendRow(
     } else {
         vec![
             ("map", "Show on map"),
+            ("locate", "Try to locate"),
             ("trips", "Their trips"),
             ("rename", "Rename"),
             ("block", "Block…"),

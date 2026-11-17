@@ -12,6 +12,27 @@ Open **Friends** on map.
   connections. During trips sends only while recording; friends' positions still
   arrive. Always sends in background. Any mode other than Off keeps a foreground
   notification with **Pause sharing**.
+- **Share for this long**: enter amount and choose Minutes, Hours or Days (up to 365 days). Starts Always
+  using existing friend/group grants, then switches globally Off (including
+  receiving). Countdown and deadline survive restart. Choosing another mode cancels timer.
+- **Battery sharing**: Off by default. Opt in to send battery percentage directly
+  to currently authorized friends/group members. Stale/disconnected status disappears;
+  battery status is not forwarded through group relay.
+- **Friend ⋯ → Try to locate** asks an online, authorized sender for fresh GPS.
+  Result says locating, fresh received, offline, or no fresh location. Requests are
+  limited to once per minute per person and never override Hidden, Block, timer expiry,
+  or inactive Trips. A short GPS watch runs for up to 20 seconds when needed.
+  This cannot wake a force-stopped or offline phone.
+- **Place alerts**: open Friends → Place alerts → **Draw place**, then draw boundary
+  using area controls and tap Done. Return to Place alerts, choose person, name and
+  Entering, Exiting or Both, then **Add drawn place**. Local notifications report
+  arrivals/departures. Definitions stay on this phone. First observation establishes
+  baseline; two distinct, accurate updates at least 15 seconds apart confirm changes.
+  Boundary uncertainty, stale/relayed fixes and gaps over five minutes cannot invent
+  an arrival. A pending change requests one fresh GPS fix after 15 seconds, subject
+  to Try to locate cooldown. Keep connections enabled and grant notification
+  permission. GPS/update cadence can delay alerts; this is not a guaranteed safety
+  notification service.
 - **You** card (top of Friends): tap your picture to choose one; ⋯ changes name,
   update interval while moving (15/30/60 s), removes picture, or resets identity. Stationary phones sample every 5 minutes and send
   at most every 10 minutes.
@@ -50,6 +71,7 @@ Open **Friends** on map.
 - Profile picture: center square of chosen photo, 128 px. Your own map dot uses it;
   friends fetch it on connect and every 30 minutes and show it instead of your dot,
   and in the People list. Remove deletes it; friends drop it on their next fetch.
+- Both 2D and 3D maps show own/friend profile pictures, names and stale/relay labels.
 - Friend status shows connection path: **direct** or **via relay**.
 
 ## Privacy rules
@@ -89,7 +111,7 @@ Open **Friends** on map.
   sides. Dial retry backs off 15 s → 2 min.
 - Location: postcard datagrams with sequence numbers and replay cursors.
   Signed group membership and digest acknowledgements, trip requests: reliable QUIC
-  streams on the same connection. Location ALPN is `roamlog/location/2`; pairing is
+  streams on the same connection. Location ALPN is `roamlog/location/3`; pairing is
   `roamlog/pair/2`. Group logs live in `sharing/groups/<id>.ops`; relay cache lives in
   `sharing/group-fixes.postcard`.
 - UI process reads `sharing/friend-locations.json`, written by the service.

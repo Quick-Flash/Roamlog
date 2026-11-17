@@ -45,12 +45,17 @@ struct Metadata {
     sequence: u64,
     policy: UpdatePolicy,
     received: Vec<Cursor>,
+    #[serde(default)]
+    expires_at_ms: Option<i64>,
+    #[serde(default)]
+    share_battery: bool,
 }
 
 #[derive(Clone, Serialize)]
 pub struct PeerLocation {
     pub peer_id: EndpointId,
     pub latest: Option<LocationUpdate>,
+    pub battery: Option<protocol::BatteryStatus>,
     pub via: Option<EndpointId>,
     pub withdrawn: bool,
     pub age_ms: Option<i64>,
@@ -67,6 +72,7 @@ struct Remote {
     latest: Option<LocationUpdate>,
     received_at_ms: i64,
     availability: Availability,
+    battery: Option<protocol::BatteryStatus>,
     permission: bool,
 }
 impl Default for Remote {
@@ -79,6 +85,7 @@ impl Default for Remote {
             latest: None,
             received_at_ms: 0,
             availability: Availability::Off,
+            battery: None,
             permission: false,
         }
     }
@@ -93,6 +100,11 @@ struct CachedFix {
 #[derive(Default)]
 struct Memory {
     latest: Option<Sample>,
+    battery: Option<protocol::BatteryStatus>,
+    battery_sent: BTreeMap<EndpointId, (Option<u8>, i64)>,
+    refresh_until_ms: i64,
+    refresh_requests: BTreeMap<EndpointId, i64>,
+    last_refresh_ms: Option<i64>,
     update_required: BTreeSet<EndpointId>,
     recording: bool,
     relay: Vec<CachedFix>,
@@ -105,6 +117,8 @@ struct Memory {
 }
 
 /// Produces own finished trips as JSON for friends allowed to view them.
+pub type RefreshSource = Arc<dyn Fn() -> Result<()> + Send + Sync>;
+
 pub type TripSource = Arc<dyn Fn() -> Result<Vec<u8>> + Send + Sync>;
 
 struct Inner {
@@ -113,6 +127,7 @@ struct Inner {
     memory: Mutex<Memory>,
     changed: watch::Sender<()>,
     trips: Mutex<Option<TripSource>>,
+    refresh: Mutex<Option<RefreshSource>>,
 }
 
 #[derive(Clone)]
@@ -179,6 +194,7 @@ impl Manager {
             memory: Mutex::new(Memory::default()),
             changed: watch::channel(()).0,
             trips: Mutex::new(None),
+            refresh: Mutex::new(None),
         }));
         {
             let _lock = manager.0.friends.lock()?;
@@ -216,6 +232,8 @@ impl Manager {
                     sequence: 0,
                     policy: UpdatePolicy::default(),
                     received: vec![],
+                    expires_at_ms: None,
+                    share_battery: false,
                 });
             }
             Err(error) => return Err(error.into()),
@@ -225,7 +243,7 @@ impl Manager {
         if bytes.len() > 262144 {
             return Err("sharing metadata too large".into());
         }
-        let metadata: Metadata = serde_json::from_slice(&bytes)?;
+        let mut metadata: Metadata = serde_json::from_slice(&bytes)?;
         if metadata.version != 1 || metadata.owner != self.owner() || metadata.received.len() > 1024
         {
             return Err("invalid sharing metadata".into());
@@ -240,6 +258,12 @@ impl Manager {
             {
                 return Err("invalid replay cursor".into());
             }
+        }
+        if metadata
+            .expires_at_ms
+            .is_some_and(|until| now_ms() >= until)
+        {
+            metadata.mode = Mode::Off;
         }
         Ok(metadata)
     }
@@ -262,6 +286,7 @@ impl Manager {
         let _lock = self.0.friends.lock()?;
         let mut metadata = self.read_metadata()?;
         metadata.mode = mode;
+        metadata.expires_at_ms = None;
         self.write_metadata(&metadata)?;
         if mode == Mode::Off {
             self.0
@@ -271,6 +296,207 @@ impl Manager {
                 .latest = None;
         }
         self.0.changed.send_replace(());
+        Ok(())
+    }
+
+    pub fn set_timed(&self, minutes: u32) -> Result<()> {
+        if !(1..=525_600).contains(&minutes) {
+            return Err("sharing duration must be 1 minute–365 days".into());
+        }
+        let _lock = self.0.friends.lock()?;
+        let mut metadata = self.read_metadata()?;
+        metadata.mode = Mode::Always;
+        metadata.expires_at_ms = Some(
+            now_ms()
+                .checked_add(i64::from(minutes) * 60_000)
+                .ok_or("invalid expiry")?,
+        );
+        self.write_metadata(&metadata)?;
+        self.notify();
+        Ok(())
+    }
+
+    pub fn expires_at_ms(&self) -> Result<Option<i64>> {
+        let _lock = self.0.friends.lock()?;
+        Ok(self
+            .read_metadata()?
+            .expires_at_ms
+            .filter(|until| *until > now_ms()))
+    }
+
+    pub(super) fn expire_timer(&self, now: i64) -> Result<bool> {
+        let _lock = self.0.friends.lock()?;
+        let mut metadata = self.read_metadata()?;
+        if metadata.expires_at_ms.is_none_or(|until| now < until) {
+            return Ok(false);
+        }
+        metadata.mode = Mode::Off;
+        metadata.expires_at_ms = None;
+        self.write_metadata(&metadata)?;
+        self.notify();
+        Ok(true)
+    }
+
+    pub(super) fn poll_requests(&self, now: i64) -> Result<()> {
+        let _lock = self.0.friends.lock()?;
+        let records = self.0.friends.list_locked()?;
+        let metadata = self.read_metadata()?;
+        let memory = self.0.memory.lock().map_err(|_| "sharing lock failed")?;
+        for friend in records.iter().filter(|f| !f.blocked) {
+            let peer = friend.peer_id;
+            let Some(mut request) = super::requests::read(&self.0.friends, peer) else {
+                continue;
+            };
+            if request.status != "Locating…" {
+                continue;
+            }
+            if memory
+                .remote
+                .get(&peer)
+                .and_then(|r| r.latest)
+                .is_some_and(|fix| fix.timestamp_ms >= request.at_ms)
+            {
+                request.status = "Fresh location received".into();
+            } else if now.saturating_sub(request.at_ms) >= 25_000 {
+                request.status = "No fresh location received".into();
+            } else if metadata.mode == Mode::Off {
+                request.status = "Enable sharing connections first".into();
+            } else if let Some((connection, _)) = memory
+                .sessions
+                .get(&peer)
+                .filter(|(c, _)| c.close_reason().is_none())
+            {
+                if request.attempts < 3
+                    && (request.attempts == 0 || now.saturating_sub(request.sent_at_ms) >= 4000)
+                {
+                    connection
+                        .send_datagram(protocol::encode(&Message::LocationRequest)?.into())?;
+                    request.attempts += 1;
+                    request.sent_at_ms = now;
+                }
+            } else {
+                request.status = "Not connected; try again when online".into();
+            }
+            super::requests::write(&self.0.friends, peer, &request)?;
+        }
+        Ok(())
+    }
+
+    pub fn shares_battery(&self) -> Result<bool> {
+        let _lock = self.0.friends.lock()?;
+        Ok(self.read_metadata()?.share_battery)
+    }
+
+    pub fn set_share_battery(&self, enabled: bool) -> Result<()> {
+        let _lock = self.0.friends.lock()?;
+        let mut metadata = self.read_metadata()?;
+        metadata.share_battery = enabled;
+        self.write_metadata(&metadata)?;
+        self.notify();
+        Ok(())
+    }
+
+    pub fn update_battery(&self, percent: Option<u8>, now: i64) -> Result<()> {
+        if percent.is_some_and(|p| p > 100) || now <= 0 {
+            return Err("invalid battery sample".into());
+        }
+        self.0
+            .memory
+            .lock()
+            .map_err(|_| "sharing lock failed")?
+            .battery = Some(protocol::BatteryStatus {
+            percent,
+            timestamp_ms: now,
+        });
+        Ok(())
+    }
+
+    pub fn set_refresh_source(&self, source: RefreshSource) {
+        if let Ok(mut refresh) = self.0.refresh.lock() {
+            *refresh = Some(source);
+        }
+    }
+
+    /// Request fresh GPS only under current sender consent; limit each peer and total work.
+    pub(super) fn refresh_requested(&self, peer: EndpointId, now: i64) -> Result<bool> {
+        {
+            let _lock = self.0.friends.lock()?;
+            let records = self.0.friends.list_locked()?;
+            let groups = self.0.friends.groups_locked()?;
+            let metadata = self.read_metadata()?;
+            let mut memory = self.0.memory.lock().map_err(|_| "sharing lock failed")?;
+            if !availability(&records, &groups, peer, metadata.mode, &memory, now).0
+                || memory
+                    .refresh_requests
+                    .get(&peer)
+                    .is_some_and(|last| now.saturating_sub(*last) < 60_000)
+                || memory
+                    .last_refresh_ms
+                    .is_some_and(|last| now.saturating_sub(last) < 15_000)
+            {
+                return Ok(false);
+            }
+            memory.refresh_requests.retain(|p, _| trusted(&records, *p));
+            memory.refresh_requests.insert(peer, now);
+            memory.last_refresh_ms = Some(now);
+            memory.refresh_until_ms = now.saturating_add(20_000);
+        }
+        let source = self
+            .0
+            .refresh
+            .lock()
+            .map_err(|_| "sharing lock failed")?
+            .clone();
+        if let Some(source) = source {
+            source()?;
+        }
+        self.notify();
+        Ok(true)
+    }
+
+    pub(super) fn send_battery(&self, connection: &Connection, now: i64) -> Result<()> {
+        let _lock = self.0.friends.lock()?;
+        let records = self.0.friends.list_locked()?;
+        if !trusted(&records, connection.remote_id()) {
+            return Err("peer not trusted".into());
+        }
+        let groups = self.0.friends.groups_locked()?;
+        let metadata = self.read_metadata()?;
+        let mut memory = self.0.memory.lock().map_err(|_| "sharing lock failed")?;
+        let allowed = metadata.share_battery
+            && availability(
+                &records,
+                &groups,
+                connection.remote_id(),
+                metadata.mode,
+                &memory,
+                now,
+            )
+            .0;
+        let percent = if allowed {
+            memory
+                .battery
+                .filter(|b| now.saturating_sub(b.timestamp_ms) <= 120_000)
+                .and_then(|b| b.percent)
+        } else {
+            None
+        };
+        let peer = connection.remote_id();
+        if memory
+            .battery_sent
+            .get(&peer)
+            .is_some_and(|(last, sent)| *last == percent && now.saturating_sub(*sent) < 30_000)
+        {
+            return Ok(());
+        }
+        connection.send_datagram(
+            protocol::encode(&Message::BatteryStatus(protocol::BatteryStatus {
+                percent,
+                timestamp_ms: now,
+            }))?
+            .into(),
+        )?;
+        memory.battery_sent.insert(peer, (percent, now));
         Ok(())
     }
 
@@ -374,6 +600,7 @@ impl Manager {
         let mut metadata = self.read_metadata()?;
         let mut memory = self.0.memory.lock().map_err(|_| "sharing lock failed")?;
         let peer = connection.remote_id();
+        let requested = requested || now_ms < memory.refresh_until_ms;
         self.prepare_group_fixes(
             &records,
             &groups,
@@ -398,9 +625,18 @@ impl Manager {
             memory.sent.insert(peer, (sample.fix.point, now_ms));
             return Ok(true);
         }
-        if !metadata
-            .policy
-            .due(memory.sent.get(&peer).copied(), sample, now_ms, requested)
+        let force = memory.last_refresh_ms.is_some_and(|start| {
+            now_ms < memory.refresh_until_ms
+                && sample.fix.timestamp_ms >= start as u64
+                && memory
+                    .sent
+                    .get(&peer)
+                    .is_none_or(|(_, sent)| *sent <= start)
+        });
+        if !force
+            && !metadata
+                .policy
+                .due(memory.sent.get(&peer).copied(), sample, now_ms, requested)
         {
             return Ok(false);
         }
@@ -522,9 +758,15 @@ impl Manager {
                 .find(|c| c.signed.fix.group == id && c.signed.fix.origin == self.owner());
             let payload = if status == Availability::Active {
                 let sample = memory.latest.ok_or("location unavailable")?;
-                if !metadata
-                    .policy
-                    .due(issued.get(&id).copied(), sample, now, requested)
+                let force = memory.last_refresh_ms.is_some_and(|start| {
+                    now < memory.refresh_until_ms
+                        && sample.fix.timestamp_ms >= start as u64
+                        && issued.get(&id).is_none_or(|(_, sent)| *sent <= start)
+                });
+                if !force
+                    && !metadata
+                        .policy
+                        .due(issued.get(&id).copied(), sample, now, requested)
                 {
                     continue;
                 }
@@ -802,7 +1044,21 @@ impl Manager {
                 remote.latest = Some(*update);
                 remote.received_at_ms = now_ms;
             }
-            Message::SharingStatus(status) => remote.availability = *status,
+            Message::BatteryStatus(status) => {
+                status.validate(now_ms)?;
+                if remote
+                    .battery
+                    .is_none_or(|old| status.timestamp_ms >= old.timestamp_ms)
+                {
+                    remote.battery = Some(*status);
+                }
+            }
+            Message::SharingStatus(status) => {
+                remote.availability = *status;
+                if matches!(status, Availability::Off | Availability::TripInactive) {
+                    remote.battery = None;
+                }
+            }
             Message::PermissionUpdate { allowed } => remote.permission = *allowed,
             Message::Hello => return Err("unexpected hello".into()),
             _ => {}
@@ -863,6 +1119,9 @@ impl Manager {
             snapshots.push(PeerLocation {
                 peer_id: *peer,
                 latest: remote.latest,
+                battery: remote
+                    .battery
+                    .filter(|b| now_ms.saturating_sub(b.timestamp_ms) <= 120_000),
                 via: remote.via,
                 withdrawn: remote.withdrawn,
                 age_ms,
@@ -908,6 +1167,7 @@ impl Manager {
         // New session starts fresh: an update sent on a replaced connection may be lost.
         memory.update_required.remove(&peer);
         memory.sent.remove(&peer);
+        memory.battery_sent.remove(&peer);
         memory.group_sent.retain(|(p, _, _), _| *p != peer);
         if let Some((old, _)) = memory
             .sessions
@@ -1109,5 +1369,46 @@ mod relay_persistence_tests {
         assert_eq!(memory.relay[0].signed.fix.sequence, 2);
         assert_eq!(manager.read_relay().unwrap()[0].signed.fix.sequence, 2);
         assert_eq!(manager.read_metadata().unwrap().sequence, 2);
+    }
+}
+
+#[cfg(test)]
+mod feature_tests {
+    use super::*;
+    #[test]
+    fn timed_sharing_survives_restart_and_expiry_overrides_all_grants() {
+        let directory = tempfile::tempdir().unwrap();
+        let key = SecretKey::generate();
+        let peer = SecretKey::generate().public();
+        let friends = Friends::open(directory.path(), key.public()).unwrap();
+        friends.add_confirmed(peer, "Friend".into()).unwrap();
+        friends.set_permission(peer, Permission::Always).unwrap();
+        let manager = Manager::new(friends.clone(), key.clone()).unwrap();
+        manager.set_timed(1).unwrap();
+        let deadline = manager.expires_at_ms().unwrap().unwrap();
+        assert_eq!(manager.mode().unwrap(), Mode::Always);
+        drop(manager);
+        let manager = Manager::new(friends, key).unwrap();
+        assert_eq!(manager.expires_at_ms().unwrap(), Some(deadline));
+        {
+            let _lock = manager.friends().lock().unwrap();
+            let mut metadata = manager.read_metadata().unwrap();
+            metadata.expires_at_ms = Some(now_ms() - 1);
+            manager.write_metadata(&metadata).unwrap();
+        }
+        assert_eq!(manager.mode().unwrap(), Mode::Off);
+        assert_eq!(
+            manager.availability(peer, now_ms()).unwrap(),
+            (false, Availability::Off)
+        );
+        assert!(manager.expire_timer(now_ms()).unwrap());
+        assert_eq!(manager.expires_at_ms().unwrap(), None);
+        manager.set_timed(60).unwrap();
+        manager.set_mode(Mode::TripsOnly).unwrap();
+        assert_eq!(manager.expires_at_ms().unwrap(), None);
+        assert!(manager.set_timed(0).is_err());
+        manager.set_timed(43_200).unwrap();
+        assert!(manager.expires_at_ms().unwrap().unwrap() > now_ms() + 29 * 86_400_000);
+        assert!(manager.set_timed(525_601).is_err());
     }
 }

@@ -29,6 +29,8 @@ pub struct FriendState {
     /// Last received position; kept while disconnected until retention expires.
     pub location: Option<LocationUpdate>,
     #[serde(default)]
+    pub battery: Option<super::protocol::BatteryStatus>,
+    #[serde(default)]
     pub via: Option<EndpointId>,
     pub connected: bool,
     #[serde(default)]
@@ -94,6 +96,7 @@ fn merge(manager: &Manager, previous: &[FriendState], now: i64) -> Result<Vec<Fr
             peer_id: friend.peer_id,
             name: friend.display_name,
             location,
+            battery: current.filter(|s| s.connected).and_then(|s| s.battery),
             via: if current.is_some_and(|s| s.latest.is_some() || s.withdrawn) {
                 current.and_then(|s| s.via)
             } else {
@@ -135,9 +138,36 @@ async fn publish(manager: Manager, path: PathBuf) {
             }
         }
         let now = now_ms();
+        if manager.expire_timer(now).unwrap_or(false) {
+            manager.flush_group_fixes();
+            #[cfg(all(target_os = "android", feature = "ui"))]
+            crate::android::sharing_timer_expired();
+        }
+        let _ = manager.poll_requests(now);
+        #[cfg(all(target_os = "android", feature = "ui"))]
+        if manager.shares_battery().unwrap_or(false) {
+            let _ =
+                manager.update_battery(super::android_app::battery_percent().ok().flatten(), now);
+        }
         let Ok(friends) = merge(&manager, &previous.friends, now) else {
             continue;
         };
+        if let Ok(notices) = super::places::observe(manager.friends(), &friends, now) {
+            #[cfg(all(target_os = "android", feature = "ui"))]
+            for (id, text) in notices {
+                let _ = zgui::app::android::notification::post(
+                    &zgui::app::android::notification::Notification {
+                        id,
+                        title: "Place alert".into(),
+                        text,
+                        ..Default::default()
+                    },
+                );
+            }
+            #[cfg(not(all(target_os = "android", feature = "ui")))]
+            let _ = notices;
+        }
+        let _ = super::places::confirmation_requests(manager.friends(), now);
         if friends == previous.friends && now - previous.updated_ms < HEARTBEAT_MS {
             continue;
         }

@@ -3,6 +3,7 @@ use super::{
     camera::TileId,
     terrain::{Orbit, Scene, Selector, Tile},
     terrain_gestures::Contacts,
+    terrain_markers::TerrainMarkersProps,
     terrain_surface::Producer,
     terrain_tiles::{Style, Tiles},
     tiles::{Elevation, Key, Payload, Provider, Service},
@@ -204,38 +205,6 @@ pub fn TerrainView(
         tiles.reset();
         service.demand_layers(2, &[], &[], Provider::OpenStreetMap, false);
     });
-    let marker = Memo::new(move |_| {
-        let (point, _) = s.position.get()?;
-        let p = super::camera::project(point.lon, point.lat)?;
-        let camera = camera.get();
-        let orbit = orbit.get();
-        let size = size.get();
-        scene.with(|scene| {
-            let height = scene
-                .tiles
-                .iter()
-                .filter_map(|tile| tile.mesh_height_at(p).map(|h| (tile.id.z, h)))
-                .max_by_key(|(z, _)| *z)?
-                .1;
-            let scale = super::terrain::ground_scale(camera);
-            let v = [
-                ((p[0] - camera.center[0]) * scale) as f32,
-                (height - scene.center_height(camera)) * orbit.exaggeration,
-                ((camera.center[1] - p[1]) * scale) as f32,
-                1.,
-            ];
-            let m = orbit.matrix(camera, size);
-            let clip: [f32; 4] =
-                std::array::from_fn(|row| (0..4).map(|col| m[col * 4 + row] * v[col]).sum());
-            if clip[3] <= 0. || clip[2] < 0. || clip[2] > clip[3] {
-                return None;
-            }
-            let x = f64::from(clip[0] / clip[3]);
-            let y = f64::from(clip[1] / clip[3]);
-            (x.abs() <= 1. && y.abs() <= 1.)
-                .then_some([(x + 1.) * size[0] / 2., (1. - y) * size[1] / 2.])
-        })
-    });
     let contacts = Rc::new(RefCell::new(Contacts::default()));
     let point = move |p: [f64; 2]| {
         let origin = bounds
@@ -299,7 +268,7 @@ pub fn TerrainView(
                 on:pointer_move=move |ev|{ev.stop_propagation();let changed={let mut c=moved.borrow_mut();if let Some(p)=c.points.get_mut(&ev.id.raw()){*p=point([f64::from(ev.position.x.0),f64::from(ev.position.y.0)]);true}else{false}};if changed {schedule();}},
                 on:pointer_up=move |ev|{ev.release_pointer();ev.stop_propagation();release(ev.id.raw());},
                 on:pointer_cancel=move |ev|{ev.release_pointer();ev.stop_propagation();cancel(ev.id.raw());}) {}
-            if move ||marker.get().is_some() {box(class="gps-dot",style:transform=move ||marker.get().map(|p|format!("translate({}px, {}px)",p[0]-8.,p[1]-8.))) {}}
+            TerrainMarkers(scene=Signal::derive_local(move ||scene.get()),camera=camera,orbit=orbit,size=Signal::derive_local(move ||size.get()))
             column(class="terrain-help") {
                 text {"1 finger: tilt / rotate · 2 fingers: pan / pinch"}
                 if move ||!has_height.get() {text {{move ||if offline.get(){"Cached elevation unavailable · flat preview"}else{"Loading elevation · flat preview"}}}}

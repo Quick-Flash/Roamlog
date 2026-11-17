@@ -19,8 +19,10 @@ pub mod manager;
 pub mod node;
 pub mod pairing;
 pub mod peers;
+pub mod places;
 pub mod probe;
 pub mod protocol;
+pub mod requests;
 pub mod transport;
 
 use std::{error::Error, io, time::Duration};
