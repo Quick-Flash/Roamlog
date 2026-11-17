@@ -1,11 +1,13 @@
 //! Versioned, bounded binary location protocol. Sender identity comes from QUIC.
-use super::Result;
+use super::{Result, groups::GroupId};
+use iroh::{EndpointId, SecretKey, Signature};
 use serde::{Deserialize, Serialize};
 
-pub const ALPN: &[u8] = b"roamlog/location/1";
+pub const ALPN: &[u8] = b"roamlog/location/2";
 pub const MAX_FRAME: usize = 256;
 /// Above sender's current-fix window; sequence numbers, not age, prevent replay.
 pub const MAX_AGE_MS: i64 = 1_200_000;
+pub const MAX_FORWARD_AGE_MS: i64 = 86_400_000;
 pub const FUTURE_SKEW_MS: i64 = 120_000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -21,11 +23,15 @@ pub struct LocationUpdate {
 
 impl LocationUpdate {
     pub fn validate(&self, now_ms: i64) -> Result<()> {
+        self.validate_age(now_ms, MAX_AGE_MS)
+    }
+
+    fn validate_age(&self, now_ms: i64, max_age_ms: i64) -> Result<()> {
         if self.sequence == 0
             || self.timestamp_ms <= 0
             || now_ms <= 0
             || self.timestamp_ms > now_ms.saturating_add(FUTURE_SKEW_MS)
-            || self.timestamp_ms < now_ms.saturating_sub(MAX_AGE_MS)
+            || self.timestamp_ms < now_ms.saturating_sub(max_age_ms)
             || !(-900_000_000..=900_000_000).contains(&self.latitude_e7)
             || !(-1_800_000_000..=1_800_000_000).contains(&self.longitude_e7)
             || self.accuracy_cm > 10_000_000
@@ -46,10 +52,75 @@ pub enum Availability {
     Active,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum GroupPayload {
+    Fix(LocationUpdate),
+    Unavailable(Availability),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GroupFix {
+    pub group: GroupId,
+    pub origin: EndpointId,
+    pub sequence: u64,
+    /// Needed for Unavailable retention and admission cutoffs as well as fixes.
+    pub timestamp_ms: i64,
+    pub payload: GroupPayload,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SignedGroupFix {
+    pub fix: GroupFix,
+    pub sig: Signature,
+}
+
+fn fix_message(fix: &GroupFix) -> Result<Vec<u8>> {
+    let mut bytes = b"roamlog/group-fix/1".to_vec();
+    bytes.extend(postcard::to_allocvec(fix)?);
+    Ok(bytes)
+}
+
+impl SignedGroupFix {
+    pub fn sign(key: &SecretKey, fix: GroupFix) -> Result<Self> {
+        if key.public() != fix.origin {
+            return Err("group fix signing identity mismatch".into());
+        }
+        let sig = key.sign(&fix_message(&fix)?);
+        Ok(Self { fix, sig })
+    }
+
+    pub fn validate(&self, now_ms: i64) -> Result<()> {
+        let fix = &self.fix;
+        if fix.sequence == 0
+            || fix.timestamp_ms <= 0
+            || now_ms <= 0
+            || fix.timestamp_ms < now_ms.saturating_sub(MAX_FORWARD_AGE_MS)
+            || fix.timestamp_ms > now_ms.saturating_add(FUTURE_SKEW_MS)
+        {
+            return Err("invalid or stale group fix".into());
+        }
+        match fix.payload {
+            GroupPayload::Fix(update) => {
+                update.validate_age(now_ms, MAX_FORWARD_AGE_MS)?;
+                if update.sequence != fix.sequence || update.timestamp_ms != fix.timestamp_ms {
+                    return Err("group fix metadata mismatch".into());
+                }
+            }
+            GroupPayload::Unavailable(Availability::Active) => {
+                return Err("invalid unavailable marker".into());
+            }
+            _ => {}
+        }
+        fix.origin.verify(&fix_message(fix)?, &self.sig)?;
+        Ok(())
+    }
+}
+
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Message {
     Hello,
     LocationUpdate(LocationUpdate),
+    GroupFix(SignedGroupFix),
     LocationRequest,
     SharingStatus(Availability),
     /// Remote notification only. Never changes this device's outgoing permissions.
@@ -89,8 +160,10 @@ pub fn decode(frame: &[u8], now_ms: i64) -> Result<Message> {
     if envelope.version != 1 || !trailing.is_empty() {
         return Err("unsupported or malformed location frame".into());
     }
-    if let Message::LocationUpdate(location) = &envelope.message {
-        location.validate(now_ms)?;
+    match &envelope.message {
+        Message::LocationUpdate(location) => location.validate(now_ms)?,
+        Message::GroupFix(fix) => fix.validate(now_ms)?,
+        _ => {}
     }
     Ok(envelope.message)
 }
@@ -152,5 +225,40 @@ mod tests {
                 .validate(location.timestamp_ms - FUTURE_SKEW_MS - 1)
                 .is_err()
         );
+    }
+}
+
+#[cfg(test)]
+mod relay_tests {
+    use super::*;
+    #[test]
+    fn worst_case_group_frame_fits_and_signature_binds_payload() {
+        let key = SecretKey::generate();
+        let update = LocationUpdate {
+            sequence: u64::MAX,
+            timestamp_ms: i64::MAX,
+            latitude_e7: -900_000_000,
+            longitude_e7: -1_800_000_000,
+            accuracy_cm: 10_000_000,
+            speed_cm_s: Some(100_000),
+            heading_cdeg: Some(35_999),
+        };
+        let signed = SignedGroupFix::sign(
+            &key,
+            GroupFix {
+                group: [255; 32],
+                origin: key.public(),
+                sequence: u64::MAX,
+                timestamp_ms: i64::MAX,
+                payload: GroupPayload::Fix(update),
+            },
+        )
+        .unwrap();
+        let bytes = encode(&Message::GroupFix(signed.clone())).unwrap();
+        assert!(bytes.len() <= MAX_FRAME);
+        assert!(matches!(decode(&bytes,i64::MAX).unwrap(),Message::GroupFix(fix) if fix==signed));
+        let mut forged = signed;
+        forged.fix.group = [0; 32];
+        assert!(forged.validate(i64::MAX).is_err());
     }
 }

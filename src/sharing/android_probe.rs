@@ -225,7 +225,7 @@ fn run(
     let is_pairing = matches!(mode.as_str(), "invite" | "pair");
     let is_locations = matches!(mode.as_str(), "location_listen" | "location_connect");
     let manager = if is_locations {
-        let manager = Manager::new(friends.clone())?;
+        let manager = Manager::new(friends.clone(), key.clone())?;
         if let Some(state) = SESSION.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
             state.manager = Some(manager.clone());
         }

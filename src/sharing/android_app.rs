@@ -78,13 +78,15 @@ pub fn reset_identity(directory: &Path) -> Result<()> {
         "friends.json",
         "location-state.json",
         "friend-locations.json",
+        "group-notices.postcard",
+        "group-fixes.postcard",
     ] {
         match std::fs::remove_file(sharing.join(name)) {
             Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error.into()),
             _ => {}
         }
     }
-    for name in ["friend-trips", "trip-requests"] {
+    for name in ["friend-trips", "trip-requests", "groups"] {
         let _ = std::fs::remove_dir_all(sharing.join(name));
     }
     Ok(())
@@ -96,7 +98,7 @@ pub fn manager(directory: &Path) -> Result<Manager> {
     if let Some(manager) = cached.as_ref() {
         return Ok(manager.clone());
     }
-    let manager = Manager::new(Friends::open(directory, key()?.public())?)?;
+    let manager = Manager::new(Friends::open(directory, key()?.public())?, key()?)?;
     *cached = Some(manager.clone());
     Ok(manager)
 }
@@ -223,6 +225,8 @@ pub enum PairStep {
         code: String,
         /// Group joined on confirmation.
         group: Option<String>,
+        group_details: Option<String>,
+        joining: bool,
     },
     /// Local vote sent; waiting for friend.
     Waiting,
@@ -234,7 +238,7 @@ pub enum PairStep {
 pub struct Pairing {
     step: std::sync::Arc<Mutex<PairStep>>,
     stop: tokio::sync::watch::Sender<bool>,
-    vote: tokio::sync::watch::Sender<Option<bool>>,
+    vote: tokio::sync::watch::Sender<Option<(bool, super::peers::Permission)>>,
 }
 
 impl Pairing {
@@ -267,7 +271,7 @@ impl Pairing {
             );
             set(match result {
                 Ok(true) => PairStep::Done(
-                    "Paired. Group members share automatically; direct friends see nothing until you choose access.".into(),
+                    "Paired. Direct friends start Hidden; group access uses your selection.".into(),
                 ),
                 Ok(false) => PairStep::Idle,
                 Err(error) => PairStep::Failed(error.to_string()),
@@ -280,12 +284,12 @@ impl Pairing {
         self.step.lock().map(|s| s.clone()).unwrap_or_default()
     }
 
-    pub fn vote(&self, accepted: bool) {
+    pub fn vote(&self, accepted: bool, share: super::peers::Permission) {
         if matches!(self.step(), PairStep::Confirm { .. }) {
             if let Ok(mut step) = self.step.lock() {
                 *step = PairStep::Waiting;
             }
-            self.vote.send_replace(Some(accepted));
+            self.vote.send_replace(Some((accepted, share)));
         }
     }
 }
@@ -303,7 +307,7 @@ fn pair(
     link: Option<&str>,
     group: Option<super::pairing::GroupRef>,
     mut stopped: tokio::sync::watch::Receiver<bool>,
-    mut votes: tokio::sync::watch::Receiver<Option<bool>>,
+    mut votes: tokio::sync::watch::Receiver<Option<(bool, super::peers::Permission)>>,
     set: &dyn Fn(PairStep),
 ) -> Result<bool> {
     use super::pairing::{self, FriendInvite};
@@ -341,14 +345,26 @@ fn pair(
                 name: pending.display_name.clone(),
                 code: pending.verification_code.clone(),
                 group: pending.group.as_ref().map(|g| g.name.clone()),
+                joining: !pending.is_inviter(),
+                group_details: pending.group_state.as_ref().map(|state| {
+                    let creator = &state.creator_name;
+                    format!(
+                        "Created by {creator} · {} members · {}",
+                        state.members.len(),
+                        match state.policy {
+                            super::groups::Policy::Managed => "Managed: admins invite and remove",
+                            super::groups::Policy::Open => "Open: any member can invite",
+                        }
+                    )
+                }),
             });
-            let accepted = loop {
+            let (accepted, share) = loop {
                 if let Some(accepted) = *votes.borrow() {
                     break accepted;
                 }
                 votes.changed().await?;
             };
-            pending.confirm(accepted, &friends).await?;
+            pending.confirm(accepted, &friends, share).await?;
             Ok::<_, Box<dyn std::error::Error + Send + Sync>>(true)
         };
         let result = tokio::select! {

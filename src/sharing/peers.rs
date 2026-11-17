@@ -9,11 +9,11 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-const MAX_FILE: u64 = 256 * 1024;
-const MAX_FRIENDS: usize = 256;
-const MAX_GROUPS: usize = 32;
-/// Leaving members get a few seconds for running sessions to deliver the tombstone.
-pub const LEAVE_GRACE_MS: u64 = 20_000;
+pub(super) const MAX_FILE: u64 = 256 * 1024;
+pub(super) const MAX_FRIENDS: usize = 256;
+pub(super) const MAX_GROUPS: usize = 32;
+/// Keep signed leave available until acknowledgement or seven days.
+pub const LEAVE_GRACE_MS: u64 = 7 * 24 * 3600 * 1000;
 
 /// Ordered by how much it shares: Off < TripsOnly < Always.
 #[derive(
@@ -47,7 +47,12 @@ pub struct Friend {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Group {
-    /// 32 random bytes, lowercase hex.
+    /// Hash of signed Create, lowercase hex.
+    #[serde(default = "legacy_version")]
+    pub version: u8,
+    /// Removed peers still need one acknowledged operation-set delivery.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_removals: Vec<EndpointId>,
     pub id: String,
     pub name: String,
     /// Own display name shown to members.
@@ -63,28 +68,22 @@ pub struct Group {
     pub share: Permission,
 }
 
+fn legacy_version() -> u8 {
+    1
+}
+
 fn always() -> Permission {
     Permission::Always
 }
 
-/// Group view sent to a member over an authenticated session.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct GroupSync {
-    pub id: String,
-    pub name: String,
-    pub members: Vec<(EndpointId, String)>,
-    pub left: Vec<EndpointId>,
-}
-
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Records {
-    version: u8,
-    owner: EndpointId,
-    friends: Vec<Friend>,
+pub(super) struct Records {
+    pub(super) version: u8,
+    pub(super) owner: EndpointId,
+    pub(super) friends: Vec<Friend>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    groups: Vec<Group>,
+    pub(super) groups: Vec<Group>,
 }
 
 fn valid_group_id(id: &str) -> bool {
@@ -94,21 +93,11 @@ fn valid_group_id(id: &str) -> bool {
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
-fn now() -> Result<u64> {
+pub(super) fn now() -> Result<u64> {
     Ok(SystemTime::now()
         .duration_since(UNIX_EPOCH)?
         .as_millis()
         .try_into()?)
-}
-
-/// Removes `group` tag from friends matching `pred`; drops group-only friends left in none.
-fn untag(records: &mut Records, group: &str, pred: impl Fn(&Friend) -> bool) {
-    for friend in records.friends.iter_mut().filter(|f| pred(f)) {
-        friend.groups.retain(|g| g != group);
-    }
-    records
-        .friends
-        .retain(|f| !(f.group_only && f.groups.is_empty()));
 }
 
 impl Friend {
@@ -124,7 +113,9 @@ impl Friend {
     pub fn group_permission(&self, groups: &[Group]) -> Permission {
         groups
             .iter()
-            .filter(|g| self.groups.contains(&g.id) && g.leaving_since_ms.is_none())
+            .filter(|g| {
+                g.version == 2 && self.groups.contains(&g.id) && g.leaving_since_ms.is_none()
+            })
             .map(|g| g.share)
             .max()
             .unwrap_or(Permission::Off)
@@ -134,8 +125,8 @@ impl Friend {
 /// Reopens records under a cross-process lock for every operation. No permission cache.
 #[derive(Clone)]
 pub struct Friends {
-    directory: PathBuf,
-    owner: EndpointId,
+    pub(super) directory: PathBuf,
+    pub(super) owner: EndpointId,
 }
 
 pub(super) struct Lock(File);
@@ -178,7 +169,7 @@ impl Friends {
         Ok(Lock(file))
     }
 
-    fn read(&self) -> Result<Records> {
+    pub(super) fn read(&self) -> Result<Records> {
         let file = match File::open(self.directory.join("friends.json")) {
             Ok(file) => file,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -196,7 +187,7 @@ impl Friends {
         if bytes.len() as u64 > MAX_FILE {
             return Err("friends file too large".into());
         }
-        let records: Records = serde_json::from_slice(&bytes)?;
+        let mut records: Records = serde_json::from_slice(&bytes)?;
         if records.version != 1
             || records.owner != self.owner
             || records.friends.len() > MAX_FRIENDS
@@ -227,10 +218,11 @@ impl Friends {
                 return Err("invalid group record".into());
             }
         }
+        self.rebuild(&mut records)?;
         Ok(records)
     }
 
-    fn write(&self, records: &Records) -> Result<()> {
+    pub(super) fn write(&self, records: &Records) -> Result<()> {
         let bytes = serde_json::to_vec(records)?;
         if bytes.len() as u64 > MAX_FILE {
             return Err("friends file too large".into());
@@ -268,14 +260,14 @@ impl Friends {
         let mut records = self.read()?;
         if let Some(friend) = records
             .friends
-            .iter()
+            .iter_mut()
             .find(|friend| friend.peer_id == peer_id)
         {
-            return if friend.blocked {
-                Err("friend blocked".into())
-            } else {
-                Ok(())
-            };
+            if friend.blocked {
+                return Err("friend blocked".into());
+            }
+            friend.group_only = false;
+            return self.write(&records);
         }
         if records.friends.len() >= MAX_FRIENDS {
             return Err("friend limit reached".into());
@@ -304,264 +296,6 @@ impl Friends {
             .ok_or("unknown friend")?
             .display_name = name.trim().to_owned();
         self.write(&records)
-    }
-
-    /// Local group label. Members keep their own names for it.
-    pub fn rename_group(&self, id: &str, name: &str) -> Result<()> {
-        validate_name(name)?;
-        let _lock = self.lock()?;
-        let mut records = self.read()?;
-        records
-            .groups
-            .iter_mut()
-            .find(|g| g.id == id)
-            .ok_or("unknown group")?
-            .name = name.trim().to_owned();
-        self.write(&records)
-    }
-
-    pub fn set_group_permission(&self, id: &str, share: Permission) -> Result<()> {
-        let _lock = self.lock()?;
-        let mut records = self.read()?;
-        records
-            .groups
-            .iter_mut()
-            .find(|g| g.id == id)
-            .ok_or("unknown group")?
-            .share = share;
-        self.write(&records)
-    }
-
-    pub fn groups(&self) -> Result<Vec<Group>> {
-        let _lock = self.lock()?;
-        Ok(self.read()?.groups)
-    }
-
-    /// Caller holds `lock()`.
-    pub(super) fn groups_locked(&self) -> Result<Vec<Group>> {
-        Ok(self.read()?.groups)
-    }
-
-    pub fn create_group(&self, name: &str, me: &str) -> Result<String> {
-        validate_name(name)?;
-        validate_name(me)?;
-        let id: String = iroh::SecretKey::generate()
-            .to_bytes()
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect();
-        let _lock = self.lock()?;
-        let mut records = self.read()?;
-        if records.groups.len() >= MAX_GROUPS {
-            return Err("group limit reached".into());
-        }
-        records.groups.push(Group {
-            id: id.clone(),
-            name: name.to_owned(),
-            me: me.to_owned(),
-            left: vec![],
-            leaving_since_ms: None,
-            share: Permission::Always,
-        });
-        self.write(&records)?;
-        Ok(id)
-    }
-
-    /// After confirmed pairing through a group invitation: joins group (if new) and adds
-    /// `peer` as member. Other members arrive through that member's group sync.
-    pub(super) fn join_group(
-        &self,
-        id: &str,
-        name: &str,
-        me: &str,
-        peer: EndpointId,
-    ) -> Result<()> {
-        validate_name(name)?;
-        validate_name(me)?;
-        if !valid_group_id(id) {
-            return Err("invalid group".into());
-        }
-        let _lock = self.lock()?;
-        let mut records = self.read()?;
-        let count = records.groups.len();
-        match records.groups.iter_mut().find(|g| g.id == id) {
-            Some(group) => {
-                group.leaving_since_ms = None;
-                group.left.retain(|p| *p != peer && *p != self.owner);
-            }
-            None if count >= MAX_GROUPS => return Err("group limit reached".into()),
-            None => records.groups.push(Group {
-                id: id.to_owned(),
-                name: name.to_owned(),
-                me: me.to_owned(),
-                left: vec![],
-                leaving_since_ms: None,
-                share: Permission::Always,
-            }),
-        }
-        let friend = records
-            .friends
-            .iter_mut()
-            .find(|f| f.peer_id == peer)
-            .ok_or("unknown friend")?;
-        if friend.blocked {
-            return Err("friend blocked".into());
-        }
-        if !friend.groups.iter().any(|g| g == id) {
-            friend.groups.push(id.to_owned());
-        }
-        self.write(&records)
-    }
-
-    /// Starts leaving: group stops granting access now; tombstone goes to connected
-    /// members, then `finish_leaving` forgets group. Without running sessions, forget now.
-    pub fn leave_group(&self, id: &str, immediately: bool) -> Result<()> {
-        let _lock = self.lock()?;
-        let mut records = self.read()?;
-        let group = records
-            .groups
-            .iter_mut()
-            .find(|g| g.id == id)
-            .ok_or("unknown group")?;
-        if immediately {
-            records.groups.retain(|g| g.id != id);
-            untag(&mut records, id, |_| true);
-        } else {
-            group.leaving_since_ms = Some(now()?);
-        }
-        self.write(&records)
-    }
-
-    /// Forgets groups whose leave grace period passed. Returns whether anything changed.
-    pub(super) fn finish_leaving(&self) -> Result<bool> {
-        let _lock = self.lock()?;
-        let mut records = self.read()?;
-        let now = now()?;
-        let done: Vec<String> = records
-            .groups
-            .iter()
-            .filter(|g| {
-                g.leaving_since_ms
-                    .is_some_and(|t| now.saturating_sub(t) >= LEAVE_GRACE_MS)
-            })
-            .map(|g| g.id.clone())
-            .collect();
-        if done.is_empty() {
-            return Ok(false);
-        }
-        for id in &done {
-            records.groups.retain(|g| &g.id != id);
-            untag(&mut records, id, |_| true);
-        }
-        self.write(&records)?;
-        Ok(true)
-    }
-
-    /// Groups shared with `peer`, as that member should see them. Caller holds `lock()`.
-    pub(super) fn sync_for_locked(&self, peer: EndpointId) -> Result<Vec<GroupSync>> {
-        let records = self.read()?;
-        let Some(friend) = records
-            .friends
-            .iter()
-            .find(|f| f.peer_id == peer && !f.blocked)
-        else {
-            return Ok(vec![]);
-        };
-        Ok(records
-            .groups
-            .iter()
-            .filter(|g| friend.groups.contains(&g.id))
-            .map(|g| {
-                let mut members = vec![(self.owner, g.me.clone())];
-                members.extend(
-                    records
-                        .friends
-                        .iter()
-                        .filter(|f| !f.blocked && f.groups.contains(&g.id))
-                        .map(|f| (f.peer_id, f.display_name.clone())),
-                );
-                let mut left = g.left.clone();
-                if g.leaving_since_ms.is_some() {
-                    members.retain(|(p, _)| *p != self.owner);
-                    left.push(self.owner);
-                }
-                GroupSync {
-                    id: g.id.clone(),
-                    name: g.name.clone(),
-                    members,
-                    left,
-                }
-            })
-            .collect())
-    }
-
-    /// Merges member list from `sender`. Trust is vouched: any member may admit others,
-    /// but only into groups both share, and never blocked identities or tombstoned ones.
-    /// Caller holds `lock()`. Returns whether records changed.
-    pub(super) fn apply_sync_locked(
-        &self,
-        sender: EndpointId,
-        syncs: &[GroupSync],
-    ) -> Result<bool> {
-        if syncs.len() > MAX_GROUPS {
-            return Err("too many groups".into());
-        }
-        let mut records = self.read()?;
-        let before = serde_json::to_vec(&records)?;
-        for sync in syncs {
-            if sync.members.len() > MAX_FRIENDS || sync.left.len() > 1024 {
-                return Err("group sync too large".into());
-            }
-            let Some(group) = records
-                .groups
-                .iter_mut()
-                .find(|g| g.id == sync.id && g.leaving_since_ms.is_none())
-            else {
-                continue;
-            };
-            let vouched = records
-                .friends
-                .iter()
-                .any(|f| f.peer_id == sender && !f.blocked && f.groups.contains(&sync.id));
-            if !vouched {
-                continue;
-            }
-            for peer in &sync.left {
-                if *peer != self.owner && !group.left.contains(peer) && group.left.len() < 1024 {
-                    group.left.push(*peer);
-                }
-            }
-            let left = group.left.clone();
-            untag(&mut records, &sync.id, |f| left.contains(&f.peer_id));
-            for (peer, name) in &sync.members {
-                if *peer == self.owner || left.contains(peer) || validate_name(name).is_err() {
-                    continue;
-                }
-                let count = records.friends.len();
-                match records.friends.iter_mut().find(|f| f.peer_id == *peer) {
-                    Some(friend) if friend.blocked => {}
-                    Some(friend) if !friend.groups.contains(&sync.id) => {
-                        friend.groups.push(sync.id.clone());
-                    }
-                    Some(_) => {}
-                    None if count < MAX_FRIENDS => records.friends.push(Friend {
-                        peer_id: *peer,
-                        display_name: name.clone(),
-                        permission: Permission::Off,
-                        blocked: false,
-                        paired_at_ms: now()?,
-                        groups: vec![sync.id.clone()],
-                        group_only: true,
-                    }),
-                    None => {}
-                }
-            }
-        }
-        if serde_json::to_vec(&records)? == before {
-            return Ok(false);
-        }
-        self.write(&records)?;
-        Ok(true)
     }
 
     pub fn may_pair(&self, peer: EndpointId) -> Result<bool> {
@@ -708,16 +442,20 @@ mod tests {
 #[cfg(test)]
 mod group_permission_tests {
     use super::*;
+    use crate::sharing::groups::Policy;
     use iroh::SecretKey;
 
     #[test]
     fn friend_sees_highest_of_own_and_group_grant() {
         let dir = tempfile::tempdir().unwrap();
-        let store = Friends::open(dir.path(), SecretKey::generate().public()).unwrap();
+        let key = SecretKey::generate();
+        let store = Friends::open(dir.path(), key.public()).unwrap();
         let peer = SecretKey::generate().public();
         store.add_confirmed(peer, "Mum".into()).unwrap();
-        let group = store.create_group("Family", "Me").unwrap();
-        store.join_group(&group, "Family", "Me", peer).unwrap();
+        let group = store
+            .create_group(&key, "Family", "Me", Policy::Managed, Permission::Always)
+            .unwrap();
+        store.admit_member(&key, &group, peer, "Mum").unwrap();
         assert!(store.may_share(peer, false).unwrap());
         store
             .set_group_permission(&group, Permission::TripsOnly)
@@ -730,5 +468,290 @@ mod group_permission_tests {
         assert!(store.may_share(peer, false).unwrap());
         store.block(peer).unwrap();
         assert!(!store.may_share(peer, true).unwrap());
+    }
+}
+
+#[cfg(test)]
+mod signed_group_tests {
+    use super::*;
+    use crate::sharing::groups::Policy;
+    use iroh::SecretKey;
+
+    #[test]
+    fn block_survives_group_only_members_leaving_and_readmission() {
+        use crate::sharing::groups::{OpKind, SignedOp};
+        let dir = tempfile::tempdir().unwrap();
+        let key = SecretKey::generate();
+        let peer = SecretKey::generate();
+        let relay = SecretKey::generate();
+        let store = Friends::open(dir.path(), key.public()).unwrap();
+        let id = store
+            .create_group(&key, "Family", "Me", Policy::Managed, Permission::Always)
+            .unwrap();
+        store.admit_member(&key, &id, peer.public(), "Sam").unwrap();
+        store
+            .admit_member(&key, &id, relay.public(), "Relay")
+            .unwrap();
+        store.block(peer.public()).unwrap();
+        let mut log = store.sync_for_locked(relay.public()).unwrap().remove(0);
+        let at = now()
+            .unwrap()
+            .max(log.ops.iter().map(|o| o.op.at_ms).max().unwrap() + 1);
+        log.ops
+            .push(SignedOp::sign(&peer, log.group, at, OpKind::Leave).unwrap());
+        store.apply_sync_locked(relay.public(), &[log]).unwrap();
+        let records = store.list().unwrap();
+        let blocked = records.iter().find(|f| f.peer_id == peer.public()).unwrap();
+        assert!(blocked.group_only && blocked.blocked && blocked.groups.is_empty());
+        assert!(!store.may_pair(peer.public()).unwrap());
+        store.admit_member(&key, &id, peer.public(), "Sam").unwrap();
+        assert!(!store.may_share(peer.public(), true).unwrap());
+        assert!(!store.may_pair(peer.public()).unwrap());
+    }
+
+    #[test]
+    fn durable_membership_remove_cascade_offline_leave_and_ack() {
+        let keys: Vec<_> = (0..4).map(|_| SecretKey::generate()).collect();
+        let dirs: Vec<_> = (0..4).map(|_| tempfile::tempdir().unwrap()).collect();
+        let stores: Vec<_> = (0..4)
+            .map(|i| Friends::open(dirs[i].path(), keys[i].public()).unwrap())
+            .collect();
+        let id = stores[0]
+            .create_group(
+                &keys[0],
+                "Family",
+                "Alex",
+                Policy::Managed,
+                Permission::Always,
+            )
+            .unwrap();
+        for i in 1..4 {
+            let admission = stores[0]
+                .admit_member(&keys[0], &id, keys[i].public(), &format!("M{i}"))
+                .unwrap();
+            stores[i]
+                .join_group(&admission, &format!("M{i}"), Permission::Always)
+                .unwrap();
+        }
+        stores[0]
+            .promote_member(&keys[0], &id, keys[1].public())
+            .unwrap();
+        let sync = stores[0].sync_for_locked(keys[1].public()).unwrap();
+        stores[1]
+            .apply_sync_locked(keys[0].public(), &sync)
+            .unwrap();
+        // Re-admit C through B, giving cascade a signed provenance chain.
+        stores[0]
+            .remove_member(&keys[0], &id, keys[2].public(), false)
+            .unwrap();
+        let sync = stores[0].sync_for_locked(keys[1].public()).unwrap();
+        stores[1]
+            .apply_sync_locked(keys[0].public(), &sync)
+            .unwrap();
+        let admission = stores[1]
+            .admit_member(&keys[1], &id, keys[2].public(), "C")
+            .unwrap();
+        stores[0]
+            .apply_sync_locked(keys[1].public(), &[admission])
+            .unwrap();
+        stores[0]
+            .remove_member(&keys[0], &id, keys[1].public(), true)
+            .unwrap();
+        assert!(!stores[0].may_share(keys[1].public(), true).unwrap());
+        assert!(!stores[0].may_share(keys[2].public(), true).unwrap());
+        let removal = stores[0].sync_for_locked(keys[1].public()).unwrap();
+        let (_, ack) = stores[1]
+            .apply_sync_locked(keys[0].public(), &removal)
+            .unwrap();
+        assert!(
+            !stores[1]
+                .group_state(&id)
+                .unwrap()
+                .unwrap()
+                .members
+                .contains_key(&keys[1].public())
+        );
+        stores[0]
+            .acknowledge_locked(keys[1].public(), &ack)
+            .unwrap();
+        assert!(
+            stores[0]
+                .sync_for_locked(keys[1].public())
+                .unwrap()
+                .is_empty()
+        );
+        // D learns removals through gossip, then tells C while A is absent.
+        let gossip = stores[0].sync_for_locked(keys[3].public()).unwrap();
+        stores[3]
+            .apply_sync_locked(keys[0].public(), &gossip)
+            .unwrap();
+        let relayed_removal = stores[3].sync_for_locked(keys[2].public()).unwrap();
+        assert!(!relayed_removal.is_empty());
+        let (_, ack) = stores[2]
+            .apply_sync_locked(keys[3].public(), &relayed_removal)
+            .unwrap();
+        stores[3]
+            .acknowledge_locked(keys[2].public(), &ack)
+            .unwrap();
+        assert!(
+            !stores[2]
+                .group_state(&id)
+                .unwrap()
+                .unwrap()
+                .members
+                .contains_key(&keys[2].public())
+        );
+        // D leaves while A is offline. C stores leave, then carries it to A later.
+        let admission = stores[0]
+            .admit_member(&keys[0], &id, keys[2].public(), "C")
+            .unwrap();
+        stores[2]
+            .join_group(&admission, "C", Permission::Always)
+            .unwrap();
+        stores[3]
+            .apply_sync_locked(keys[2].public(), &[admission])
+            .unwrap();
+        assert!(
+            !stores[3].groups().unwrap()[0]
+                .pending_removals
+                .contains(&keys[2].public())
+        );
+        stores[3].leave_group(&keys[3], &id).unwrap();
+        assert!(!stores[3].may_share(keys[0].public(), true).unwrap());
+        assert!(!stores[3].finish_leaving().unwrap());
+        let leave = stores[3].sync_for_locked(keys[2].public()).unwrap();
+        let (_, ack) = stores[2]
+            .apply_sync_locked(keys[3].public(), &leave)
+            .unwrap();
+        stores[3]
+            .acknowledge_locked(keys[2].public(), &ack)
+            .unwrap();
+        assert!(stores[3].groups().unwrap().is_empty());
+        let restarted = Friends::open(dirs[2].path(), keys[2].public()).unwrap();
+        let gossip = restarted.sync_for_locked(keys[0].public()).unwrap();
+        stores[0]
+            .apply_sync_locked(keys[2].public(), &gossip)
+            .unwrap();
+        assert!(!stores[0].may_share(keys[3].public(), true).unwrap());
+    }
+
+    #[test]
+    fn membership_notifications_checkpoint_and_respect_hidden_access() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = SecretKey::generate();
+        let store = Friends::open(dir.path(), key.public()).unwrap();
+        let id = store
+            .create_group(&key, "Family", "Alex", Policy::Open, Permission::Always)
+            .unwrap();
+        assert!(store.membership_notices().unwrap().is_empty());
+        let peer = SecretKey::generate().public();
+        store.admit_member(&key, &id, peer, "Sam").unwrap();
+        let notices = store.membership_notices().unwrap();
+        assert_eq!(notices.len(), 1);
+        assert_eq!(
+            notices[0].1,
+            "Sam joined Family. They can see your location (Always)."
+        );
+        assert!(store.membership_notices().unwrap().is_empty());
+        store.set_group_permission(&id, Permission::Off).unwrap();
+        store
+            .admit_member(&key, &id, SecretKey::generate().public(), "Hidden")
+            .unwrap();
+        assert!(store.membership_notices().unwrap().is_empty());
+        store.set_group_permission(&id, Permission::Always).unwrap();
+        assert!(store.membership_notices().unwrap().is_empty());
+        store.remove_member(&key, &id, peer, false).unwrap();
+        store.admit_member(&key, &id, peer, "Sam").unwrap();
+        assert_eq!(store.membership_notices().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn signed_leave_recovers_delivery_state_after_metadata_write_interruption() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = SecretKey::generate();
+        let peer = SecretKey::generate().public();
+        let store = Friends::open(dir.path(), key.public()).unwrap();
+        let id = store
+            .create_group(&key, "Family", "Me", Policy::Managed, Permission::Always)
+            .unwrap();
+        store.admit_member(&key, &id, peer, "Sam").unwrap();
+        let path = store.directory().join("friends.json");
+        let before = std::fs::read(&path).unwrap();
+        store.leave_group(&key, &id).unwrap();
+        std::fs::write(path, before).unwrap();
+        let reopened = Friends::open(dir.path(), key.public()).unwrap();
+        assert!(reopened.groups().unwrap()[0].leaving_since_ms.is_some());
+        assert!(!reopened.may_share(peer, true).unwrap());
+        assert!(!reopened.sync_for_locked(peer).unwrap().is_empty());
+    }
+
+    #[test]
+    fn leave_requires_matching_ack_or_seven_days_then_deletes_log() {
+        use crate::sharing::groups::{self, GroupAck};
+        let dir = tempfile::tempdir().unwrap();
+        let key = SecretKey::generate();
+        let peer = SecretKey::generate().public();
+        let store = Friends::open(dir.path(), key.public()).unwrap();
+        let id = store
+            .create_group(&key, "Family", "Me", Policy::Managed, Permission::Always)
+            .unwrap();
+        store.admit_member(&key, &id, peer, "Sam").unwrap();
+        store.leave_group(&key, &id).unwrap();
+        assert!(
+            !store
+                .acknowledge_locked(
+                    peer,
+                    &[GroupAck {
+                        group: groups::parse_id(&id).unwrap(),
+                        digest: [0; 32]
+                    }]
+                )
+                .unwrap()
+        );
+        assert_eq!(store.groups().unwrap().len(), 1);
+        assert!(!store.finish_leaving().unwrap());
+        let mut records = store.read().unwrap();
+        records.groups[0].leaving_since_ms = Some(now().unwrap() - LEAVE_GRACE_MS - 1);
+        store.write(&records).unwrap();
+        assert!(store.finish_leaving().unwrap());
+        assert!(store.groups().unwrap().is_empty());
+        assert!(store.list().unwrap().is_empty());
+        assert!(
+            !store
+                .directory()
+                .join("groups")
+                .join(format!("{id}.ops"))
+                .exists()
+        );
+    }
+
+    #[test]
+    fn unsigned_legacy_membership_never_grants_access() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = SecretKey::generate();
+        let peer = SecretKey::generate().public();
+        let store = Friends::open(dir.path(), key.public()).unwrap();
+        store.add_confirmed(peer, "Friend".into()).unwrap();
+        let mut records = store.read().unwrap();
+        let id = "01".repeat(32);
+        records.groups.push(Group {
+            version: 1,
+            pending_removals: vec![],
+            id: id.clone(),
+            name: "Old".into(),
+            me: "Me".into(),
+            left: vec![],
+            leaving_since_ms: None,
+            share: Permission::Always,
+        });
+        records.friends[0].groups.push(id.clone());
+        store.write(&records).unwrap();
+        let reopened = Friends::open(dir.path(), key.public()).unwrap();
+        assert!(!reopened.may_share(peer, true).unwrap());
+        reopened.set_permission(peer, Permission::Always).unwrap();
+        assert!(reopened.may_share(peer, true).unwrap());
+        assert!(reopened.group_state(&id).unwrap().is_none());
+        reopened.forget_inactive_group(&id).unwrap();
+        assert!(reopened.groups().unwrap().is_empty());
     }
 }

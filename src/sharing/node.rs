@@ -28,7 +28,11 @@ pub struct FriendState {
     pub name: String,
     /// Last received position; kept while disconnected until retention expires.
     pub location: Option<LocationUpdate>,
+    #[serde(default)]
+    pub via: Option<EndpointId>,
     pub connected: bool,
+    #[serde(default)]
+    pub update_required: bool,
     /// Friend currently allows us to see a live position.
     pub sharing_active: bool,
     /// Selected path while connected: "direct" or "relay".
@@ -77,16 +81,26 @@ fn merge(manager: &Manager, previous: &[FriendState], now: i64) -> Result<Vec<Fr
         }
         let old = previous.iter().find(|f| f.peer_id == friend.peer_id);
         let current = live.get(&friend.peer_id);
-        let location = current
-            .and_then(|s| s.latest)
-            .or_else(|| old.and_then(|f| f.location))
-            .filter(|l| now.saturating_sub(l.timestamp_ms) <= RETENTION_MS);
+        let location = if current.is_some_and(|s| s.withdrawn) {
+            None
+        } else {
+            current
+                .and_then(|s| s.latest)
+                .or_else(|| old.and_then(|f| f.location))
+        }
+        .filter(|l| now.saturating_sub(l.timestamp_ms) <= RETENTION_MS);
         let connected = manager.connected(friend.peer_id);
         friends.push(FriendState {
             peer_id: friend.peer_id,
             name: friend.display_name,
             location,
+            via: if current.is_some_and(|s| s.latest.is_some() || s.withdrawn) {
+                current.and_then(|s| s.via)
+            } else {
+                old.and_then(|s| s.via)
+            },
             connected,
+            update_required: manager.update_required(friend.peer_id),
             sharing_active: connected && current.is_some_and(|s| s.sharing_active),
             path: manager.path(friend.peer_id).map(str::to_owned),
         });
@@ -106,6 +120,19 @@ async fn publish(manager: Manager, path: PathBuf) {
         tokio::select! {
             _ = tick.tick() => {},
             _ = changes.changed() => {},
+        }
+        #[cfg(all(target_os = "android", feature = "ui"))]
+        if let Ok(notices) = manager.friends().membership_notices() {
+            for (id, text) in notices {
+                let _ = zgui::app::android::notification::post(
+                    &zgui::app::android::notification::Notification {
+                        id,
+                        title: "Group membership".into(),
+                        text,
+                        ..Default::default()
+                    },
+                );
+            }
         }
         let now = now_ms();
         let Ok(friends) = merge(&manager, &previous.friends, now) else {
@@ -136,6 +163,12 @@ async fn dial(endpoint: Endpoint, manager: Manager, peer: EndpointId) {
         }
         let started = tokio::time::Instant::now();
         let result = transport::client(&endpoint, EndpointAddr::new(peer), manager.clone()).await;
+        if result.as_ref().err().is_some_and(|e| {
+            e.downcast_ref::<std::io::Error>()
+                .is_some_and(|e| e.kind() == std::io::ErrorKind::Unsupported)
+        }) {
+            manager.require_update(peer);
+        }
         if result.is_ok() || endpoint.is_closed() {
             return;
         }
@@ -230,6 +263,7 @@ impl Node {
 
 impl Drop for Node {
     fn drop(&mut self) {
+        self.manager.flush_group_fixes();
         if let Some(runtime) = self.runtime.take() {
             let endpoint = self.endpoint.clone();
             // Tell peers sessions ended instead of letting them time out.
@@ -289,7 +323,7 @@ mod tests {
                 friends
                     .set_permission(ids[1 - i], Permission::Always)
                     .unwrap();
-                let manager = Manager::new(friends).unwrap();
+                let manager = Manager::new(friends, keys[i].clone()).unwrap();
                 manager.set_mode(Mode::Always).unwrap();
                 manager
             })
@@ -395,21 +429,34 @@ mod tests {
         let ids: Vec<_> = keys.iter().map(SecretKey::public).collect();
         let managers: Vec<_> = (0..n)
             .map(|i| {
-                let manager = Manager::new(Friends::open(dirs[i].path(), ids[i]).unwrap()).unwrap();
+                let manager = Manager::new(
+                    Friends::open(dirs[i].path(), ids[i]).unwrap(),
+                    keys[i].clone(),
+                )
+                .unwrap();
                 manager.set_mode(Mode::Always).unwrap();
                 manager
             })
             .collect();
-        let group = managers[0].friends().create_group("Family", "A").unwrap();
+        let group = managers[0]
+            .friends()
+            .create_group(
+                &keys[0],
+                "Family",
+                "A",
+                super::super::groups::Policy::Managed,
+                Permission::Always,
+            )
+            .unwrap();
         for j in 1..n {
             // Same records confirmed pairing with a group invitation writes.
             managers[0]
                 .friends()
                 .add_confirmed(ids[j], format!("M{j}"))
                 .unwrap();
-            managers[0]
+            let admission = managers[0]
                 .friends()
-                .join_group(&group, "Family", "A", ids[j])
+                .admit_member(&keys[0], &group, ids[j], &format!("M{j}"))
                 .unwrap();
             managers[j]
                 .friends()
@@ -417,7 +464,7 @@ mod tests {
                 .unwrap();
             managers[j]
                 .friends()
-                .join_group(&group, "Family", &format!("M{j}"), ids[0])
+                .join_group(&admission, &format!("M{j}"), Permission::Always)
                 .unwrap();
         }
         let runtimes: Vec<_> = (0..n)
@@ -433,6 +480,7 @@ mod tests {
             .map(|i| endpoint(&runtimes[i], keys[i].clone()))
             .collect();
         let addrs: Vec<_> = endpoints.iter().map(|e| e.addr()).collect();
+        let mut lookups = Vec::new();
         for (i, endpoint) in endpoints.iter().enumerate() {
             let memory = iroh::address_lookup::memory::MemoryLookup::new();
             for (j, addr) in addrs.iter().enumerate() {
@@ -440,6 +488,7 @@ mod tests {
                     memory.add_endpoint_info(addr.clone());
                 }
             }
+            lookups.push(memory.clone());
             endpoint.address_lookup().unwrap().add(memory);
         }
         let mut nodes = Vec::new();
@@ -476,22 +525,43 @@ mod tests {
         let c_on_b = b.iter().find(|f| f.peer_id == ids[2]).unwrap();
         assert!(c_on_b.group_only && c_on_b.permission == Permission::Off);
         assert_eq!(c_on_b.display_name, "M2");
-        // C leaves; tombstone reaches A and B, C forgets group and B.
-        managers[2].friends().leave_group(&group, false).unwrap();
+        // Admin remove stops B's group grant; C receives its own signed removal.
+        managers[0]
+            .friends()
+            .remove_member(&keys[0], &group, ids[2], false)
+            .unwrap();
+        managers[0].notify();
+        wait("admin removal propagates to B and C", &|| {
+            !managers[1].friends().may_share(ids[2], true).unwrap()
+                && !managers[2]
+                    .friends()
+                    .group_state(&group)
+                    .unwrap()
+                    .unwrap()
+                    .members
+                    .contains_key(&ids[2])
+        });
+        managers[0]
+            .friends()
+            .admit_member(&keys[0], &group, ids[2], "M2")
+            .unwrap();
+        managers[0].notify();
+        wait("readmission restores membership", &|| {
+            managers[1].friends().may_share(ids[2], true).unwrap()
+                && managers[2].friends().may_share(ids[1], true).unwrap()
+        });
+        // B is genuinely offline. C gets A's acknowledgement and forgets the group
+        // before B returns, so only A can carry the leave to B.
+        drop(nodes.remove(1));
+        managers[2].friends().leave_group(&keys[2], &group).unwrap();
         managers[2].notify();
-        wait("leave propagates", &|| {
-            !managers[1]
+        wait("A acknowledges leave while B is offline", &|| {
+            managers[0]
                 .friends()
                 .list()
                 .unwrap()
                 .iter()
-                .any(|f| f.peer_id == ids[2])
-                && managers[0]
-                    .friends()
-                    .list()
-                    .unwrap()
-                    .iter()
-                    .all(|f| f.groups.is_empty() || f.peer_id != ids[2])
+                .all(|f| f.groups.is_empty() || f.peer_id != ids[2])
                 && managers[2].friends().groups().unwrap().is_empty()
                 && !managers[2]
                     .friends()
@@ -499,6 +569,34 @@ mod tests {
                     .unwrap()
                     .iter()
                     .any(|f| f.peer_id == ids[1])
+        });
+        assert!(managers[1].friends().may_share(ids[2], true).unwrap());
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let resumed = endpoint(&runtime, keys[1].clone());
+        resumed.address_lookup().unwrap().add(lookups[1].clone());
+        for i in [0, 2] {
+            let _ = lookups[i].set_endpoint_info(resumed.addr());
+        }
+        nodes.push(
+            Node::spawn(
+                runtime,
+                resumed,
+                managers[1].clone(),
+                published_path(dirs[1].path()),
+            )
+            .unwrap(),
+        );
+        wait("A carries leave to returning B", &|| {
+            !managers[1]
+                .friends()
+                .list()
+                .unwrap()
+                .iter()
+                .any(|f| f.peer_id == ids[2])
         });
         // A still pairs C directly, but group no longer grants access.
         assert!(!managers[0].friends().may_share(ids[2], true).unwrap());

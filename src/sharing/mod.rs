@@ -8,6 +8,7 @@ mod android_friends;
 mod android_locations;
 #[cfg(target_os = "android")]
 mod android_probe;
+pub mod groups;
 #[cfg(target_os = "android")]
 pub mod identity;
 pub mod location;
@@ -59,6 +60,31 @@ pub async fn connect(endpoint: &Endpoint, address: EndpointAddr) -> Result<Conne
     connect_alpn(endpoint, address, ALPN).await
 }
 
+/// TLS no_application_protocol alert (0x100 + 120), surfaced by QUIC.
+fn protocol_mismatch(mut error: &(dyn Error + 'static)) -> bool {
+    loop {
+        if let Some(error) = error.downcast_ref::<iroh::endpoint::ConnectionError>() {
+            match error {
+                iroh::endpoint::ConnectionError::TransportError(e)
+                    if u64::from(e.code) == 0x178 =>
+                {
+                    return true;
+                }
+                iroh::endpoint::ConnectionError::ConnectionClosed(e)
+                    if u64::from(e.error_code) == 0x178 =>
+                {
+                    return true;
+                }
+                _ => {}
+            }
+        }
+        match error.source() {
+            Some(source) => error = source,
+            None => return false,
+        }
+    }
+}
+
 pub(super) async fn connect_alpn(
     endpoint: &Endpoint,
     address: EndpointAddr,
@@ -77,6 +103,9 @@ pub(super) async fn connect_alpn(
                         Ok(Err(error)) => error.into(),
                         Err(error) => error.into(),
                     };
+                if protocol_mismatch(error.as_ref()) {
+                    return Err(io::Error::new(io::ErrorKind::Unsupported, "Update Roamlog").into());
+                }
                 if attempt + 1 == CONNECT_ATTEMPTS {
                     return Err(error);
                 }

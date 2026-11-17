@@ -44,8 +44,12 @@ location only while recording, while still receiving friends' positions.
 
 Groups let trusted people share with one another without pairing every phone
 individually. A friend's access is the higher of their individual and group
-permissions, subject to your overall mode. New groups start with **Always**
-access, and any member can invite others, so join only groups you trust.
+permissions, subject to your overall mode. **Managed** groups (default) let admins
+invite and remove members; **Open** groups let any member invite. Membership is
+signed. Creators choose access with **Always** preselected; joiners choose with
+**Trips** preselected. Group members can carry signed last-known positions for up
+to 24 hours, shown as “via Sam.” Blocking a member disables relay of your location
+for every group containing them. Old unsigned groups must be recreated.
 
 Friends appear on the map with their latest location. Finished trips sync with
 friends who currently have access to your location while sharing is enabled;
@@ -76,7 +80,8 @@ and limitations.
 - **Android only, with no guaranteed availability.** Both phones need a working
   network connection to exchange updates. Public discovery and relays are external
   dependencies; restrictive networks or service outages can prevent connections.
-  There is no Roamlog server to hold updates for an offline friend.
+  There is no Roamlog server mailbox. Group members can carry last-known signed
+  positions for up to 24 hours when origin and recipient do not overlap online.
 - **Background operation can stop.** Force-stop, power-off, battery restrictions,
   or Android refusing a background location service start can interrupt sharing.
   After reboot, you may need to open Roamlog to resume. Pairing also temporarily
@@ -86,8 +91,10 @@ and limitations.
   10 minutes. These are scheduling targets, not delivery guarantees. A marker can
   show an older position, and encryption authenticates the phone, not its GPS fix.
 - **Access and copies need care.** Group access can override a friend's individual
-  Hidden setting, and any group member can invite others. Removing or blocking
-  someone stops future updates but cannot erase locations or trips already received.
+  Hidden setting. Open groups let any member invite; Managed groups require admins.
+  Removing or blocking someone stops future updates under those permissions but
+  cannot erase locations or trips already received. Signed membership timestamps
+  can be backdated; admins can also remove people a removed member admitted.
 - **Sync and recovery are limited.** Finished trips sync on connection and every
   6 hours, rather than continuously. Resetting your identity or reinstalling
   requires pairing again; there is no cloud identity recovery.

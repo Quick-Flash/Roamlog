@@ -32,10 +32,10 @@ fn sample(now: i64) -> Sample {
     }
 }
 
-fn manager(dir: &std::path::Path, owner: iroh::EndpointId, peer: iroh::EndpointId) -> Manager {
-    let friends = Friends::open(dir, owner).unwrap();
+fn manager(dir: &std::path::Path, key: &SecretKey, peer: iroh::EndpointId) -> Manager {
+    let friends = Friends::open(dir, key.public()).unwrap();
     friends.add_confirmed(peer, "Friend".into()).unwrap();
-    Manager::new(friends).unwrap()
+    Manager::new(friends, key.clone()).unwrap()
 }
 
 #[tokio::test]
@@ -44,8 +44,8 @@ async fn sender_gates_every_packet_and_sequences_survive_restart() {
     let b = endpoint().await;
     let da = tempfile::tempdir().unwrap();
     let db = tempfile::tempdir().unwrap();
-    let ma = manager(da.path(), a.id(), b.id());
-    let mb = manager(db.path(), b.id(), a.id());
+    let ma = manager(da.path(), a.secret_key(), b.id());
+    let mb = manager(db.path(), b.secret_key(), a.id());
     let (client, server) = tokio::join!(a.connect(b.addr(), protocol::ALPN), async {
         b.accept().await.unwrap().await
     });
@@ -83,7 +83,11 @@ async fn sender_gates_every_packet_and_sequences_survive_restart() {
     ma.set_mode(Mode::Off).unwrap();
     assert!(!ma.send_latest(&client, now + 30_000, true).unwrap());
 
-    let restarted_sender = Manager::new(Friends::open(da.path(), a.id()).unwrap()).unwrap();
+    let restarted_sender = Manager::new(
+        Friends::open(da.path(), a.id()).unwrap(),
+        a.secret_key().clone(),
+    )
+    .unwrap();
     restarted_sender.set_mode(Mode::Always).unwrap();
     restarted_sender
         .update_fix(sample(now + 1), false, now + 1)
@@ -98,7 +102,11 @@ async fn sender_gates_every_packet_and_sequences_survive_restart() {
         panic!("expected location")
     };
     assert!(second_location.sequence > first_location.sequence);
-    let restarted_receiver = Manager::new(Friends::open(db.path(), b.id()).unwrap()).unwrap();
+    let restarted_receiver = Manager::new(
+        Friends::open(db.path(), b.id()).unwrap(),
+        b.secret_key().clone(),
+    )
+    .unwrap();
     assert!(!restarted_receiver.ingest(a.id(), &first, now + 1).unwrap());
     assert!(restarted_receiver.ingest(a.id(), &second, now + 1).unwrap());
     restarted_sender.friends().remove(b.id()).unwrap();
@@ -121,9 +129,9 @@ async fn sender_gates_every_packet_and_sequences_survive_restart() {
 #[test]
 fn replay_validation_retention_and_fail_closed_storage() {
     let dir = tempfile::tempdir().unwrap();
-    let owner = SecretKey::generate().public();
+    let key = SecretKey::generate();
     let peer = SecretKey::generate().public();
-    let manager = manager(dir.path(), owner, peer);
+    let manager = manager(dir.path(), &key, peer);
     let now = now_ms();
     let update = sample(now).to_update(4, now).unwrap();
     let message = Message::LocationUpdate(update);
@@ -142,8 +150,9 @@ fn replay_validation_retention_and_fail_closed_storage() {
     );
     old.sequence = 5;
     old.timestamp_ms -= 1;
+    // Sequence wins across both direct and forwarded updates.
     assert!(
-        !manager
+        manager
             .ingest(peer, &Message::LocationUpdate(old), now)
             .unwrap()
     );
@@ -165,7 +174,7 @@ fn replay_validation_retention_and_fail_closed_storage() {
     let path = dir.path().join("sharing/location-state.json");
     std::fs::write(&path, b"corrupt").unwrap();
     assert!(manager.set_mode(Mode::Always).is_err());
-    assert!(Manager::new(manager.friends().clone()).is_err());
+    assert!(Manager::new(manager.friends().clone(), key.clone()).is_err());
     assert_eq!(std::fs::read(path).unwrap(), b"corrupt");
 }
 
@@ -175,8 +184,8 @@ async fn authenticated_sessions_exchange_locations_and_survive_reconnect() {
     let b = endpoint().await;
     let da = tempfile::tempdir().unwrap();
     let db = tempfile::tempdir().unwrap();
-    let ma = manager(da.path(), a.id(), b.id());
-    let mb = manager(db.path(), b.id(), a.id());
+    let ma = manager(da.path(), a.secret_key(), b.id());
+    let mb = manager(db.path(), b.secret_key(), a.id());
     ma.friends()
         .set_permission(b.id(), Permission::Always)
         .unwrap();
@@ -219,7 +228,11 @@ async fn unknown_peers_cannot_request_or_receive_locations() {
     let a = endpoint().await;
     let stranger = endpoint().await;
     let dir = tempfile::tempdir().unwrap();
-    let manager = Manager::new(Friends::open(dir.path(), a.id()).unwrap()).unwrap();
+    let manager = Manager::new(
+        Friends::open(dir.path(), a.id()).unwrap(),
+        a.secret_key().clone(),
+    )
+    .unwrap();
     let serving = transport::server(&a, manager.clone());
     let scenario = async {
         let connection = stranger.connect(a.addr(), protocol::ALPN).await.unwrap();
@@ -257,4 +270,311 @@ fn shared_trips_replay_as_friend_journal_oldest_first() {
             .iter()
             .all(|t| t.status == crate::model::Status::Finished && t.distance_m > 50.0)
     );
+}
+
+#[tokio::test]
+async fn v1_peer_rejected_with_update_required() {
+    let old = Endpoint::builder(presets::Minimal)
+        .alpns(vec![b"roamlog/location/1".to_vec()])
+        .bind()
+        .await
+        .unwrap();
+    let new = endpoint().await;
+    let (result, _) = tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::join!(
+            super::connect_alpn(&new, old.addr(), protocol::ALPN),
+            async {
+                let _ = old.accept().await.unwrap().await;
+            }
+        )
+    })
+    .await
+    .expect("ALPN mismatch must fail without reconnect delay");
+    let error = result.unwrap_err();
+    assert!(
+        error
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|e| e.kind() == std::io::ErrorKind::Unsupported),
+        "{error:?}"
+    );
+    old.close().await;
+    new.close().await;
+}
+
+#[tokio::test]
+async fn offline_mailbox_relay_survives_restart_and_withdrawal_wins() {
+    use super::{
+        groups::Policy,
+        protocol::{GroupFix, GroupPayload, SignedGroupFix},
+    };
+    let a = endpoint().await;
+    let b = endpoint().await;
+    let c = endpoint().await;
+    let dirs: Vec<_> = (0..3).map(|_| tempfile::tempdir().unwrap()).collect();
+    let endpoints = [&a, &b, &c];
+    let stores: Vec<_> = (0..3)
+        .map(|i| Friends::open(dirs[i].path(), endpoints[i].id()).unwrap())
+        .collect();
+    let id = stores[0]
+        .create_group(
+            a.secret_key(),
+            "Family",
+            "A",
+            Policy::Managed,
+            Permission::Always,
+        )
+        .unwrap();
+    for i in 1..3 {
+        let admission = stores[0]
+            .admit_member(a.secret_key(), &id, endpoints[i].id(), &format!("M{i}"))
+            .unwrap();
+        stores[i]
+            .join_group(&admission, &format!("M{i}"), Permission::Always)
+            .unwrap();
+    }
+    let logs = stores[0].sync_for_locked(b.id()).unwrap();
+    stores[1].apply_sync_locked(a.id(), &logs).unwrap();
+    let ma = Manager::new(stores[0].clone(), a.secret_key().clone()).unwrap();
+    let mb = Manager::new(stores[1].clone(), b.secret_key().clone()).unwrap();
+    let mc = Manager::new(stores[2].clone(), c.secret_key().clone()).unwrap();
+    for m in [&ma, &mb, &mc] {
+        m.set_mode(Mode::Always).unwrap();
+    }
+    let now = now_ms() + 100;
+    ma.update_fix(sample(now), false, now).unwrap();
+    let (ab, ba) = tokio::join!(a.connect(b.addr(), protocol::ALPN), async {
+        b.accept().await.unwrap().await
+    });
+    let (ab, ba) = (ab.unwrap(), ba.unwrap());
+    assert!(ma.send_latest(&ab, now, true).unwrap());
+    let message = protocol::decode(&ba.read_datagram().await.unwrap(), now).unwrap();
+    mb.ingest(a.id(), &message, now).unwrap();
+    let Message::GroupFix(signed) = message else {
+        panic!("expected signed group fix")
+    };
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), ba.read_datagram())
+            .await
+            .is_err()
+    );
+    ma.clear_fix().unwrap();
+    assert!(!ma.send_latest(&ab, now + 1, false).unwrap());
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), ba.read_datagram())
+            .await
+            .is_err()
+    );
+    a.close().await; // A and C never connect, even indirectly through a simultaneous session.
+    drop(mb);
+    let mb = Manager::new(stores[1].clone(), b.secret_key().clone()).unwrap();
+    let (bc, cb) = tokio::join!(b.connect(c.addr(), protocol::ALPN), async {
+        c.accept().await.unwrap().await
+    });
+    let (bc, cb) = (bc.unwrap(), cb.unwrap());
+    let later = now + 3_600_000; // Beyond direct-fix maximum age, within mailbox retention.
+    assert!(!mb.send_latest(&bc, later, true).unwrap());
+    let message = protocol::decode(&cb.read_datagram().await.unwrap(), later).unwrap();
+    assert!(matches!(&message, Message::GroupFix(f) if f == &signed));
+    assert!(mc.ingest(b.id(), &message, later).unwrap());
+    let snapshot = mc
+        .snapshots(later)
+        .unwrap()
+        .into_iter()
+        .find(|s| s.peer_id == a.id())
+        .unwrap();
+    assert_eq!(snapshot.via, Some(b.id()));
+    assert_eq!(snapshot.age_ms, Some(3_600_000));
+    assert!(snapshot.stale);
+    assert!(!mc.ingest(b.id(), &message, later).unwrap());
+    let mut forged = signed.clone();
+    forged.fix.sequence += 1;
+    assert!(
+        mc.ingest(b.id(), &Message::GroupFix(forged), later)
+            .is_err()
+    );
+    let withdrawal = SignedGroupFix::sign(
+        a.secret_key(),
+        GroupFix {
+            group: signed.fix.group,
+            origin: a.id(),
+            sequence: signed.fix.sequence + 10,
+            timestamp_ms: now,
+            payload: GroupPayload::Unavailable(protocol::Availability::Off),
+        },
+    )
+    .unwrap();
+    assert!(
+        mb.ingest(a.id(), &Message::GroupFix(withdrawal.clone()), later)
+            .unwrap()
+    );
+    mb.send_latest(&bc, later, false).unwrap();
+    let message = protocol::decode(&cb.read_datagram().await.unwrap(), later).unwrap();
+    assert!(mc.ingest(b.id(), &message, later).unwrap());
+    let snapshot = mc
+        .snapshots(later)
+        .unwrap()
+        .into_iter()
+        .find(|s| s.peer_id == a.id())
+        .unwrap();
+    assert!(snapshot.latest.is_none() && snapshot.withdrawn);
+    let restarted = Manager::new(stores[2].clone(), c.secret_key().clone()).unwrap();
+    assert!(
+        restarted
+            .snapshots(later)
+            .unwrap()
+            .iter()
+            .find(|s| s.peer_id == a.id())
+            .unwrap()
+            .withdrawn
+    );
+    let direct = Message::LocationUpdate(
+        sample(later)
+            .to_update(withdrawal.fix.sequence + 1, later)
+            .unwrap(),
+    );
+    assert!(mc.ingest(a.id(), &direct, later).unwrap());
+    assert!(!mc.ingest(b.id(), &message, later).unwrap());
+    assert!(
+        mc.snapshots(later)
+            .unwrap()
+            .iter()
+            .find(|s| s.peer_id == a.id())
+            .unwrap()
+            .latest
+            .is_some()
+    );
+    b.close().await;
+    c.close().await;
+}
+
+#[tokio::test]
+async fn relay_admission_cutoff_block_gate_and_trip_withdrawal() {
+    use super::{
+        groups::{GroupOps, OpKind, Policy, SignedOp},
+        protocol::{GroupFix, GroupPayload, SignedGroupFix},
+    };
+    let a = endpoint().await;
+    let b = endpoint().await;
+    let c_endpoint = endpoint().await;
+    let c = c_endpoint.secret_key().clone();
+    let da = tempfile::tempdir().unwrap();
+    let db = tempfile::tempdir().unwrap();
+    let sa = Friends::open(da.path(), a.id()).unwrap();
+    let sb = Friends::open(db.path(), b.id()).unwrap();
+    let start = now_ms() - 10_000;
+    let root = SignedOp::sign(
+        a.secret_key(),
+        [0; 32],
+        start as u64,
+        OpKind::Create {
+            name: "Family".into(),
+            policy: Policy::Managed,
+            creator_name: "A".into(),
+        },
+    )
+    .unwrap();
+    let group = root.digest().unwrap();
+    let ops = vec![
+        root,
+        SignedOp::sign(
+            a.secret_key(),
+            group,
+            (start + 1) as u64,
+            OpKind::Admit {
+                member: b.id(),
+                name: "B".into(),
+            },
+        )
+        .unwrap(),
+        SignedOp::sign(
+            a.secret_key(),
+            group,
+            (start + 5000) as u64,
+            OpKind::Admit {
+                member: c.public(),
+                name: "C".into(),
+            },
+        )
+        .unwrap(),
+    ];
+    let log = GroupOps { group, ops };
+    sa.join_group(&log, "A", Permission::TripsOnly).unwrap();
+    sb.join_group(&log, "B", Permission::Always).unwrap();
+    let ma = Manager::new(sa.clone(), a.secret_key().clone()).unwrap();
+    let mb = Manager::new(sb.clone(), b.secret_key().clone()).unwrap();
+    ma.set_mode(Mode::Always).unwrap();
+    mb.set_mode(Mode::Always).unwrap();
+    let old = SignedGroupFix::sign(
+        a.secret_key(),
+        GroupFix {
+            group,
+            origin: a.id(),
+            sequence: 1,
+            timestamp_ms: start + 100,
+            payload: GroupPayload::Fix(sample(start + 100).to_update(1, start + 100).unwrap()),
+        },
+    )
+    .unwrap();
+    assert!(
+        mb.ingest(a.id(), &Message::GroupFix(old.clone()), now_ms())
+            .unwrap()
+    );
+    // A newly admitted receiver rejects pre-admission history even from a malicious forwarder.
+    let dc = tempfile::tempdir().unwrap();
+    let sc = Friends::open(dc.path(), c.public()).unwrap();
+    sc.join_group(&log, "C", Permission::Always).unwrap();
+    let mc = Manager::new(sc, c.clone()).unwrap();
+    assert!(
+        !mc.ingest(b.id(), &Message::GroupFix(old), now_ms())
+            .unwrap()
+    );
+    let (bc, cb) = tokio::join!(b.connect(c_endpoint.addr(), protocol::ALPN), async {
+        c_endpoint.accept().await.unwrap().await
+    });
+    let (bc, cb) = (bc.unwrap(), cb.unwrap());
+    mb.send_latest(&bc, now_ms(), true).unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), cb.read_datagram())
+            .await
+            .is_err()
+    );
+    // No signed group fix may be originated while any member is locally blocked.
+    sa.block(c.public()).unwrap();
+    let now = now_ms();
+    ma.update_fix(sample(now), true, now).unwrap();
+    let (ab, ba) = tokio::join!(a.connect(b.addr(), protocol::ALPN), async {
+        b.accept().await.unwrap().await
+    });
+    let (ab, ba) = (ab.unwrap(), ba.unwrap());
+    assert!(ma.send_latest(&ab, now, true).unwrap());
+    assert!(matches!(
+        protocol::decode(&ba.read_datagram().await.unwrap(), now).unwrap(),
+        Message::LocationUpdate(_)
+    ));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), ba.read_datagram())
+            .await
+            .is_err()
+    );
+    // Clear local block through existing explicit remove/re-pair flow.
+    sa.remove(c.public()).unwrap();
+    let resumed = now + 30_000;
+    ma.update_fix(sample(resumed), true, resumed).unwrap();
+    ma.send_latest(&ab, resumed, true).unwrap();
+    let Message::GroupFix(fix) =
+        protocol::decode(&ba.read_datagram().await.unwrap(), resumed).unwrap()
+    else {
+        panic!("expected signed group fix")
+    };
+    assert!(matches!(fix.fix.payload, GroupPayload::Fix(_)));
+    let sequence = fix.fix.sequence;
+    ma.set_recording(false).unwrap();
+    assert!(!ma.send_latest(&ab, resumed + 1, false).unwrap());
+    let message = protocol::decode(&ba.read_datagram().await.unwrap(), resumed + 1).unwrap();
+    assert!(
+        matches!(message,Message::GroupFix(fix) if fix.fix.sequence>sequence && matches!(fix.fix.payload,GroupPayload::Unavailable(protocol::Availability::TripInactive)))
+    );
+    a.close().await;
+    b.close().await;
+    c_endpoint.close().await;
 }

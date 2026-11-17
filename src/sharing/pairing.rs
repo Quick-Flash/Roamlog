@@ -1,6 +1,8 @@
 //! Invitation pairing over authenticated QUIC. Pairing never grants location access.
 use super::{
     Result,
+    groups::{self, GroupOps, Policy, State},
+    peers::Permission,
     peers::{Friends, validate_name},
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -12,10 +14,10 @@ use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use subtle::ConstantTimeEq;
 
-pub const ALPN: &[u8] = b"roamlog/pair/1";
+pub const ALPN: &[u8] = b"roamlog/pair/2";
 const PREFIX: &str = "roamlog://pair/";
 const MAX_LINK: usize = 2048;
-const MAX_FRAME: usize = 4096;
+const MAX_FRAME: usize = 256 * 1024;
 const NETWORK_TIMEOUT: Duration = Duration::from_secs(30);
 pub const CONFIRM_TIMEOUT: Duration = Duration::from_secs(300);
 
@@ -58,7 +60,7 @@ impl FriendInvite {
     pub fn new(endpoint: &Endpoint, display_name: String) -> Result<Self> {
         validate_name(&display_name)?;
         let invite = Self {
-            version: 1,
+            version: 2,
             peer_id: endpoint.id(),
             display_name,
             address: compact(endpoint.addr()),
@@ -77,7 +79,7 @@ impl FriendInvite {
                 return Err("invalid group invitation".into());
             }
         }
-        if self.version != 1 || self.address.id != self.peer_id || self.address.addrs.len() > 16 {
+        if self.version != 2 || self.address.id != self.peer_id || self.address.addrs.len() > 16 {
             return Err("invalid invitation version, identity, or addresses".into());
         }
         Ok(())
@@ -158,7 +160,7 @@ pub async fn bind(key: SecretKey) -> Result<Endpoint> {
 }
 
 #[derive(Serialize, Deserialize)]
-#[serde(tag = "kind", deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 enum Message {
     Request {
         version: u8,
@@ -168,7 +170,9 @@ enum Message {
     Offer {
         version: u8,
         name: String,
+        group: Option<GroupOps>,
     },
+    Admission(GroupOps),
     Decision {
         accepted: bool,
     },
@@ -176,7 +180,7 @@ enum Message {
 }
 
 async fn send(stream: &mut SendStream, message: &Message) -> Result<()> {
-    let bytes = serde_json::to_vec(message)?;
+    let bytes = postcard::to_allocvec(message)?;
     if bytes.len() > MAX_FRAME {
         return Err("pairing frame too large".into());
     }
@@ -196,7 +200,7 @@ async fn receive(stream: &mut RecvStream) -> Result<Message> {
     }
     let mut bytes = vec![0; size];
     stream.read_exact(&mut bytes).await?;
-    Ok(serde_json::from_slice(&bytes)?)
+    Ok(postcard::from_bytes(&bytes)?)
 }
 
 pub struct Pending {
@@ -206,6 +210,9 @@ pub struct Pending {
     pub verification_code: String,
     /// Group invitation and own member name.
     pub group: Option<GroupRef>,
+    pub group_state: Option<State>,
+    inviter: bool,
+    key: SecretKey,
     me: String,
     local_id: EndpointId,
     connection: Connection,
@@ -220,11 +227,16 @@ impl Drop for Pending {
 }
 
 impl Pending {
+    pub fn is_inviter(&self) -> bool {
+        self.inviter
+    }
+
     fn new(
-        local_id: EndpointId,
+        key: SecretKey,
+        inviter: bool,
         connection: Connection,
         name: String,
-        group: (Option<GroupRef>, String),
+        group: (Option<GroupRef>, String, Option<State>),
         send: SendStream,
         recv: RecvStream,
     ) -> Result<Self> {
@@ -240,8 +252,11 @@ impl Pending {
                 code[0], code[1], code[2], code[3], code[4], code[5]
             ),
             group: group.0,
+            group_state: group.2,
+            inviter,
+            local_id: key.public(),
+            key,
             me: group.1,
-            local_id,
             connection,
             send,
             recv,
@@ -250,7 +265,12 @@ impl Pending {
 
     /// Local user must compare code on both phones before explicitly accepting.
     /// Persists only after both votes are affirmative; all new permissions stay Off.
-    pub async fn confirm(mut self, accepted: bool, friends: &Friends) -> Result<()> {
+    pub async fn confirm(
+        mut self,
+        accepted: bool,
+        friends: &Friends,
+        share: Permission,
+    ) -> Result<()> {
         if friends.owner() != self.local_id {
             return Err("friend store identity mismatch".into());
         }
@@ -264,10 +284,26 @@ impl Pending {
                 Message::Decision { accepted: true } => {}
                 _ => return Err("pairing declined or invalid decision".into()),
             }
-            friends.add_confirmed(self.peer_id, self.display_name.clone())?;
             if let Some(group) = &self.group {
-                friends.join_group(&group.id, &group.name, &self.me, self.peer_id)?;
+                if self.inviter {
+                    let admission = friends.admit_member(
+                        &self.key,
+                        &group.id,
+                        self.peer_id,
+                        &self.display_name,
+                    )?;
+                    send(&mut self.send, &Message::Admission(admission)).await?;
+                } else {
+                    let Message::Admission(admission) = receive(&mut self.recv).await? else {
+                        return Err("missing signed group admission".into());
+                    };
+                    if groups::id_string(admission.group) != group.id {
+                        return Err("wrong group admission".into());
+                    }
+                    friends.join_group(&admission, &self.me, share)?;
+                }
             }
+            friends.add_confirmed(self.peer_id, self.display_name.clone())?;
             send(&mut self.send, &Message::Complete).await?;
             self.send.finish()?;
             if !matches!(receive(&mut self.recv).await?, Message::Complete) {
@@ -298,21 +334,42 @@ pub async fn request(
         send(
             &mut send_stream,
             &Message::Request {
-                version: 1,
+                version: 2,
                 token: invite.token,
                 name: name.to_owned(),
             },
         )
         .await?;
-        let Message::Offer { version: 1, name } = receive(&mut recv).await? else {
+        let Message::Offer {
+            version: 2,
+            name,
+            group,
+        } = receive(&mut recv).await?
+        else {
             return Err("invalid pairing offer".into());
         };
         validate_name(&name)?;
+        let state = match (&invite.group, &group) {
+            (Some(reference), Some(log)) if groups::id_string(log.group) == reference.id => {
+                let ops = groups::merge(log.group, &[], &log.ops, super::manager::now_ms() as u64)?;
+                let state = groups::derive(log.group, &ops, super::manager::now_ms() as u64)?
+                    .ok_or("missing Create")?;
+                if !state.members.contains_key(&invite.peer_id)
+                    || (state.policy == Policy::Managed && !state.admins.contains(&invite.peer_id))
+                {
+                    return Err("inviter cannot admit members".into());
+                }
+                Some(state)
+            }
+            (None, None) => None,
+            _ => return Err("group invitation mismatch".into()),
+        };
         Pending::new(
-            endpoint.id(),
+            endpoint.secret_key().clone(),
+            false,
             connection,
             name,
-            (invite.group.clone(), own_name),
+            (invite.group.clone(), own_name, state),
             send_stream,
             recv,
         )
@@ -338,7 +395,7 @@ pub async fn accept(
         }
         let (mut send_stream, mut recv) = connection.accept_bi().await?;
         let Message::Request {
-            version: 1,
+            version: 2,
             token,
             name,
         } = receive(&mut recv).await?
@@ -349,19 +406,43 @@ pub async fn accept(
             return Err("invalid invitation token".into());
         }
         validate_name(&name)?;
+        let group = if let Some(reference) = &invite.group {
+            let state = friends
+                .group_state(&reference.id)?
+                .ok_or("recreate legacy group")?;
+            if !state.members.contains_key(&endpoint.id())
+                || (state.policy == Policy::Managed && !state.admins.contains(&endpoint.id()))
+            {
+                return Err("inviter cannot admit members".into());
+            }
+            let _lock = friends.lock()?;
+            friends
+                .sync_for_locked(endpoint.id())?
+                .into_iter()
+                .find(|g| groups::id_string(g.group) == reference.id)
+        } else {
+            None
+        };
+        let state = group
+            .as_ref()
+            .map(|g| groups::derive(g.group, &g.ops, super::manager::now_ms() as u64))
+            .transpose()?
+            .flatten();
         send(
             &mut send_stream,
             &Message::Offer {
-                version: 1,
+                version: 2,
                 name: invite.display_name.clone(),
+                group,
             },
         )
         .await?;
         Pending::new(
-            endpoint.id(),
+            endpoint.secret_key().clone(),
+            true,
             connection,
             name,
-            (invite.group.clone(), invite.display_name.clone()),
+            (invite.group.clone(), invite.display_name.clone(), state),
             send_stream,
             recv,
         )
@@ -388,6 +469,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn signed_group_pairing_preserves_creator_access_and_uses_joiner_choice() {
+        let a = endpoint().await;
+        let b = endpoint().await;
+        let da = tempfile::tempdir().unwrap();
+        let db = tempfile::tempdir().unwrap();
+        let sa = Friends::open(da.path(), a.id()).unwrap();
+        let sb = Friends::open(db.path(), b.id()).unwrap();
+        let id = sa
+            .create_group(
+                a.secret_key(),
+                "Family",
+                "Alice",
+                Policy::Managed,
+                Permission::Always,
+            )
+            .unwrap();
+        let mut invite = FriendInvite::new(&a, "Alice".into()).unwrap();
+        invite.group = Some(GroupRef {
+            id: id.clone(),
+            name: "Family".into(),
+        });
+        let (pa, pb) = tokio::join!(accept(&a, &invite, &sa), request(&b, &invite, "Bob", &sb));
+        let (pa, pb) = (pa.unwrap(), pb.unwrap());
+        assert!(pa.is_inviter() && !pb.is_inviter());
+        assert_eq!(pb.group_state.as_ref().unwrap().policy, Policy::Managed);
+        assert!(sb.groups().unwrap().is_empty());
+        let (ra, rb) = tokio::join!(
+            pa.confirm(true, &sa, Permission::Off),
+            pb.confirm(true, &sb, Permission::TripsOnly)
+        );
+        ra.unwrap();
+        rb.unwrap();
+        assert!(sa.may_share(b.id(), false).unwrap());
+        assert!(!sb.may_share(a.id(), false).unwrap());
+        assert!(sb.may_share(a.id(), true).unwrap());
+        let log = sa.sync_for_locked(b.id()).unwrap().remove(0);
+        sb.join_group(&log, "Bob", Permission::Off).unwrap();
+        assert!(!sb.may_share(a.id(), true).unwrap());
+        assert_eq!(
+            sb.group_state(&id).unwrap().unwrap(),
+            sa.group_state(&id).unwrap().unwrap()
+        );
+        assert!(
+            sb.admit_member(
+                b.secret_key(),
+                &id,
+                SecretKey::generate().public(),
+                "Forged"
+            )
+            .is_err()
+        );
+        assert!(
+            sb.remove_member(b.secret_key(), &id, a.id(), false)
+                .is_err()
+        );
+        a.close().await;
+        b.close().await;
+    }
+
+    #[tokio::test]
     async fn both_users_must_confirm_and_pairing_grants_nothing() {
         let a = endpoint().await;
         let b = endpoint().await;
@@ -401,14 +542,20 @@ mod tests {
         assert_eq!(pb.peer_id, a.id());
         assert!(sa.list().unwrap().is_empty() && sb.list().unwrap().is_empty());
         let code = pa.verification_code.clone();
-        let (ra, rb) = tokio::join!(pa.confirm(true, &sa), pb.confirm(true, &sb));
+        let (ra, rb) = tokio::join!(
+            pa.confirm(true, &sa, Permission::TripsOnly),
+            pb.confirm(true, &sb, Permission::TripsOnly)
+        );
         ra.unwrap();
         rb.unwrap();
         assert!(!sa.may_share(b.id(), true).unwrap());
         assert!(!sb.may_share(a.id(), true).unwrap());
         let (pa, pb) = pending(&a, &b, &sa, &sb).await;
         assert_ne!(code, pa.verification_code);
-        let (ra, rb) = tokio::join!(pa.confirm(true, &sa), pb.confirm(false, &sb));
+        let (ra, rb) = tokio::join!(
+            pa.confirm(true, &sa, Permission::TripsOnly),
+            pb.confirm(false, &sb, Permission::TripsOnly)
+        );
         assert!(ra.is_err() && rb.is_err());
         assert_eq!(sa.list().unwrap().len(), 1);
         a.close().await;
@@ -424,12 +571,15 @@ mod tests {
         let sa = Friends::open(da.path(), a.id()).unwrap();
         let sb = Friends::open(db.path(), b.id()).unwrap();
         let (pa, pb) = pending(&a, &b, &sa, &sb).await;
-        let (ra, rb) = tokio::join!(pa.confirm(false, &sa), pb.confirm(true, &sb));
+        let (ra, rb) = tokio::join!(
+            pa.confirm(false, &sa, Permission::TripsOnly),
+            pb.confirm(true, &sb, Permission::TripsOnly)
+        );
         assert!(ra.is_err() && rb.is_err());
         assert!(sa.list().unwrap().is_empty() && sb.list().unwrap().is_empty());
         let (pa, pb) = pending(&a, &b, &sa, &sb).await;
         drop(pa);
-        assert!(pb.confirm(true, &sb).await.is_err());
+        assert!(pb.confirm(true, &sb, Permission::TripsOnly).await.is_err());
         assert!(sb.list().unwrap().is_empty());
         a.close().await;
         b.close().await;
@@ -442,7 +592,7 @@ mod tests {
         let link = invite.to_link().unwrap();
         assert_eq!(FriendInvite::from_link(&link).unwrap().peer_id, a.id());
         let mut invalid = invite.clone();
-        invalid.version = 2;
+        invalid.version = 3;
         assert!(invalid.to_link().is_err());
         invalid = invite.clone();
         invalid.peer_id = SecretKey::generate().public();
@@ -507,12 +657,18 @@ mod tests {
         let sa = Friends::open(da.path(), a.id()).unwrap();
         let sb = Friends::open(db.path(), b.id()).unwrap();
         let (pa, pb) = pending(&a, &b, &sa, &sb).await;
-        let (ra, rb) = tokio::join!(pa.confirm(true, &sa), pb.confirm(true, &sb));
+        let (ra, rb) = tokio::join!(
+            pa.confirm(true, &sa, Permission::TripsOnly),
+            pb.confirm(true, &sb, Permission::TripsOnly)
+        );
         ra.unwrap();
         rb.unwrap();
         let (pa, pb) = pending(&a, &b, &sa, &sb).await;
         sa.block(b.id()).unwrap();
-        let (ra, rb) = tokio::join!(pa.confirm(true, &sa), pb.confirm(true, &sb));
+        let (ra, rb) = tokio::join!(
+            pa.confirm(true, &sa, Permission::TripsOnly),
+            pb.confirm(true, &sb, Permission::TripsOnly)
+        );
         assert!(ra.is_err() && rb.is_err());
         assert!(!sa.may_pair(b.id()).unwrap());
         assert!(!sa.may_share(b.id(), true).unwrap());

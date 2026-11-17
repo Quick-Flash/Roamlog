@@ -391,7 +391,10 @@ pub fn MapView() -> impl IntoView {
                         f.name.clone(),
                         x,
                         y,
-                        format!("{} · {when}", f.name),
+                        match &f.via {
+                            Some(via) => format!("{} · via {via}, {when}", f.name),
+                            None => format!("{} · {when}", f.name),
+                        },
                         live,
                         f.avatar.clone(),
                     ))

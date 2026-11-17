@@ -21,17 +21,29 @@ Open **Friends** on map.
 - Each friend and each group has an access dropdown: **Hidden**, **Trips**, or
   **Always**. A person sees the higher of their own access and their groups' access;
   their row says when a group grants more. New direct friends start Hidden; new
-  groups start Always. ⋯ on a row holds Their trips, Rename, Block, Remove (or Invite,
-  Rename, Leave for groups).
-- **Groups**: create a group (e.g. Family), ⋯ → **Invite someone**, pair as above.
-  Members you never paired with are introduced by other members. **Leave** stops sharing with the group and
-  tells members still connected; others learn through members.
+  groups offer Always when creating. Join confirmations offer Trips and let you choose.
+  ⋯ on a friend holds Their trips, Rename, Block, Remove.
+- **Groups**: choose **Managed** (default: only admins invite or remove) or **Open**
+  (any member may invite; admins remove). Policy is fixed at creation. ⋯ → **Invite
+  someone** pairs through an authorized inviter. Confirmation shows creator, member
+  count, policy, and your access choice. Members may introduce people you never
+  paired with; each admission is signed. New-member notifications describe the
+  access you grant, unless group access is Hidden.
+- **Group ⋯ → Members** shows who added each member and admin badges. Admins can
+  **Remove**, **Remove + people they added**, or **Make admin**. Members can Block.
+  **Leave** stops group access immediately. Signed leave stays available until any
+  remaining member acknowledges it, or seven days pass; members gossip it onward.
+- Old unsigned groups show **Recreate this group** and grant no access. Remove and
+  recreate them. Direct friends retain their permissions. **Update Roamlog** means
+  a friend's location protocol version differs; update both phones.
 - Friends' finished trips sync automatically on connect and every 6 hours, kept apart
   from yours. **History → Showing** picks whose trips (several people, or you plus a
   group) to see together with their miles, map paths, and road coverage; read-only.
   ⋯ → **Their trips** → **Add to my trips** copies one into your own history.
 - **Rename**: local labels for friends and groups; nobody else sees them.
-- **Layers → Friend locations** toggles map markers. Gray marker: not live.
+- **Layers → Friend locations** toggles map markers. Group members carry signed
+  last-known positions for up to 24 hours. Relayed markers and friend rows show
+  **via Sam, 12 min ago**. Gray marker: not live or older than 15 minutes.
 - People button (map controls) lists friends with a location; tap one to center the
   map on them. ⋯ → **Show on map** on a friend does the same. Friends list shows a
   search box once you have four or more friends.
@@ -43,12 +55,28 @@ Open **Friends** on map.
 ## Privacy rules
 
 - Permissions are checked on the sending phone before every packet.
-- Group access applies to every member (still subject to your mode).
-  Any member can admit new members; only join groups of people you trust.
+- Group access applies to every current member (still subject to your mode).
+  Membership is a signed operation log anchored to its creator. Managed groups
+  restrict admissions/removals to admins; Open groups let every member invite.
+- Signed group fixes may be carried by other members to every current member for
+  up to 24 hours. Forwarders and receivers reject fixes predating the recipient's
+  current admission. No group key or server mailbox is used.
+- Blocking anyone disables relay of your own location for every group containing
+  them. Direct sends to other members retain their individual permission checks.
+  Copies signed before the block may still be carried; they cannot be recalled.
 - Friend trips are shared only with friends who can currently see your location,
   and only while your mode is not Off. Estimated gap segments are not shared.
-- Received positions stay on this phone only, newest per friend, for 24 hours.
-- Remove/Block stop future updates; they cannot erase what friend already received.
+- Direct positions stay on this phone; signed group positions can be forwarded
+  within their group. Only the newest signed position per group/origin is cached,
+  for up to 24 hours. Sequence replay protection is shared with direct updates.
+- Lowering access, ending a Trips-only recording, or switching Off/Pause signs an
+  unavailable marker with a newer sequence. Delivery before closing is best effort;
+  members that receive it replace and forward the marker.
+  Missing GPS alone preserves the last-known signed fix until retention expires.
+- Removing a direct friend clears their individual grant; shared-group grants
+  still apply. Use group Members → Remove or Block to end group access. Removing
+  a blocked friend locally clears Block, so shared-group grants can resume.
+  These changes cannot erase what someone already received.
 - A received position authenticates the sender, not the GPS measurement.
 
 ## Design
@@ -60,7 +88,10 @@ Open **Friends** on map.
 - Both friends dial each other; connection opened by lower peer ID wins on both
   sides. Dial retry backs off 15 s → 2 min.
 - Location: postcard datagrams with sequence numbers and replay cursors.
-  Group member lists, trip requests: reliable QUIC streams on same connection.
+  Signed group membership and digest acknowledgements, trip requests: reliable QUIC
+  streams on the same connection. Location ALPN is `roamlog/location/2`; pairing is
+  `roamlog/pair/2`. Group logs live in `sharing/groups/<id>.ops`; relay cache lives in
+  `sharing/group-fixes.postcard`.
 - UI process reads `sharing/friend-locations.json`, written by the service.
   Pairing runs in UI process; service endpoint pauses during pairing.
 - App launch restarts sharing service if mode is not Off (after force-stop or
@@ -69,11 +100,13 @@ Open **Friends** on map.
 
 ## Limits
 
-- **Platform and connectivity:** sharing is Android only. Both phones need network
-  access at the same time to exchange data. Direct connections are not always
+- **Platform and connectivity:** sharing is Android only. Each connection needs
+  both phones online at the same time. Direct connections are not always
   possible; public Iroh discovery and relays are external dependencies, and
   restrictive networks or outages can prevent sharing. Relays forward encrypted
-  traffic; they are not an offline mailbox for missed updates.
+  traffic; they are not an offline mailbox. Group members can carry each other's
+  last-known signed fixes for up to 24 hours even when origin and recipient are
+  never online together. Some overlapping path through members is still required.
 - **Background availability:** force-stop, power-off, or battery restrictions can
   stop sharing. After reboot Android may refuse a background location service
   start; Roamlog then posts "Location sharing paused" and resumes when opened.
@@ -92,9 +125,12 @@ Open **Friends** on map.
   sharing does not provide a continuous history of a friend's movements.
 - **Permission scope:** During trips sends only while recording; Off also stops
   receiving. A group grant can give someone access despite their individual
-  Hidden setting. New groups default to Always, and any member can admit others.
-  Leaving-group notifications propagate through connected members, so disconnected
-  phones may learn about the departure later.
+  Hidden setting. Creators choose access with Always preselected; joiners choose
+  with Trips preselected. Managed groups require admin admission; Open groups let
+  any member invite. Membership changes propagate through connected members, so
+  disconnected phones may learn about removal or departure later. A malicious member
+  can backdate an admit before their removal; admins can remove their additions
+  too. Signed timestamps do not prove when an operation was really made.
 - **Copies cannot be recalled:** blocking, removing, leaving, or reducing access
   stops future sharing under those permissions; it cannot erase data already
   received or copied. The 24-hour location retention rule does not expire received

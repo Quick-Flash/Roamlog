@@ -278,7 +278,7 @@ pub async fn session(
         let mut last_status: Option<(bool, Availability)> = None;
         let mut last_ping = Instant::now();
         let mut nonce = 0u64;
-        let mut synced: Option<Vec<u8>> = None;
+        let mut synced: Option<Vec<Vec<u8>>> = None;
         let mut fetching = false;
         let mut last_sync: Option<Instant> = None;
         let mut last_avatar: Option<Instant> = None;
@@ -297,7 +297,12 @@ pub async fn session(
                 stream = connection.accept_uni() => {
                     // Group member list; reliable stream, bounded like friends file entries.
                     let bytes = tokio::time::timeout(Duration::from_secs(30), stream?.read_to_end(MAX_GROUP_SYNC)).await??;
-                    manager.apply_group_sync(connection.remote_id(), &bytes)?;
+                    if let Some(ack) = manager.apply_group_sync(connection.remote_id(), &bytes)? {
+                        let mut stream = connection.open_uni().await?;
+                        stream.write_all(&ack).await?;
+                        stream.finish()?;
+                        tokio::time::timeout(Duration::from_secs(30), stream.stopped()).await??;
+                    }
                 },
                 packet = connection.read_datagram() => {
                     let message = protocol::decode(&packet?, now_ms())?;
@@ -337,10 +342,13 @@ pub async fn session(
                 tokio::spawn(fetch_avatar(connection.clone(), directory.clone()));
             }
             let sync = manager.group_sync(connection.remote_id())?;
-            if synced.as_ref() != Some(&sync) && (synced.is_some() || sync != b"[]") {
-                let mut stream = connection.open_uni().await?;
-                stream.write_all(&sync).await?;
-                stream.finish()?;
+            if synced.as_ref() != Some(&sync) {
+                for bytes in &sync {
+                    if bytes.len() > MAX_GROUP_SYNC { return Err("group sync too large".into()); }
+                    let mut stream = connection.open_uni().await?;
+                    stream.write_all(bytes).await?;
+                    stream.finish()?;
+                }
                 synced = Some(sync);
             }
             if last_ping.elapsed() >= Duration::from_secs(30) {

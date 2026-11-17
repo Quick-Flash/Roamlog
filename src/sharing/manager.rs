@@ -1,14 +1,17 @@
 //! Sender policy, latest-only samples, replay protection, and volatile friend positions.
 use super::{
     Result,
+    groups::{GroupId, Packet},
     location::{MAX_FIX_AGE_MS, RETENTION_MS, Sample, UpdatePolicy},
-    peers::{Friend, Friends, Group, GroupSync, Permission},
-    protocol::{self, Availability, LocationUpdate, Message},
+    peers::{Friend, Friends, Group, Permission},
+    protocol::{
+        self, Availability, GroupFix, GroupPayload, LocationUpdate, Message, SignedGroupFix,
+    },
 };
-use iroh::{EndpointId, endpoint::Connection};
+use iroh::{EndpointId, SecretKey, endpoint::Connection};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs::File,
     io::{Read, Write},
     sync::{Arc, Mutex},
@@ -48,6 +51,8 @@ struct Metadata {
 pub struct PeerLocation {
     pub peer_id: EndpointId,
     pub latest: Option<LocationUpdate>,
+    pub via: Option<EndpointId>,
+    pub withdrawn: bool,
     pub age_ms: Option<i64>,
     pub stale: bool,
     pub connected: bool,
@@ -55,6 +60,10 @@ pub struct PeerLocation {
 }
 
 struct Remote {
+    sequence: u64,
+    group: Option<GroupId>,
+    via: Option<EndpointId>,
+    withdrawn: bool,
     latest: Option<LocationUpdate>,
     received_at_ms: i64,
     availability: Availability,
@@ -63,6 +72,10 @@ struct Remote {
 impl Default for Remote {
     fn default() -> Self {
         Self {
+            sequence: 0,
+            group: None,
+            via: None,
+            withdrawn: false,
             latest: None,
             received_at_ms: 0,
             availability: Availability::Off,
@@ -71,10 +84,20 @@ impl Default for Remote {
     }
 }
 
+#[derive(Clone, Serialize, Deserialize)]
+struct CachedFix {
+    signed: SignedGroupFix,
+    via: EndpointId,
+}
+
 #[derive(Default)]
 struct Memory {
     latest: Option<Sample>,
+    update_required: BTreeSet<EndpointId>,
     recording: bool,
+    relay: Vec<CachedFix>,
+    group_issued: BTreeMap<GroupId, (crate::geo::Point, i64)>,
+    group_sent: BTreeMap<(EndpointId, GroupId, EndpointId), u64>,
     sent: BTreeMap<EndpointId, (crate::geo::Point, i64)>,
     remote: BTreeMap<EndpointId, Remote>,
     /// Live session per friend and whether lower identity opened it (preferred on both sides).
@@ -85,6 +108,7 @@ struct Memory {
 pub type TripSource = Arc<dyn Fn() -> Result<Vec<u8>> + Send + Sync>;
 
 struct Inner {
+    key: SecretKey,
     friends: Friends,
     memory: Mutex<Memory>,
     changed: watch::Sender<()>,
@@ -145,8 +169,12 @@ fn availability(
 }
 
 impl Manager {
-    pub fn new(friends: Friends) -> Result<Self> {
+    pub fn new(friends: Friends, key: SecretKey) -> Result<Self> {
+        if key.public() != friends.owner() {
+            return Err("sharing signing identity mismatch".into());
+        }
         let manager = Self(Arc::new(Inner {
+            key,
             friends,
             memory: Mutex::new(Memory::default()),
             changed: watch::channel(()).0,
@@ -155,6 +183,12 @@ impl Manager {
         {
             let _lock = manager.0.friends.lock()?;
             manager.read_metadata()?;
+            manager
+                .0
+                .memory
+                .lock()
+                .map_err(|_| "sharing lock failed")?
+                .relay = manager.read_relay()?;
         }
         Ok(manager)
     }
@@ -313,7 +347,10 @@ impl Manager {
     }
 
     pub(super) fn control(&self, connection: &Connection, message: &Message) -> Result<()> {
-        if matches!(message, Message::LocationUpdate(_) | Message::Hello) {
+        if matches!(
+            message,
+            Message::LocationUpdate(_) | Message::GroupFix(_) | Message::Hello
+        ) {
             return Err("invalid control message".into());
         }
         let _lock = self.0.friends.lock()?;
@@ -337,12 +374,30 @@ impl Manager {
         let mut metadata = self.read_metadata()?;
         let mut memory = self.0.memory.lock().map_err(|_| "sharing lock failed")?;
         let peer = connection.remote_id();
+        self.prepare_group_fixes(
+            &records,
+            &groups,
+            &mut metadata,
+            &mut memory,
+            now_ms,
+            requested,
+        )?;
+        let group_sent =
+            self.forward_group_fixes(connection, &records, &metadata, &mut memory, now_ms)?;
         if availability(&records, &groups, peer, metadata.mode, &memory, now_ms)
             != (true, Availability::Active)
         {
             return Ok(false);
         }
         let sample = memory.latest.ok_or("location unavailable")?;
+        if let Some(update) = group_sent
+            && sample.to_update(update.sequence, now_ms)? == update
+        {
+            // Signed group datagram already carries this fix. A second, newer direct
+            // sequence would race it and could prevent the recipient caching relay data.
+            memory.sent.insert(peer, (sample.fix.point, now_ms));
+            return Ok(true);
+        }
         if !metadata
             .policy
             .due(memory.sent.get(&peer).copied(), sample, now_ms, requested)
@@ -361,19 +416,366 @@ impl Manager {
         Ok(true)
     }
 
+    fn read_relay(&self) -> Result<Vec<CachedFix>> {
+        let file = match File::open(self.0.friends.directory().join("group-fixes.postcard")) {
+            Ok(file) => file,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
+            Err(e) => return Err(e.into()),
+        };
+        let mut bytes = Vec::new();
+        file.take(1_048_577).read_to_end(&mut bytes)?;
+        if bytes.len() > 1_048_576 {
+            return Err("group fix cache too large".into());
+        }
+        let fixes: Vec<CachedFix> = postcard::from_bytes(&bytes)?;
+        if fixes.len() > 32 * 64 {
+            return Err("too many cached group fixes".into());
+        }
+        Ok(fixes
+            .into_iter()
+            .filter(|f| f.signed.validate(now_ms()).is_ok())
+            .collect())
+    }
+
+    fn write_relay(&self, fixes: &[CachedFix]) -> Result<()> {
+        if fixes.len() > 32 * 64 {
+            return Err("too many cached group fixes".into());
+        }
+        let mut file = tempfile::NamedTempFile::new_in(self.0.friends.directory())?;
+        file.write_all(&postcard::to_allocvec(fixes)?)?;
+        file.as_file().sync_all()?;
+        file.persist(self.0.friends.directory().join("group-fixes.postcard"))?;
+        File::open(self.0.friends.directory())?.sync_all()?;
+        Ok(())
+    }
+
+    /// Origin signs only current, locally authorized group grants. Existing counters
+    /// reserve numbers before persistence/enqueue, shared with direct locations.
+    fn prepare_group_fixes(
+        &self,
+        records: &[Friend],
+        groups: &[Group],
+        metadata: &mut Metadata,
+        memory: &mut Memory,
+        now: i64,
+        requested: bool,
+    ) -> Result<()> {
+        if !groups.iter().any(|g| g.version == 2) {
+            return Ok(());
+        }
+        let views = self.0.friends.group_views_locked()?;
+        let mut relay = memory.relay.clone();
+        let mut issued = memory.group_issued.clone();
+        issued.retain(|id, _| {
+            views
+                .iter()
+                .any(|(g, _)| g.id == super::groups::id_string(*id))
+        });
+        let before = relay.len();
+        relay.retain(|cached| {
+            cached.signed.fix.timestamp_ms >= now.saturating_sub(RETENTION_MS)
+                && views.iter().any(|(g, s)| {
+                    g.id == super::groups::id_string(cached.signed.fix.group)
+                        && s.members.contains_key(&cached.signed.fix.origin)
+                })
+        });
+        let mut changed = before != relay.len();
+        for (group, state) in &views {
+            let id = super::groups::parse_id(&group.id)?;
+            if !state.members.contains_key(&self.owner()) {
+                continue;
+            }
+            let blocked = state
+                .members
+                .keys()
+                .any(|peer| records.iter().any(|f| f.peer_id == *peer && f.blocked));
+            if blocked {
+                let len = relay.len();
+                relay.retain(|c| c.signed.fix.group != id || c.signed.fix.origin != self.owner());
+                issued.remove(&id);
+                changed |= len != relay.len();
+                continue;
+            }
+            let status = if metadata.mode == Mode::Off
+                || group.share == Permission::Off
+                || group.leaving_since_ms.is_some()
+            {
+                Availability::Off
+            } else if !memory.recording
+                && (metadata.mode == Mode::TripsOnly || group.share == Permission::TripsOnly)
+            {
+                Availability::TripInactive
+            } else if memory.latest.is_none_or(|sample| {
+                sample.to_update(1, now).is_err()
+                    || sample.fix.timestamp_ms < now.saturating_sub(MAX_FIX_AGE_MS) as u64
+            }) {
+                Availability::NoFix
+            } else {
+                Availability::Active
+            };
+            // Missing GPS does not revoke access. Preserve last-known mailbox data.
+            if status == Availability::NoFix {
+                continue;
+            }
+            let old = relay
+                .iter()
+                .find(|c| c.signed.fix.group == id && c.signed.fix.origin == self.owner());
+            let payload = if status == Availability::Active {
+                let sample = memory.latest.ok_or("location unavailable")?;
+                if !metadata
+                    .policy
+                    .due(issued.get(&id).copied(), sample, now, requested)
+                {
+                    continue;
+                }
+                metadata.sequence = metadata
+                    .sequence
+                    .checked_add(1)
+                    .ok_or("sharing sequence exhausted")?;
+                issued.insert(id, (sample.fix.point, now));
+                GroupPayload::Fix(sample.to_update(metadata.sequence, now)?)
+            } else {
+                if !old.is_some_and(|c| matches!(c.signed.fix.payload, GroupPayload::Fix(_))) {
+                    continue;
+                }
+                metadata.sequence = metadata
+                    .sequence
+                    .checked_add(1)
+                    .ok_or("sharing sequence exhausted")?;
+                issued.remove(&id);
+                GroupPayload::Unavailable(status)
+            };
+            let timestamp_ms = match payload {
+                GroupPayload::Fix(update) => update.timestamp_ms,
+                _ => now,
+            };
+            let signed = SignedGroupFix::sign(
+                &self.0.key,
+                GroupFix {
+                    group: id,
+                    origin: self.owner(),
+                    sequence: metadata.sequence,
+                    timestamp_ms,
+                    payload,
+                },
+            )?;
+            relay.retain(|c| c.signed.fix.group != id || c.signed.fix.origin != self.owner());
+            relay.push(CachedFix {
+                signed,
+                via: self.owner(),
+            });
+            changed = true;
+        }
+        if changed {
+            self.write_metadata(metadata)?;
+            self.write_relay(&relay)?;
+            self.0.changed.send_replace(());
+        }
+        memory.relay = relay;
+        memory.group_issued = issued;
+        Ok(())
+    }
+
+    fn forward_group_fixes(
+        &self,
+        connection: &Connection,
+        records: &[Friend],
+        metadata: &Metadata,
+        memory: &mut Memory,
+        now: i64,
+    ) -> Result<Option<LocationUpdate>> {
+        let peer = connection.remote_id();
+        if !trusted(records, peer) {
+            return Ok(None);
+        }
+        let mut own: Option<LocationUpdate> = None;
+        let views = self.0.friends.group_views_locked()?;
+        for cached in &memory.relay {
+            let fix = &cached.signed.fix;
+            if peer == fix.origin
+                || (fix.origin != self.owner() && !trusted(records, fix.origin))
+                || fix.timestamp_ms < now.saturating_sub(RETENTION_MS)
+            {
+                continue;
+            }
+            // Off still permits best-effort delivery of own signed withdrawal.
+            if metadata.mode == Mode::Off
+                && !(fix.origin == self.owner()
+                    && matches!(fix.payload, GroupPayload::Unavailable(_)))
+            {
+                continue;
+            }
+            let Some((_, state)) = views
+                .iter()
+                .find(|(g, _)| g.id == super::groups::id_string(fix.group))
+            else {
+                continue;
+            };
+            if !state.members.contains_key(&fix.origin)
+                || !state.members.contains_key(&self.owner())
+            {
+                continue;
+            }
+            let Some(member) = state.members.get(&peer) else {
+                continue;
+            };
+            if member.admitted_at_ms > fix.timestamp_ms as u64 {
+                continue;
+            }
+            let sent = memory
+                .group_sent
+                .entry((peer, fix.group, fix.origin))
+                .or_default();
+            if fix.sequence <= *sent {
+                continue;
+            }
+            connection.send_datagram(
+                protocol::encode(&Message::GroupFix(cached.signed.clone()))?.into(),
+            )?;
+            *sent = fix.sequence;
+            if fix.origin == self.owner()
+                && let GroupPayload::Fix(update) = fix.payload
+                && own.is_none_or(|previous| previous.sequence < update.sequence)
+            {
+                own = Some(update);
+            }
+        }
+        Ok(own)
+    }
+
+    /// Best effort before service closes its endpoint, including Off/Pause transitions.
+    pub(super) fn flush_group_fixes(&self) {
+        let flush = || -> Result<()> {
+            let _lock = self.0.friends.lock()?;
+            let records = self.0.friends.list_locked()?;
+            let groups = self.0.friends.groups_locked()?;
+            let mut metadata = self.read_metadata()?;
+            let mut memory = self.0.memory.lock().map_err(|_| "sharing lock failed")?;
+            let now = now_ms();
+            self.prepare_group_fixes(&records, &groups, &mut metadata, &mut memory, now, false)?;
+            let connections: Vec<_> = memory.sessions.values().map(|(c, _)| c.clone()).collect();
+            for connection in connections {
+                let _ =
+                    self.forward_group_fixes(&connection, &records, &metadata, &mut memory, now)?;
+            }
+            Ok(())
+        };
+        let _ = flush();
+    }
+
+    fn ingest_group_locked(
+        &self,
+        peer: EndpointId,
+        signed: &SignedGroupFix,
+        now: i64,
+    ) -> Result<bool> {
+        signed.validate(now)?;
+        let fix = &signed.fix;
+        if fix.origin == self.owner() {
+            return Ok(false);
+        }
+        let records = self.0.friends.list_locked()?;
+        if !trusted(&records, fix.origin) {
+            return Ok(false);
+        }
+        let views = self.0.friends.group_views_locked()?;
+        let Some((_, state)) = views
+            .iter()
+            .find(|(g, _)| g.id == super::groups::id_string(fix.group))
+        else {
+            return Ok(false);
+        };
+        if !state.members.contains_key(&fix.origin)
+            || !state.members.contains_key(&peer)
+            || state
+                .members
+                .get(&self.owner())
+                .is_none_or(|m| m.admitted_at_ms > fix.timestamp_ms as u64)
+        {
+            // A valid datagram may have been queued before removal/leave arrived.
+            // Drop it without closing the session that carries membership gossip.
+            return Ok(false);
+        }
+        let mut metadata = self.read_metadata()?;
+        if metadata
+            .received
+            .iter()
+            .any(|c| c.peer == fix.origin && c.sequence >= fix.sequence)
+        {
+            return Ok(false);
+        }
+        metadata
+            .received
+            .retain(|c| c.peer != fix.origin && c.timestamp_ms >= now.saturating_sub(RETENTION_MS));
+        if metadata.received.len() >= 1024 {
+            return Err("replay cursor limit reached".into());
+        }
+        metadata.received.push(Cursor {
+            peer: fix.origin,
+            sequence: fix.sequence,
+            timestamp_ms: fix.timestamp_ms,
+        });
+        self.write_metadata(&metadata)?;
+        let mut memory = self.0.memory.lock().map_err(|_| "sharing lock failed")?;
+        memory.relay.retain(|c| {
+            (c.signed.fix.group, c.signed.fix.origin) != (fix.group, fix.origin)
+                && c.signed.fix.timestamp_ms >= now.saturating_sub(RETENTION_MS)
+        });
+        memory.relay.push(CachedFix {
+            signed: signed.clone(),
+            via: peer,
+        });
+        self.write_relay(&memory.relay)?;
+        Self::apply_cached(
+            &mut memory,
+            &CachedFix {
+                signed: signed.clone(),
+                via: peer,
+            },
+            now,
+        );
+        self.0.changed.send_replace(());
+        Ok(true)
+    }
+
+    fn apply_cached(memory: &mut Memory, cached: &CachedFix, now: i64) {
+        let fix = &cached.signed.fix;
+        let remote = memory.remote.entry(fix.origin).or_default();
+        if fix.sequence <= remote.sequence {
+            return;
+        }
+        remote.sequence = fix.sequence;
+        remote.group = Some(fix.group);
+        remote.via = (cached.via != fix.origin).then_some(cached.via);
+        remote.received_at_ms = now;
+        match fix.payload {
+            GroupPayload::Fix(update) => {
+                remote.latest = Some(update);
+                remote.withdrawn = false;
+            }
+            GroupPayload::Unavailable(_) => {
+                remote.latest = None;
+                remote.withdrawn = true;
+            }
+        }
+    }
+
     pub(super) fn ingest(&self, peer: EndpointId, message: &Message, now_ms: i64) -> Result<bool> {
         let _lock = self.0.friends.lock()?;
         if !trusted(&self.0.friends.list_locked()?, peer) {
             return Err("peer not trusted".into());
         }
+        if let Message::GroupFix(signed) = message {
+            return self.ingest_group_locked(peer, signed, now_ms);
+        }
         if let Message::LocationUpdate(update) = message {
             update.validate(now_ms)?;
             let mut metadata = self.read_metadata()?;
-            if metadata.received.iter().any(|cursor| {
-                cursor.peer == peer
-                    && (update.sequence <= cursor.sequence
-                        || update.timestamp_ms < cursor.timestamp_ms)
-            }) {
+            if metadata
+                .received
+                .iter()
+                .any(|cursor| cursor.peer == peer && update.sequence <= cursor.sequence)
+            {
                 return Ok(false);
             }
             metadata.received.retain(|cursor| {
@@ -393,6 +795,10 @@ impl Manager {
         let remote = memory.remote.entry(peer).or_default();
         match message {
             Message::LocationUpdate(update) => {
+                remote.sequence = update.sequence;
+                remote.group = None;
+                remote.via = None;
+                remote.withdrawn = false;
                 remote.latest = Some(*update);
                 remote.received_at_ms = now_ms;
             }
@@ -409,9 +815,46 @@ impl Manager {
         let records = self.0.friends.list_locked()?;
         let mut memory = self.0.memory.lock().map_err(|_| "sharing lock failed")?;
         memory.remote.retain(|peer, _| trusted(&records, *peer));
+        let views = self.0.friends.group_views_locked()?;
+        let relay = memory.relay.clone();
+        let metadata = self.read_metadata()?;
+        for cached in &relay {
+            let fix = &cached.signed.fix;
+            if fix.origin != self.owner()
+                && !metadata
+                    .received
+                    .iter()
+                    .any(|c| c.peer == fix.origin && c.sequence > fix.sequence)
+                && trusted(&records, fix.origin)
+                && fix.timestamp_ms >= now_ms.saturating_sub(RETENTION_MS)
+                && views.iter().any(|(g, s)| {
+                    g.id == super::groups::id_string(fix.group)
+                        && s.members.contains_key(&fix.origin)
+                        && s.members.contains_key(&self.owner())
+                })
+            {
+                Self::apply_cached(&mut memory, cached, now_ms);
+            }
+        }
+        for (peer, remote) in &mut memory.remote {
+            if remote.group.is_some_and(|id| {
+                !views.iter().any(|(g, s)| {
+                    g.id == super::groups::id_string(id)
+                        && s.members.contains_key(peer)
+                        && s.members.contains_key(&self.owner())
+                })
+            }) {
+                remote.latest = None;
+                remote.withdrawn = true;
+            }
+        }
         let mut snapshots = Vec::new();
         for (peer, remote) in &mut memory.remote {
-            if now_ms.saturating_sub(remote.received_at_ms) > RETENTION_MS {
+            if now_ms.saturating_sub(remote.received_at_ms) > RETENTION_MS
+                || remote
+                    .latest
+                    .is_some_and(|l| now_ms.saturating_sub(l.timestamp_ms) > RETENTION_MS)
+            {
                 remote.latest = None;
             }
             let age_ms = remote
@@ -420,6 +863,8 @@ impl Manager {
             snapshots.push(PeerLocation {
                 peer_id: *peer,
                 latest: remote.latest,
+                via: remote.via,
+                withdrawn: remote.withdrawn,
                 age_ms,
                 stale: age_ms.is_none_or(|age| age > MAX_FIX_AGE_MS),
                 connected: false,
@@ -461,7 +906,9 @@ impl Manager {
             return Err("duplicate location session".into());
         }
         // New session starts fresh: an update sent on a replaced connection may be lost.
+        memory.update_required.remove(&peer);
         memory.sent.remove(&peer);
+        memory.group_sent.retain(|(p, _, _), _| *p != peer);
         if let Some((old, _)) = memory
             .sessions
             .insert(peer, (connection.clone(), preferred))
@@ -469,6 +916,20 @@ impl Manager {
             old.close(0u32.into(), b"session replaced");
         }
         Ok(())
+    }
+
+    pub(super) fn require_update(&self, peer: EndpointId) {
+        if let Ok(mut memory) = self.0.memory.lock() {
+            memory.update_required.insert(peer);
+        }
+        self.notify();
+    }
+
+    pub fn update_required(&self, peer: EndpointId) -> bool {
+        self.0
+            .memory
+            .lock()
+            .is_ok_and(|m| m.update_required.contains(&peer))
     }
 
     /// True while an authenticated session with `peer` is open.
@@ -511,26 +972,41 @@ impl Manager {
         source()
     }
 
-    /// Group member lists shared with `peer`, JSON for a reliable stream.
-    pub(super) fn group_sync(&self, peer: EndpointId) -> Result<Vec<u8>> {
+    /// Signed operation sets shared with derived members, over bounded reliable streams.
+    pub(super) fn group_sync(&self, peer: EndpointId) -> Result<Vec<Vec<u8>>> {
         let _lock = self.0.friends.lock()?;
-        Ok(serde_json::to_vec(&self.0.friends.sync_for_locked(peer)?)?)
+        self.0
+            .friends
+            .sync_for_locked(peer)?
+            .into_iter()
+            .map(|sync| Ok(postcard::to_allocvec(&Packet::Ops(vec![sync]))?))
+            .collect()
     }
 
-    /// Applies member lists from an authenticated session; wakes dialers on change.
-    pub(super) fn apply_group_sync(&self, peer: EndpointId, bytes: &[u8]) -> Result<()> {
-        let syncs: Vec<GroupSync> = serde_json::from_slice(bytes)?;
-        let changed = {
+    /// Returns an acknowledgement after durable merge, before closing removed sessions.
+    pub(super) fn apply_group_sync(
+        &self,
+        peer: EndpointId,
+        bytes: &[u8],
+    ) -> Result<Option<Vec<u8>>> {
+        let packet: Packet = postcard::from_bytes(bytes)?;
+        let (changed, response) = {
             let _lock = self.0.friends.lock()?;
             if !trusted(&self.0.friends.list_locked()?, peer) {
                 return Err("peer not trusted".into());
             }
-            self.0.friends.apply_sync_locked(peer, &syncs)?
+            match packet {
+                Packet::Ops(syncs) => {
+                    let (changed, acks) = self.0.friends.apply_sync_locked(peer, &syncs)?;
+                    (changed, Some(postcard::to_allocvec(&Packet::Ack(acks))?))
+                }
+                Packet::Ack(acks) => (self.0.friends.acknowledge_locked(peer, &acks)?, None),
+            }
         };
         if changed {
             self.0.changed.send_replace(());
         }
-        Ok(())
+        Ok(response)
     }
 
     /// Selected network path of open session: "direct" or "relay". Never addresses.
@@ -560,7 +1036,78 @@ impl Manager {
                 .get(&connection.remote_id())
                 .is_some_and(|(active, _)| active.stable_id() == connection.stable_id())
         {
-            memory.sessions.remove(&connection.remote_id());
+            let peer = connection.remote_id();
+            memory.sessions.remove(&peer);
+            memory.group_sent.retain(|(p, _, _), _| *p != peer);
         }
+    }
+}
+
+#[cfg(test)]
+mod relay_persistence_tests {
+    use super::*;
+    use crate::{geo::Point, model::Fix, sharing::groups::Policy};
+
+    #[test]
+    fn relay_state_commits_only_after_sequence_and_cache_persist() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = SecretKey::generate();
+        let friends = Friends::open(dir.path(), key.public()).unwrap();
+        friends
+            .create_group(&key, "Family", "Me", Policy::Managed, Permission::Always)
+            .unwrap();
+        let manager = Manager::new(friends.clone(), key).unwrap();
+        let _lock = friends.lock().unwrap();
+        let records = friends.list_locked().unwrap();
+        let groups = friends.groups_locked().unwrap();
+        let now = now_ms();
+        let mut memory = Memory {
+            latest: Some(Sample {
+                fix: Fix {
+                    point: Point {
+                        lat: 40.,
+                        lon: -111.,
+                    },
+                    timestamp_ms: now as u64,
+                    accuracy_m: 5.,
+                },
+                speed_m_s: None,
+                heading_degrees: None,
+            }),
+            ..Memory::default()
+        };
+        let mut metadata = manager.read_metadata().unwrap();
+        metadata.mode = Mode::Always;
+        let metadata_path = friends.directory().join("location-state.json");
+        std::fs::create_dir(&metadata_path).unwrap();
+        assert!(
+            manager
+                .prepare_group_fixes(&records, &groups, &mut metadata, &mut memory, now, true)
+                .is_err()
+        );
+        assert!(memory.relay.is_empty() && memory.group_issued.is_empty());
+        std::fs::remove_dir(metadata_path).unwrap();
+        // Successful reservation followed by failed cache replacement must skip its
+        // number on retry and must not publish uncommitted in-memory relay data.
+        let cache_path = friends.directory().join("group-fixes.postcard");
+        std::fs::create_dir(&cache_path).unwrap();
+        let mut metadata = manager.read_metadata().unwrap();
+        metadata.mode = Mode::Always;
+        assert!(
+            manager
+                .prepare_group_fixes(&records, &groups, &mut metadata, &mut memory, now, true)
+                .is_err()
+        );
+        assert!(memory.relay.is_empty() && memory.group_issued.is_empty());
+        assert_eq!(manager.read_metadata().unwrap().sequence, 1);
+        std::fs::remove_dir(cache_path).unwrap();
+        let mut metadata = manager.read_metadata().unwrap();
+        manager
+            .prepare_group_fixes(&records, &groups, &mut metadata, &mut memory, now, true)
+            .unwrap();
+        assert_eq!(memory.relay.len(), 1);
+        assert_eq!(memory.relay[0].signed.fix.sequence, 2);
+        assert_eq!(manager.read_relay().unwrap()[0].signed.fix.sequence, 2);
+        assert_eq!(manager.read_metadata().unwrap().sequence, 2);
     }
 }

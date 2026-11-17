@@ -24,6 +24,7 @@ pub struct FriendMarker {
     /// Peer ID.
     pub id: String,
     pub name: String,
+    pub via: Option<String>,
     /// Profile picture URL while its image handle lives in `UiState::avatars`.
     pub avatar: Option<String>,
     pub point: Point,
@@ -607,6 +608,11 @@ impl UiState {
                         };
                         pictures.push((id, time, bytes));
                     }
+                    let names: std::collections::BTreeMap<_, _> = published
+                        .friends
+                        .iter()
+                        .map(|f| (f.peer_id, f.name.clone()))
+                        .collect();
                     let markers = published
                         .friends
                         .into_iter()
@@ -615,6 +621,7 @@ impl UiState {
                             Some(FriendMarker {
                                 id: f.peer_id.to_string(),
                                 name: f.name,
+                                via: f.via.and_then(|id| names.get(&id).cloned()),
                                 avatar: None,
                                 point: Point {
                                     lat: f64::from(l.latitude_e7) / 1e7,

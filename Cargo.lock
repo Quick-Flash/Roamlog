@@ -4566,6 +4566,7 @@ dependencies = [
  "ab_glyph",
  "async-channel",
  "base64 0.22.1",
+ "blake3",
  "flate2",
  "image",
  "iroh",

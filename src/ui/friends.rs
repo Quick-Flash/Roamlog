@@ -4,6 +4,7 @@
 use super::state::{UiState, now_ms};
 use crate::sharing::{
     android_app::{self as sharing, PairStep, Pairing},
+    groups::Policy,
     location::UpdatePolicy,
     manager::Mode,
     node::{FriendState, read_published},
@@ -44,6 +45,20 @@ struct GroupRow {
     members: Vec<String>,
     share: Permission,
     leaving: bool,
+    policy: Option<Policy>,
+    admin: bool,
+    active: bool,
+    details: Vec<MemberRow>,
+}
+
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct MemberRow {
+    id: String,
+    name: String,
+    added_by: String,
+    admin: bool,
+    creator: bool,
+    me: bool,
 }
 
 #[derive(Clone, PartialEq)]
@@ -85,6 +100,9 @@ fn status(friend: &Friend, published: Option<&FriendState>, now: i64) -> String 
     let Some(state) = published else {
         return "Not connected".into();
     };
+    if state.update_required {
+        return "Update Roamlog".into();
+    }
     let seen = state.location.map(|l| age(now - l.timestamp_ms));
     let path = match state.path.as_deref() {
         Some("direct") => " · direct",
@@ -117,7 +135,25 @@ fn load(directory: PathBuf) -> Result<Loaded, String> {
             let state = published.friends.iter().find(|p| p.peer_id == f.peer_id);
             Row {
                 id: f.peer_id.to_string(),
-                status: status(f, state, now),
+                status: if !f.blocked
+                    && !state.is_some_and(|s| s.update_required)
+                    && let Some(via) = state.and_then(|s| s.via)
+                {
+                    let via = friends
+                        .iter()
+                        .find(|f| f.peer_id == via)
+                        .map(|f| f.display_name.clone())
+                        .unwrap_or_else(|| via.to_string());
+                    format!(
+                        "via {via}, {}",
+                        state
+                            .and_then(|s| s.location)
+                            .map(|l| age(now - l.timestamp_ms))
+                            .unwrap_or_else(|| "unavailable".into())
+                    )
+                } else {
+                    status(f, state, now)
+                },
                 name: f.display_name.clone(),
                 permission: f.permission,
                 group_permission: f.group_permission(&groups),
@@ -133,18 +169,53 @@ fn load(directory: PathBuf) -> Result<Loaded, String> {
         .collect();
     let groups = groups
         .into_iter()
-        .map(|g| GroupRow {
-            members: friends
-                .iter()
-                .filter(|f| f.groups.contains(&g.id))
-                .map(|f| f.display_name.clone())
-                .collect(),
-            leaving: g.leaving_since_ms.is_some(),
-            share: g.share,
-            id: g.id,
-            name: g.name,
+        .map(|g| {
+            let state = manager
+                .friends()
+                .group_state(&g.id)
+                .map_err(|e| e.to_string())?;
+            let details = state
+                .as_ref()
+                .map(|state| {
+                    state
+                        .members
+                        .iter()
+                        .map(|(id, member)| MemberRow {
+                            id: id.to_string(),
+                            name: member.name.clone(),
+                            added_by: state
+                                .names
+                                .get(&member.added_by)
+                                .cloned()
+                                .unwrap_or_else(|| member.added_by.to_string()),
+                            admin: state.admins.contains(id),
+                            creator: *id == state.creator,
+                            me: *id == manager.owner(),
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            Ok(GroupRow {
+                members: details
+                    .iter()
+                    .filter(|m| !m.me)
+                    .map(|m| m.name.clone())
+                    .collect(),
+                leaving: g.leaving_since_ms.is_some(),
+                share: g.share,
+                policy: state.as_ref().map(|s| s.policy),
+                admin: state
+                    .as_ref()
+                    .is_some_and(|s| s.admins.contains(&manager.owner())),
+                active: state
+                    .as_ref()
+                    .is_some_and(|s| s.members.contains_key(&manager.owner())),
+                details,
+                id: g.id,
+                name: g.name,
+            })
         })
-        .collect();
+        .collect::<Result<Vec<_>, String>>()?;
     Ok(Loaded {
         mode: manager.mode().map_err(|e| e.to_string())?,
         rows,
@@ -265,6 +336,7 @@ pub fn Friends() -> impl IntoView {
         }
     });
     on_cleanup_local(move || drop(opened));
+    let join_access = RwSignal::new_local(Permission::TripsOnly);
     let begin = move |link: Option<String>, group: Option<GroupRef>| {
         let display = name.get_untracked().trim().to_owned();
         if display.is_empty() {
@@ -275,6 +347,7 @@ pub fn Friends() -> impl IntoView {
         let directory = s.directory.get_value();
         let _ = std::fs::write(directory.join("sharing-name"), &display);
         crate::android::suspend_sharing(&directory);
+        join_access.set(Permission::TripsOnly);
         step.set(PairStep::Starting);
         pairing.set_value(Some(Pairing::start(directory, display, link, group)));
     };
@@ -289,6 +362,8 @@ pub fn Friends() -> impl IntoView {
     };
     let set_mode = move |mode: Mode| change(s, loaded, true, move |m| m.set_mode(mode));
     let group_name = RwSignal::new_local(String::new());
+    let group_policy = RwSignal::new_local("managed".to_string());
+    let group_access = RwSignal::new_local(Permission::Always);
     let tab = RwSignal::new_local("people".to_string());
     // Pairing panel: open while adding a friend, joining from a link, or pairing.
     let adding = RwSignal::new_local(false);
@@ -384,12 +459,16 @@ pub fn Friends() -> impl IntoView {
                             Button(variant=ButtonVariant::Outline,class="share-invite",on:click=move |_|{if let PairStep::Invite{link,..}=step.get_untracked(){crate::android::share_text(&link)}}) {"Share link"}
                         }
                         if move ||matches!(step.get(),PairStep::Confirm{..}) {
-                            text(class="pair-name") {{move ||match step.get(){PairStep::Confirm{name,group:Some(group),..}=>format!("Pair with {name} and join {group}?"),PairStep::Confirm{name,..}=>format!("Pair with {name}?"),_=>String::new()}}}
+                            text(class="pair-name") {{move ||match step.get(){PairStep::Confirm{name,group:Some(group),joining:true,..}=>format!("Pair with {name} and join {group}?"),PairStep::Confirm{name,group:Some(group),..}=>format!("Pair with {name} and add them to {group}?"),PairStep::Confirm{name,..}=>format!("Pair with {name}?"),_=>String::new()}}}
+                            text(class="muted") {{move ||match step.get(){PairStep::Confirm{group_details,..}=>group_details.unwrap_or_default(),_=>String::new()}}}
+                            if move ||matches!(step.get(),PairStep::Confirm{group:Some(_),joining:true,..}) {
+                                AccessSelect(current=Permission::TripsOnly,label="What group members see".into(),pick=Callback::new(move |p|join_access.set(p)))
+                            }
                             text(class="muted") {"Code must match friend's screen exactly."}
                             text(class="pair-code") {{move ||if let PairStep::Confirm{code,..}=step.get(){code}else{String::new()}}}
                             row(class="row-actions") {
-                                Button(class="confirm-pair",on:click=move |_|pairing.with_value(|p|if let Some(p)=p{p.vote(true)})) {"Codes match"}
-                                Button(variant=ButtonVariant::Outline,class="reject-pair",on:click=move |_|pairing.with_value(|p|if let Some(p)=p{p.vote(false)})) {"Reject"}
+                                Button(class="confirm-pair",on:click=move |_|pairing.with_value(|p|if let Some(p)=p{p.vote(true,join_access.get_untracked())})) {"Codes match"}
+                                Button(variant=ButtonVariant::Outline,class="reject-pair",on:click=move |_|pairing.with_value(|p|if let Some(p)=p{p.vote(false,join_access.get_untracked())})) {"Reject"}
                             }
                         }
                         if move ||matches!(step.get(),PairStep::Waiting) {
@@ -439,13 +518,26 @@ pub fn Friends() -> impl IntoView {
                                         let me=name_value();
                                         if me.is_empty(){adding.set(true);s.message.set("Enter your name first; members see it.".into());return;}
                                         group_name.set(String::new());
-                                        change(s,loaded,false,move |m|m.friends().create_group(&name,&me).map(drop));
+                                        let policy=if group_policy.get_untracked()=="open" {Policy::Open}else{Policy::Managed};
+                                        let access=group_access.get_untracked();
+                                        change(s,loaded,false,move |m|m.friends().create_group(&sharing::key()?,&name,&me,policy,access).map(drop));
                                     }) {"Create"}
                                 }
+                                row(class="create-row") {
+                                    Select(value=group_policy) {
+                                        SelectTrigger(label="Who may invite",class="access-select") {SelectValue()}
+                                        SelectContent {
+                                            SelectItem(value="managed") {"Managed"}
+                                            SelectItem(value="open") {"Open"}
+                                        }
+                                    }
+                                    AccessSelect(current=Permission::Always,label="New group access".into(),pick=Callback::new(move |p|group_access.set(p)))
+                                }
+                                text(class="muted") {{move ||if group_policy.get()=="open" {"Any member may invite. Admins remove members."}else{"Only admins may invite or remove members."}}}
                                 for group in move ||groups(),key=|g|g.clone() {
                                     GroupItem(group=group.clone(),loaded=loaded,confirm=confirm,invite=begin_group,edit=edit)
                                 }
-                                text(class="muted") {"Members share with each other using the group's access, or a person's own if higher. Any member can invite."}
+                                text(class="muted") {"Members share with each other using the group's access, or a person's own if higher. Managed groups let admins invite; Open groups let any member invite."}
                             }
                         }
                     }
@@ -459,13 +551,15 @@ pub fn Friends() -> impl IntoView {
 #[component]
 fn AccessSelect(current: Permission, label: String, pick: Callback<Permission>) -> impl IntoView {
     let value = RwSignal::new_local(permission_value(current).to_string());
+    let previous = StoredValue::new_local(current);
     let chosen = zgui::reactive::RenderEffect::new(move |_| {
         let next = match value.get().as_str() {
             "trips" => Permission::TripsOnly,
             "always" => Permission::Always,
             _ => Permission::Off,
         };
-        if next != current {
+        if next != previous.get_value() {
+            previous.set_value(next);
             pick.run(next);
         }
     });
@@ -582,6 +676,19 @@ fn FriendRow(
     let access_label = format!("What {} sees", friend.name);
     let menu_label = format!("More for {}", friend.name);
     let note = StoredValue::new_local(note);
+    let remove_question = if friend.groups.is_empty() {
+        format!("Remove {}?", friend.name)
+    } else if friend.blocked {
+        format!(
+            "Remove {} locally? This clears Block; shared-group grants apply again. Remove them from the group to end that access.",
+            friend.name
+        )
+    } else {
+        format!(
+            "Remove {} locally? Shared-group access remains. Use group Members to remove them, or Block.",
+            friend.name
+        )
+    };
     let (blocked, permission) = (friend.blocked, friend.permission);
     view! {
         column(class="friend-row") {
@@ -599,8 +706,8 @@ fn FriendRow(
                 RowMenu(label=menu_label,items=items,chosen=chosen)
             }
             {edit.field(friend.id.clone(), move |name| {let id=save_id.clone();change(s,loaded,false,move |m|m.friends().rename(id.parse()?,&name))})}
-            {confirm_line(confirm,format!("block:{id}"),format!("Block {}? They stop seeing you and cannot pair again.",friend.name),block)}
-            {confirm_line(confirm,format!("remove:{id}"),format!("Remove {}?",friend.name),remove)}
+            {confirm_line(confirm,format!("block:{id}"),format!("Block {}? They stop seeing new updates and cannot pair again. Relay of your location stops for every group containing them. Existing copies cannot be recalled.",friend.name),block)}
+            {confirm_line(confirm,format!("remove:{id}"),remove_question.clone(),remove)}
         }
     }
 }
@@ -655,10 +762,8 @@ fn GroupItem(
         let id = id.clone();
         move || {
             let id = id.clone();
-            // Running node tells connected members first; otherwise forget now.
-            let immediately = sharing::mode(&s.directory.get_value()) == Mode::Off;
             change(s, loaded, false, move |m| {
-                m.friends().leave_group(&id, immediately)
+                m.friends().leave_group(&sharing::key()?, &id)
             })
         }
     };
@@ -666,16 +771,41 @@ fn GroupItem(
         id: group.id.clone(),
         name: group.name.clone(),
     };
+    let members_open = RwSignal::new_local(false);
+    let sheet_group = StoredValue::new_local(group.clone());
     let (menu_id, menu_name) = (id.clone(), group.name.clone());
     let chosen = Callback::new(move |item: &'static str| match item {
         "invite" => invite.run(reference.clone()),
+        "members" => members_open.set(true),
         "rename" => edit.start(&menu_id, &menu_name),
         _ => confirm.set(Some(format!("leave:{menu_id}"))),
     });
     let access_label = format!("What {} sees", group.name);
     let menu_label = format!("More for {}", group.name);
     let (leaving, share) = (group.leaving, group.share);
-    let members = if group.leaving {
+    let legacy = group.policy.is_none();
+    let active = group.active;
+    let admin = group.admin;
+    let mut items = vec![
+        ("members", "Members"),
+        ("rename", "Rename"),
+        ("leave", "Leave…"),
+    ];
+    if admin || group.policy == Some(Policy::Open) {
+        items.insert(0, ("invite", "Invite someone"));
+    }
+    let remove_id = id.clone();
+    let remove = move || {
+        let id = remove_id.clone();
+        change(s, loaded, false, move |m| {
+            m.friends().forget_inactive_group(&id)
+        });
+    };
+    let members = if legacy {
+        "Recreate this group".to_string()
+    } else if !active && !leaving {
+        "Removed from group".to_string()
+    } else if group.leaving {
         "Leaving…".to_string()
     } else if group.members.is_empty() {
         "Only you so far".to_string()
@@ -689,18 +819,95 @@ fn GroupItem(
                     text(class="friend-name") {{group.name.clone()}}
                     text(class="muted small") {{members.clone()}}
                 }
-                if move ||!leaving {
+                if move ||legacy || (!active && !leaving) {
+                    Button(variant=ButtonVariant::Destructive,on:click={let remove=remove.clone();move |_|remove()}) {"Remove"}
+                }
+                if move ||!leaving && active && !legacy {
                     AccessSelect(current=share,label=access_label.clone(),pick=pick)
-                    RowMenu(label=menu_label.clone(),items=vec![("invite","Invite someone"),("rename","Rename"),("leave","Leave…")],chosen=chosen)
+                    RowMenu(label=menu_label.clone(),items=items.clone(),chosen=chosen)
                 }
             }
-            {field}
-            {confirm_line(confirm,format!("leave:{id}"),format!("Leave {}?",group.name),leave)}
+            {if legacy {None}else{Some(field.into_view())}}
+            {confirm_line(confirm,format!("leave:{id}"),format!("Leave {}? Access stops now; signed leave stays until delivered or 7 days.",group.name),leave)}
+            Dialog(open=members_open) {
+                DialogContent(class="sheet") {
+                    DialogHeader {DialogTitle {{sheet_group.with_value(|g|format!("{} members",g.name))}} DialogDescription {"Signed membership. Admins control removals."}}
+                    scroll(class="sheet-scroll") {
+                        column {
+                            for member in move ||sheet_group.with_value(|g|g.details.clone()),key=|m|m.clone() {
+                                GroupMemberItem(member=member.clone(),group=sheet_group.with_value(|g|g.id.clone()),admin=admin,loaded=loaded,confirm=confirm)
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 }
 
 /// Your own profile as friends see it: picture, name, update interval, identity reset.
+#[component]
+fn GroupMemberItem(
+    member: MemberRow,
+    group: String,
+    admin: bool,
+    loaded: RwSignal<Option<Loaded>, LocalStorage>,
+    confirm: RwSignal<Option<String>, LocalStorage>,
+) -> impl IntoView {
+    let s = UiState::current();
+    let peer = member.id.clone();
+    let key = format!("{group}:{peer}");
+    let menu_key = key.clone();
+    let chosen = Callback::new(move |action: &'static str| {
+        confirm.set(Some(format!("{action}:{menu_key}")))
+    });
+    let mut items = vec![("block", "Block…")];
+    if admin && !member.creator {
+        items.push(("remove-member", "Remove…"));
+        items.push(("cascade", "Remove + people they added…"));
+    }
+    if admin && !member.admin {
+        items.push(("promote", "Make admin…"));
+    }
+    let action = move |kind: &'static str| {
+        let group = group.clone();
+        let peer = peer.clone();
+        change(s, loaded, false, move |m| match kind {
+            "block" => m.friends().block(peer.parse()?),
+            "promote" => m
+                .friends()
+                .promote_member(&sharing::key()?, &group, peer.parse()?),
+            _ => m.friends().remove_member(
+                &sharing::key()?,
+                &group,
+                peer.parse()?,
+                kind == "cascade",
+            ),
+        });
+    };
+    let remove = action.clone();
+    let cascade = action.clone();
+    let promote = action.clone();
+    let block = action;
+    let me = member.me;
+    let menu_label = format!("Actions for {}", member.name);
+    view! {
+        column(class="friend-row") {
+            row(class="friend-line") {
+                column(class="friend-text") {
+                    text(class="friend-name") {{format!("{}{}{}",member.name,if me {" (you)"}else{""},if member.admin {" · Admin"}else{""})}}
+                    text(class="muted small") {{format!("Added by {}",member.added_by)}}
+                }
+                if move ||!me { RowMenu(label=menu_label.clone(),items=items.clone(),chosen=chosen) }
+            }
+            {confirm_line(confirm,format!("remove-member:{key}"),format!("Remove {}? Backdated admits can survive; use cascade to remove their additions.",member.name),move ||remove("remove-member"))}
+            {confirm_line(confirm,format!("cascade:{key}"),format!("Remove {} and people they added?",member.name),move ||cascade("cascade"))}
+            {confirm_line(confirm,format!("promote:{key}"),format!("Make {} admin? Admins may invite, promote, and remove members.",member.name),move ||promote("promote"))}
+            {confirm_line(confirm,format!("block:{key}"),format!("Block {}? This turns off relay of your location for this group. Previously shared copies cannot be recalled.",member.name),move ||block("block"))}
+        }
+    }
+}
+
 #[component]
 fn YouCard(
     name: RwSignal<String, LocalStorage>,

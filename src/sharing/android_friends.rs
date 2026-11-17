@@ -88,7 +88,9 @@ pub(super) async fn pair(
             }
             votes.changed().await?;
         };
-        pending.confirm(accepted, friends).await?;
+        pending
+            .confirm(accepted, friends, Permission::TripsOnly)
+            .await?;
         report("Pairing complete. Location access remains Off for new friends")?;
         Ok(())
     })
