@@ -127,6 +127,12 @@ pub struct UiState {
     pub place_outline: RwSignal<Vec<Point>, LocalStorage>,
     /// Alert areas drawn together on map, each with a tappable name: (area id, name, outline).
     pub area_marks: RwSignal<Vec<(u32, String, Vec<Point>)>, LocalStorage>,
+    /// Who the shown areas can be filtered by: (key, label); "g:<id>" keys are groups.
+    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+    pub area_filters: RwSignal<Vec<(String, String)>, LocalStorage>,
+    /// Friend whose areas were drawn by selecting them on map; hidden again on deselect.
+    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+    pub marks_friend: StoredValue<Option<String>, LocalStorage>,
     /// Area the Alert areas page opens straight to (set from a map label).
     pub open_area: RwSignal<Option<u32>, LocalStorage>,
     /// Friend page shown in Friends tab; shared so map can open it.
@@ -258,6 +264,8 @@ impl UiState {
             places_open: RwSignal::new_local(false),
             place_outline: RwSignal::new_local(Vec::new()),
             area_marks: RwSignal::new_local(Vec::new()),
+            area_filters: RwSignal::new_local(Vec::new()),
+            marks_friend: StoredValue::new_local(None),
             open_area: RwSignal::new_local(None),
             friend_detail: RwSignal::new_local(None),
             friends_page_back: StoredValue::new_local(None),

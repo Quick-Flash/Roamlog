@@ -52,6 +52,7 @@ pub fn Roamlog() -> impl IntoView {
     {
         crate::android::listen_invites();
         crate::android::resume_sharing(s.directory.get_value());
+        place_alerts::follow_selected_friend(s);
     }
     on_cleanup_local(move || drop(timer));
     #[cfg(target_os = "android")]

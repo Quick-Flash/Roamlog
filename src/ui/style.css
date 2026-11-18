@@ -20,7 +20,7 @@
 
 .map-top { position: absolute; top: calc(10px + var(--zgui-safe-area-top, 0px)); left: 10px; max-width: calc(100% - 126px); flex-wrap: wrap; gap: 8px; align-items: center; }
 .map-chip { height: 40px; min-height: 40px; padding: 0 14px; border-radius: 20px; font-size: 13px; }
-.map-message { position: absolute; top: calc(58px + var(--zgui-safe-area-top, 0px)); left: 10px; right: 64px; padding: 8px 12px; border-radius: 12px; background: var(--zui-color-card); color: var(--zui-color-foreground); font-size: 12px; }
+.map-message { padding: 8px 12px; border-radius: 12px; background: var(--zui-color-card); color: var(--zui-color-foreground); font-size: 12px; }
 .map-controls { position: absolute; top: calc(10px + var(--zgui-safe-area-top, 0px)); right: 10px; gap: 8px; }
 .map-button { width: 44px; height: 44px; min-height: 44px; padding: 0; border-radius: 22px; font-size: 18px; }
 .map-fit { font-size: 12px; }
@@ -63,7 +63,7 @@
 .view-choices .zui-button { flex: 1; }
 
 .view-toggle { align-items: center; justify-content: space-between; gap: 12px; min-height: 44px; }
-.area-bar { position: absolute; bottom: 36px; left: 10px; right: 10px; gap: 6px; align-items: center; padding: 6px 8px; border-radius: 16px; background: var(--zui-color-card); color: var(--zui-color-foreground); font-size: 12px; }
+.area-bar { gap: 6px; align-items: center; padding: 6px 8px; border-radius: 16px; background: var(--zui-color-card); color: var(--zui-color-foreground); font-size: 12px; }
 .area-bar .area-button { height: 36px; min-height: 36px; padding: 0 10px; font-size: 12px; }
 .area-result { height: 36px; min-height: 36px; padding: 0 6px; font-size: 13px; font-weight: 600; }
 .area-corner { position: absolute; left: 0; top: 0; width: 18px; height: 18px; box-sizing: border-box; border-radius: 50%; background: #aa6eff; border: 2px solid #ffffff; pointer-events: none; }
@@ -244,10 +244,9 @@
 .zoom-pair .map-button { border: none; border-radius: 0; box-shadow: none; }
 .map-button.locate-button { width: 52px; height: 52px; border-radius: 26px; color: var(--zui-color-primary); }
 .map-button.locating { background: var(--zui-color-primary); color: var(--zui-color-primary-foreground); }
-.map-message { top: auto; bottom: 32px; right: 72px; }
 .record-dot { width: 9px; height: 9px; border-radius: 50%; background: #d92d20; }
 .record-dot.paused { background: var(--zui-color-muted-foreground); }
-.area-bar { right: 68px; flex-wrap: wrap; }
+.area-bar { flex-wrap: wrap; }
 .circle-handle { position: absolute; top: 0; left: 0; width: 44px; height: 44px; align-items: center; justify-content: center; pointer-events: auto; }
 .circle-handle-dot { position: absolute; left: 13px; top: 13px; box-sizing: border-box; width: 18px; height: 18px; border: 2px solid white; border-radius: 50%; background: #aa6eff; pointer-events: none; }
 .area-result-title { font-weight: 700; }
@@ -268,7 +267,7 @@
 .tab-stage > .trip-bar { position: absolute; left: 10px; right: 10px; bottom: 10px; margin: 0; box-shadow: 0 4px 16px rgba(0,0,0,.24); }
 .tab-stage > .update-notice { position: absolute; left: 10px; right: 70px; bottom: 106px; border-radius: 14px; flex-wrap: wrap; }
 .map-card .attribution { bottom: 88px; }
-.map-card .area-bar, .map-card .map-message { bottom: 106px; }
+.map-card .map-bottom-stack { bottom: 106px; }
 .map-card .map-controls { bottom: 116px; }
 .map-card .terrain-help { bottom: 172px; }
 .map-summary .layers-button { width: 44px; min-width: 44px; height: 44px; min-height: 44px; padding: 0; border: 0; border-radius: 22px; box-shadow: none; background: var(--zui-color-muted); }
@@ -295,7 +294,7 @@
 .alert-preview { height: 150px; overflow: hidden; align-items: center; justify-content: center; border-radius: 12px; background: var(--zui-color-muted); }
 .alert-shape { position: relative; overflow: hidden; flex-shrink: 0; border-radius: 12px; background: var(--zui-color-muted); }
 .alert-shape-edge { position: absolute; left: 0; top: 0; height: 2px; transform-origin: 0 50%; background: #aa6eff; }
-.map-profile { position: absolute; left: 10px; right: 70px; bottom: 106px; gap: 8px; padding: 10px; border: 1px solid var(--zui-color-border); border-radius: 16px; background: var(--zui-color-card); box-shadow: 0 4px 16px rgba(0,0,0,.22); }
+.map-profile { gap: 8px; padding: 10px; border: 1px solid var(--zui-color-border); border-radius: 16px; background: var(--zui-color-card); box-shadow: 0 4px 16px rgba(0,0,0,.22); }
 .map-profile-avatar { width: 58px; height: 58px; flex-shrink: 0; border-radius: 29px; align-items: center; justify-content: center; overflow: hidden; background: var(--zui-color-muted); font-size: 22px; font-weight: 700; }
 .alert-filter .seg-on, .alert-page .friends-nav.seg-on, .sheet .friends-nav.seg-on { background: var(--zui-color-accent); border-color: var(--zui-color-primary); color: var(--zui-color-accent-foreground); }
 
@@ -349,3 +348,10 @@
 .stat-cards .stat-card { min-width: 0; }
 .trip-editor-scroll .category-select { width: 100%; }
 .summary-reset { height: 40px; min-height: 40px; padding: 0 12px; border-radius: 20px; background: var(--zui-color-muted); font-weight: 600; flex-shrink: 0; }
+/* Map message, friend card and area bar share one bottom stack so none covers another. */
+.map-bottom-stack { position: absolute; left: 10px; right: 68px; bottom: 32px; gap: 8px; justify-content: flex-end; pointer-events: none; }
+.map-bottom-stack > * { pointer-events: auto; flex-shrink: 0; }
+.area-bar .area-filter { margin-top: 6px; }
+.area-bar .area-filter .seg-on { background: var(--zui-color-accent); border-color: var(--zui-color-primary); color: var(--zui-color-accent-foreground); }
+.alert-who .friends-nav-group { gap: 6px; border: none; background: transparent; overflow: visible; }
+.alert-who .friends-nav { width: 100%; min-height: 48px; justify-content: flex-start; border: 1px solid var(--zui-color-border); border-radius: 12px; }

@@ -246,6 +246,8 @@ impl UiState {
             self.add_corner(point);
             return;
         }
+        // Tap off a friend's pin drops its highlight and card; empty map also clears message.
+        self.map_friend_selected.set(None);
         let reach = (24.0 * meters_per_px).max(8.0);
         let hit = self.sections.with_untracked(|sections| {
             sections
@@ -260,6 +262,7 @@ impl UiState {
                 .map(|(s, _)| s.clone())
         });
         let Some(section) = hit else {
+            self.message.set(String::new());
             return;
         };
         let first = section.first_trip.and_then(|id| {

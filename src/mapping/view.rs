@@ -659,6 +659,19 @@ pub fn MapView() -> impl IntoView {
         if three_d.get() {
             return Arc::new(lines);
         }
+        // Shown alert areas: light tint inside the outline.
+        let mut tint = |points: &[crate::geo::Point]| {
+            let ring: Vec<_> = points
+                .iter()
+                .filter_map(|p| project(p.lon, p.lat))
+                .collect();
+            lines.fill(&ring, AREA_FILL);
+        };
+        if s.editing_circle.with(Option::is_none) {
+            s.place_outline.with(|points| tint(points));
+        }
+        s.area_marks
+            .with(|marks| marks.iter().for_each(|(_, _, points)| tint(points)));
         s.area_stats.with(|stats| {
             for section in stats.iter().flat_map(|st| &st.untraveled) {
                 if let (Some(a), Some(b)) = (
@@ -797,7 +810,7 @@ pub fn MapView() -> impl IntoView {
                                     let point=geo(xy).0;
                                     s.editing_circle.update(|draft|{
                                         if let Some((center,radius))=draft {
-                                            if edge {*radius=center.distance(point).clamp(100.,10_000.);}
+                                            if edge {*radius=center.distance(point).clamp(10.,10_000.);}
                                             else {*center=point;}
                                         }
                                     });
@@ -842,9 +855,6 @@ pub fn MapView() -> impl IntoView {
             }
             if move ||s.picking_place_center.get()&&!circle_setup() {
                 box(class="map-crosshair") {}
-            }
-            if move ||!circle_setup()&&(s.editing_circle.with(Option::is_some)||s.picking_place_center.get()||!s.place_outline.with(Vec::is_empty)||!s.area_marks.with(Vec::is_empty)||s.area_drawing.get()||s.area_busy.get()||s.area_stats.with(Option::is_some)) {
-                AreaBar()
             }
             Dialog(open=map_people_open) {
                 DialogContent(class="sheet") {
@@ -931,44 +941,50 @@ pub fn MapView() -> impl IntoView {
                 }
             }
             }
-            if move ||map_profile.with(Option::is_some) && !s.editing_circle.with(Option::is_some) && !s.area_drawing.get() {
-                column(class="map-profile") {
-                    row(class="page-heading") {
-                        row(class="map-profile-avatar") {
-                            if move ||map_profile.with(|p|p.as_ref().is_some_and(|p|p.avatar.is_some())) {
-                                {zgui::elements::image().class("friend-avatar-image").src(Signal::derive_local(move ||map_profile.with(|p|p.as_ref().and_then(|p|p.avatar.clone())))).into_view()}
-                            } else {
-                                text {{move ||map_profile.with(|p|p.as_ref().and_then(|p|p.name.chars().next()).map(|c|c.to_uppercase().to_string()).unwrap_or_default())}}
+            // Bottom-left cards stack instead of overlapping: message, friend, area bar.
+            column(class="map-bottom-stack") {
+                if move ||!s.message.get().is_empty() {
+                    text(class="map-message",a11y:role=Role::Status,on:click=move |_|s.message.set(String::new())) {{move ||s.message.get()}}
+                }
+                if move ||map_profile.with(Option::is_some) && !s.editing_circle.with(Option::is_some) && !s.area_drawing.get() {
+                    column(class="map-profile") {
+                        row(class="page-heading") {
+                            row(class="map-profile-avatar") {
+                                if move ||map_profile.with(|p|p.as_ref().is_some_and(|p|p.avatar.is_some())) {
+                                    {zgui::elements::image().class("friend-avatar-image").src(Signal::derive_local(move ||map_profile.with(|p|p.as_ref().and_then(|p|p.avatar.clone())))).into_view()}
+                                } else {
+                                    text {{move ||map_profile.with(|p|p.as_ref().and_then(|p|p.name.chars().next()).map(|c|c.to_uppercase().to_string()).unwrap_or_default())}}
+                                }
                             }
+                            column(class="grow") {
+                                text(class="list-title") {{move ||map_profile.with(|p|p.as_ref().map(|p|p.name.clone()).unwrap_or_default())}}
+                                text(class="muted") {{move ||map_profile.with(|p|p.as_ref().map(|p|{
+                                    let mins=(s.now.get() as i64-p.timestamp_ms).max(0)/60_000;
+                                    let when=if mins==0{"Just now".into()}else if mins<60{format!("{mins} min ago")}else{format!("{} h ago",mins/60)};
+                                    let connection=if let Some(via)=&p.via{format!("via {via}")}else if p.live{"Live".into()}else{"Last seen".into()};
+                                    format!("{connection} · {when} · ±{:.0} m",p.accuracy_m)
+                                }).unwrap_or_default())}}
+                            }
+                            Button(variant=ButtonVariant::Ghost,a11y:label="Close friend profile",on:click=move |_|s.map_friend_selected.set(None)) {"×"}
                         }
-                        column(class="grow") {
-                            text(class="list-title") {{move ||map_profile.with(|p|p.as_ref().map(|p|p.name.clone()).unwrap_or_default())}}
-                            text(class="muted") {{move ||map_profile.with(|p|p.as_ref().map(|p|{
-                                let mins=(s.now.get() as i64-p.timestamp_ms).max(0)/60_000;
-                                let when=if mins==0{"Just now".into()}else if mins<60{format!("{mins} min ago")}else{format!("{} h ago",mins/60)};
-                                let connection=if let Some(via)=&p.via{format!("via {via}")}else if p.live{"Live".into()}else{"Last seen".into()};
-                                format!("{connection} · {when} · ±{:.0} m",p.accuracy_m)
-                            }).unwrap_or_default())}}
-                        }
-                        Button(variant=ButtonVariant::Ghost,a11y:label="Close friend profile",on:click=move |_|s.map_friend_selected.set(None)) {"×"}
-                    }
-                    row(class="map-profile-actions") {
-                        Button(variant=ButtonVariant::Outline,class="open-friend-page",on:click=move |_|{
-                            s.friend_detail.set(s.map_friend_selected.get_untracked());
-                            s.map_friend_selected.set(None);
-                            s.friends_open.set(true);
-                        }) {"Profile"}
-                        if move ||cfg!(target_os="android") {
-                            Button(variant=ButtonVariant::Outline,on:click=move |_|{
-                                #[cfg(target_os="android")]
-                                crate::ui::place_alerts::show_on_map(s,s.map_friend_selected.get_untracked());
-                            }) {"Their areas on map"}
+                        row(class="map-profile-actions") {
+                            Button(variant=ButtonVariant::Outline,class="open-friend-page",on:click=move |_|{
+                                s.friend_detail.set(s.map_friend_selected.get_untracked());
+                                s.map_friend_selected.set(None);
+                                s.friends_open.set(true);
+                            }) {"Profile"}
+                            if move ||cfg!(target_os="android") {
+                                Button(variant=ButtonVariant::Outline,on:click=move |_|{
+                                    #[cfg(target_os="android")]
+                                    crate::ui::place_alerts::show_on_map(s,s.map_friend_selected.get_untracked());
+                                }) {"Their areas on map"}
+                            }
                         }
                     }
                 }
-            }
-            if move ||!s.message.get().is_empty() {
-                text(class="map-message",a11y:role=Role::Status,on:click=move |_|s.message.set(String::new())) {{move ||s.message.get()}}
+                if move ||!circle_setup()&&(s.editing_circle.with(Option::is_some)||s.picking_place_center.get()||!s.place_outline.with(Vec::is_empty)||!s.area_marks.with(Vec::is_empty)||s.area_drawing.get()||s.area_busy.get()||s.area_stats.with(Option::is_some)) {
+                    AreaBar()
+                }
             }
             if move ||!circle_setup() {
             column(class="map-heading-controls") {
@@ -1016,6 +1032,8 @@ const LINE_STYLE: [LineStyle; LAYERS] = [
     line([170, 110, 255, 255], 2.5, false),
     line([225, 60, 225, 255], 7.0, false),
 ];
+/// Alert area interior: area outline colour, mostly transparent.
+const AREA_FILL: [u8; 4] = [170, 110, 255, 46];
 /// Untraveled roads inside area.
 const UNTRAVELED_STYLE: LineStyle = line([235, 64, 64, 255], 3.0, false);
 

@@ -1,5 +1,10 @@
 //! Local arrival/departure subscriptions. Place definitions never leave this phone.
-use super::{Result, node::FriendState, peers::Friends, requests::atomic_json};
+use super::{
+    Result,
+    node::FriendState,
+    peers::{Friend, Friends},
+    requests::atomic_json,
+};
 use crate::geo::Point;
 use iroh::EndpointId;
 use serde::{Deserialize, Serialize};
@@ -20,8 +25,24 @@ pub struct Place {
     pub polygon: Vec<Point>,
     #[serde(default)]
     pub trigger: Trigger,
+    /// Group rule: watches every current member of this group (`peer` is unused).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
+    /// Group members this rule skips.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub opt_out: Vec<EndpointId>,
     #[serde(default)]
     state: State,
+    /// Group rule: arrival state per member.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    members: Vec<(EndpointId, State)>,
+}
+/// Whom a rule watches.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Who {
+    Friend(EndpointId),
+    /// Group id and members to skip.
+    Group(String, Vec<EndpointId>),
 }
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub enum Trigger {
@@ -70,15 +91,17 @@ fn save(friends: &Friends, saved: &Saved) -> Result<()> {
     }
     atomic_json(&friends.directory().join("places.json"), &bytes)
 }
+pub const MIN_RADIUS: f64 = 10.;
+pub const MAX_RADIUS: f64 = 10_000.;
 fn validate(name: &str, center: Point, radius: f64) -> Result<()> {
     if name.trim().is_empty()
         || name.chars().count() > 64
         || name.chars().any(char::is_control)
         || !center.valid()
         || !radius.is_finite()
-        || !(100. ..=10_000.).contains(&radius)
+        || !(MIN_RADIUS..=MAX_RADIUS).contains(&radius)
     {
-        return Err("Use a name up to 64 characters and radius 100–10000 m".into());
+        return Err("Use a name up to 64 characters and radius 10–10000 m".into());
     }
     Ok(())
 }
@@ -100,7 +123,7 @@ fn add(
         name,
         center,
         radius_m,
-        Some(peer),
+        Some(Who::Friend(peer)),
         Trigger::Both,
         Vec::new(),
     )
@@ -114,6 +137,16 @@ impl Place {
         } else {
             self.area_id
         }
+    }
+
+    /// Whether this rule alerts about `friend`.
+    pub fn watches(&self, friend: &Friend) -> bool {
+        !self.no_rule
+            && !friend.blocked
+            && match &self.group {
+                None => self.peer == friend.peer_id,
+                Some(id) => friend.groups.contains(id) && !self.opt_out.contains(&friend.peer_id),
+            }
     }
 
     pub fn outline(&self) -> Vec<Point> {
@@ -149,7 +182,7 @@ pub fn set_rule(
     name: &str,
     center: Point,
     radius: f64,
-    peer: Option<EndpointId>,
+    who: Option<Who>,
     trigger: Trigger,
     polygon: Vec<Point>,
 ) -> Result<u32> {
@@ -159,19 +192,36 @@ pub fn set_rule(
         return Err("Draw a boundary with 3–256 valid corners".into());
     }
     let _lock = friends.lock()?;
-    if let Some(peer) = peer
-        && !friends
-            .list_locked()?
-            .iter()
-            .any(|f| f.peer_id == peer && !f.blocked)
-    {
-        return Err("Choose a current, unblocked friend".into());
+    match &who {
+        Some(Who::Friend(peer))
+            if !friends
+                .list_locked()?
+                .iter()
+                .any(|f| f.peer_id == *peer && !f.blocked) =>
+        {
+            return Err("Choose a current, unblocked friend".into());
+        }
+        Some(Who::Group(id, _))
+            if !friends
+                .groups_locked()?
+                .iter()
+                .any(|g| g.id == *id && g.leaving_since_ms.is_none()) =>
+        {
+            return Err("Choose a current group".into());
+        }
+        None if existing.is_some() => return Err("Choose a friend for this rule".into()),
+        _ => {}
     }
-    if existing.is_some() && peer.is_none() {
-        return Err("Choose a friend for this rule".into());
-    }
-    let no_rule = peer.is_none();
-    let peer = peer.unwrap_or(friends.owner);
+    let no_rule = who.is_none();
+    let (peer, group, opt_out) = match who {
+        Some(Who::Friend(peer)) => (peer, None, Vec::new()),
+        Some(Who::Group(id, skip)) => (friends.owner, Some(id), skip),
+        None => (friends.owner, None, Vec::new()),
+    };
+    let same = |p: &Place| match &group {
+        Some(id) => p.group.as_ref() == Some(id),
+        None => p.group.is_none() && p.peer == peer,
+    };
     let mut saved = load(friends)?;
     let area = if let Some(id) = existing {
         let area = saved
@@ -183,10 +233,11 @@ pub fn set_rule(
         if let Some(rule) = saved
             .places
             .iter_mut()
-            .find(|p| p.area() == id && p.peer == peer)
+            .find(|p| p.area() == id && !p.no_rule && same(p))
         {
             rule.trigger = trigger;
-            rule.no_rule = false;
+            rule.opt_out = opt_out;
+            rule.members.retain(|(m, _)| !rule.opt_out.contains(m));
             save(friends, &saved)?;
             return Ok(id);
         }
@@ -202,6 +253,8 @@ pub fn set_rule(
             .find(|p| p.area() == id && p.no_rule)
     {
         rule.peer = peer;
+        rule.group = group;
+        rule.opt_out = opt_out;
         rule.trigger = trigger;
         rule.no_rule = false;
         save(friends, &saved)?;
@@ -228,7 +281,10 @@ pub fn set_rule(
         radius_m: area.as_ref().map_or(radius, |p| p.radius_m),
         peer,
         no_rule,
+        group,
+        opt_out,
         state: State::default(),
+        members: Vec::new(),
     });
     save(friends, &saved)?;
     Ok(existing.unwrap_or(saved.next_id))
@@ -242,7 +298,10 @@ pub fn remove(friends: &Friends, id: u32) -> Result<()> {
             saved.places.retain(|p| p.id != id);
         } else if let Some(rule) = saved.places.iter_mut().find(|p| p.id == id) {
             rule.no_rule = true;
+            rule.group = None;
+            rule.opt_out.clear();
             rule.state = State::default();
+            rule.members.clear();
         }
     }
     save(friends, &saved)
@@ -274,11 +333,13 @@ pub fn edit_area(
                 place.polygon = points.clone();
                 place.center = center;
                 place.state = State::default();
+                place.members.clear();
             }
         } else if place.polygon.is_empty() && (place.center != center || place.radius_m != radius) {
             place.center = center;
             place.radius_m = radius;
             place.state = State::default();
+            place.members.clear();
         }
     }
     if !found {
@@ -297,14 +358,14 @@ pub fn remove_area(friends: &Friends, area: u32) -> Result<()> {
 impl Place {
     /// First observation establishes baseline. Two confident, distinct fixes at least
     /// 15 s apart confirm transition. Gaps > 5 min reset baseline without an alert.
-    fn observe(&mut self, friend: &FriendState, now: i64) -> Option<String> {
+    fn observe(&self, state: &mut State, friend: &FriendState, now: i64) -> Option<String> {
         let fix = friend.location?;
         if !friend.connected
             || !friend.sharing_active
             || friend.via.is_some()
             || now.saturating_sub(fix.timestamp_ms) > 120_000
             || fix.timestamp_ms > now
-            || fix.timestamp_ms <= self.state.last_ms
+            || fix.timestamp_ms <= state.last_ms
         {
             return None;
         }
@@ -350,34 +411,34 @@ impl Place {
         } else {
             None
         };
-        let gap = fix.timestamp_ms.saturating_sub(self.state.last_ms) > 300_000;
-        self.state.last_ms = fix.timestamp_ms;
+        let gap = fix.timestamp_ms.saturating_sub(state.last_ms) > 300_000;
+        state.last_ms = fix.timestamp_ms;
         if gap {
-            self.state.inside = None;
+            state.inside = None;
         }
         let Some(inside) = inside else {
-            self.state.candidate = None;
+            state.candidate = None;
             return None;
         };
-        if gap || self.state.inside.is_none() {
-            self.state.inside = Some(inside);
-            self.state.candidate = None;
+        if gap || state.inside.is_none() {
+            state.inside = Some(inside);
+            state.candidate = None;
             return None;
         }
-        if self.state.inside == Some(inside) {
-            self.state.candidate = None;
+        if state.inside == Some(inside) {
+            state.candidate = None;
             return None;
         }
-        if self.state.candidate != Some(inside) {
-            self.state.candidate = Some(inside);
-            self.state.since_ms = fix.timestamp_ms;
+        if state.candidate != Some(inside) {
+            state.candidate = Some(inside);
+            state.since_ms = fix.timestamp_ms;
             return None;
         }
-        if fix.timestamp_ms.saturating_sub(self.state.since_ms) < 15_000 {
+        if fix.timestamp_ms.saturating_sub(state.since_ms) < 15_000 {
             return None;
         }
-        self.state.inside = Some(inside);
-        self.state.candidate = None;
+        state.inside = Some(inside);
+        state.candidate = None;
         if (inside && self.trigger == Trigger::Exiting)
             || (!inside && self.trigger == Trigger::Entering)
         {
@@ -403,10 +464,39 @@ pub(super) fn observe(
     let mut changed = false;
     let mut notices = Vec::new();
     for place in saved.places.iter_mut().filter(|p| !p.no_rule) {
-        if !records
-            .iter()
-            .any(|f| f.peer_id == place.peer && !f.blocked)
-        {
+        let watched: Vec<_> = records.iter().filter(|f| place.watches(f)).collect();
+        // Notification per rule and member, so group alerts do not replace each other.
+        let id = |peer: EndpointId| {
+            1_000_000 + place.id as i32 * 64 + i32::from(peer.as_bytes()[0] % 64)
+        };
+        if place.group.is_some() {
+            let before = place.members.len();
+            place
+                .members
+                .retain(|(m, _)| watched.iter().any(|f| f.peer_id == *m));
+            changed |= before != place.members.len();
+            for friend in observations
+                .iter()
+                .filter(|o| watched.iter().any(|f| f.peer_id == o.peer_id))
+            {
+                let mut members = std::mem::take(&mut place.members);
+                let at = members
+                    .iter()
+                    .position(|(m, _)| *m == friend.peer_id)
+                    .unwrap_or_else(|| {
+                        members.push((friend.peer_id, State::default()));
+                        members.len() - 1
+                    });
+                let old = members[at].1.clone();
+                if let Some(text) = place.observe(&mut members[at].1, friend, now) {
+                    notices.push((id(friend.peer_id), text));
+                }
+                changed |= old != members[at].1;
+                place.members = members;
+            }
+            continue;
+        }
+        if watched.is_empty() {
             if place.state != State::default() {
                 place.state = State::default();
                 changed = true;
@@ -414,11 +504,13 @@ pub(super) fn observe(
             continue;
         }
         if let Some(friend) = observations.iter().find(|f| f.peer_id == place.peer) {
-            let old = place.state.clone();
-            if let Some(text) = place.observe(friend, now) {
-                notices.push((1_000_000 + place.id as i32, text));
+            let mut state = std::mem::take(&mut place.state);
+            let old = state.clone();
+            if let Some(text) = place.observe(&mut state, friend, now) {
+                notices.push((id(friend.peer_id), text));
             }
-            changed |= old != place.state;
+            changed |= old != state;
+            place.state = state;
         }
     }
     if changed {
@@ -432,16 +524,23 @@ pub(super) fn observe(
 pub(super) fn confirmation_requests(friends: &Friends, now: i64) -> Result<()> {
     let peers: std::collections::BTreeSet<_> = {
         let _lock = friends.lock()?;
+        let pending = |s: &State| {
+            s.candidate.is_some()
+                && now.saturating_sub(s.since_ms) >= 15_000
+                && now.saturating_sub(s.last_ms) <= 120_000
+        };
         load(friends)?
             .places
             .into_iter()
-            .filter(|p| {
-                !p.no_rule
-                    && p.state.candidate.is_some()
-                    && now.saturating_sub(p.state.since_ms) >= 15_000
-                    && now.saturating_sub(p.state.last_ms) <= 120_000
+            .filter(|p| !p.no_rule)
+            .flat_map(|p| {
+                let single = (p.group.is_none() && pending(&p.state)).then_some(p.peer);
+                p.members
+                    .into_iter()
+                    .filter(|(_, s)| pending(s))
+                    .map(|(m, _)| m)
+                    .chain(single)
             })
-            .map(|p| p.peer)
             .collect()
     };
     for peer in peers {
@@ -518,7 +617,7 @@ mod tests {
             "",
             center,
             200.,
-            Some(peer),
+            Some(Who::Friend(peer)),
             Trigger::Entering,
             Vec::new(),
         )
@@ -544,6 +643,76 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn group_rule_alerts_each_member_except_opt_outs() {
+        use crate::sharing::{groups::Policy, peers::Permission};
+        let dir = tempfile::tempdir().unwrap();
+        let key = iroh::SecretKey::generate();
+        let (sam, ann, cal) = (
+            iroh::SecretKey::generate().public(),
+            iroh::SecretKey::generate().public(),
+            iroh::SecretKey::generate().public(),
+        );
+        let friends = Friends::open(dir.path(), key.public()).unwrap();
+        let group = friends
+            .create_group(&key, "Family", "Me", Policy::Managed, Permission::Always)
+            .unwrap();
+        for (peer, name) in [(sam, "Sam"), (ann, "Ann"), (cal, "Cal")] {
+            friends.add_confirmed(peer, name.into()).unwrap();
+            friends.admit_member(&key, &group, peer, name).unwrap();
+        }
+        let id = set_rule(
+            &friends,
+            None,
+            "Home",
+            Point { lat: 0., lon: 0. },
+            10.,
+            Some(Who::Group(group.clone(), vec![cal])),
+            Trigger::Both,
+            Vec::new(),
+        )
+        .unwrap();
+        let at = |t: i64, lon: f64| {
+            [(sam, "Sam"), (ann, "Ann"), (cal, "Cal")].map(|(peer, name)| FriendState {
+                name: name.into(),
+                ..observation(peer, t, lon)
+            })
+        };
+        observe(&friends, &at(100_000, 0.01), 100_000).unwrap();
+        observe(&friends, &at(130_000, 0.), 130_000).unwrap();
+        let notices = observe(&friends, &at(145_000, 0.), 145_000).unwrap();
+        assert_eq!(notices.len(), 2, "Cal opted out");
+        assert_ne!(notices[0].0, notices[1].0);
+        let mut seen: Vec<_> = notices.iter().map(|n| n.1.as_str()).collect();
+        seen.sort();
+        assert_eq!(seen, ["Ann arrived at Home", "Sam arrived at Home"]);
+        let rule = &list(&friends).unwrap()[0];
+        let record = |peer| {
+            friends
+                .list()
+                .unwrap()
+                .into_iter()
+                .find(|f| f.peer_id == peer)
+                .unwrap()
+        };
+        assert!(rule.watches(&record(ann)) && !rule.watches(&record(cal)));
+        // Updating the same group rule replaces opt-outs, not a second rule.
+        set_rule(
+            &friends,
+            Some(id),
+            "",
+            Point { lat: 0., lon: 0. },
+            10.,
+            Some(Who::Group(group, vec![])),
+            Trigger::Both,
+            Vec::new(),
+        )
+        .unwrap();
+        let rules = list(&friends).unwrap();
+        assert_eq!(rules.len(), 1);
+        assert!(rules[0].watches(&record(cal)));
     }
 
     #[test]

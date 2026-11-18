@@ -27,34 +27,71 @@ pub struct LineStyle {
     pub dashed: bool,
 }
 
-/// Trip and area lines. Coordinates are projected metres relative to `origin`; runs of
-/// equal style draw together.
+/// Trip and area lines, plus translucent area fills drawn beneath them. Coordinates are
+/// projected metres relative to `origin`; runs of equal style draw together.
 #[derive(Default, PartialEq)]
 pub struct Lines {
     pub origin: [f64; 2],
     pub segments: Vec<[f32; 4]>,
     pub runs: Vec<(LineStyle, Range<u32>)>,
+    /// Triangle-fan triangles, three vertices each, for stencil fill.
+    pub fills: Vec<[f32; 2]>,
+    /// (colour, range in `fills`, bounds [min x, min y, max x, max y]).
+    pub fill_runs: Vec<([u8; 4], Range<u32>, [f32; 4])>,
 }
 
 impl Lines {
+    /// First point ever added becomes origin.
+    fn anchor(&mut self, p: [f64; 2]) {
+        if self.segments.is_empty() && self.fills.is_empty() {
+            self.origin = p;
+        }
+    }
+
+    fn rel(&self, p: [f64; 2]) -> [f32; 2] {
+        [
+            (p[0] - self.origin[0]) as f32,
+            (p[1] - self.origin[1]) as f32,
+        ]
+    }
+
     /// Adds one segment; `a`, `b` are absolute projected metres.
     pub fn push(&mut self, a: [f64; 2], b: [f64; 2], style: LineStyle) {
-        if self.segments.is_empty() {
-            self.origin = a;
-        }
-        let rel = |p: [f64; 2]| {
-            [
-                (p[0] - self.origin[0]) as f32,
-                (p[1] - self.origin[1]) as f32,
-            ]
-        };
-        let (a, b) = (rel(a), rel(b));
+        self.anchor(a);
+        let (a, b) = (self.rel(a), self.rel(b));
         let i = self.segments.len() as u32;
         self.segments.push([a[0], a[1], b[0], b[1]]);
         match self.runs.last_mut() {
             Some((s, range)) if *s == style => range.end = i + 1,
             _ => self.runs.push((style, i..i + 1)),
         }
+    }
+
+    /// Fills one closed ring (absolute projected metres) with straight-alpha `rgba`.
+    pub fn fill(&mut self, ring: &[[f64; 2]], rgba: [u8; 4]) {
+        if ring.len() < 3 {
+            return;
+        }
+        self.anchor(ring[0]);
+        let start = self.fills.len() as u32;
+        let first = self.rel(ring[0]);
+        let mut bounds = [first[0], first[1], first[0], first[1]];
+        let mut prev = None;
+        for &p in &ring[1..] {
+            let p = self.rel(p);
+            bounds = [
+                bounds[0].min(p[0]),
+                bounds[1].min(p[1]),
+                bounds[2].max(p[0]),
+                bounds[3].max(p[1]),
+            ];
+            if let Some(q) = prev {
+                self.fills.extend([first, q, p]);
+            }
+            prev = Some(p);
+        }
+        self.fill_runs
+            .push((rgba, start..self.fills.len() as u32, bounds));
     }
 }
 
@@ -119,7 +156,8 @@ pub struct Renderer {
     draws: Option<(u64, wgpu::Buffer, wgpu::BindGroup)>,
     stride: u64,
     tiles: HashMap<usize, Buffers>,
-    lines: Option<(Arc<Lines>, wgpu::Buffer)>,
+    /// Scene lines with their segment and fill buffers.
+    lines: Option<(Arc<Lines>, Option<wgpu::Buffer>, Option<wgpu::Buffer>)>,
     targets: Option<([u32; 2], wgpu::TextureView, wgpu::TextureView)>,
 }
 
@@ -326,10 +364,13 @@ impl Renderer {
         if self
             .lines
             .as_ref()
-            .is_none_or(|(have, _)| !Arc::ptr_eq(have, &scene.lines))
+            .is_none_or(|(have, ..)| !Arc::ptr_eq(have, &scene.lines))
         {
-            self.lines = Self::vertices(device, queue, &bytes(&scene.lines.segments))
-                .map(|b| (scene.lines.clone(), b));
+            self.lines = Some((
+                scene.lines.clone(),
+                Self::vertices(device, queue, &bytes(&scene.lines.segments)),
+                Self::vertices(device, queue, &bytes(&scene.lines.fills)),
+            ));
         }
     }
 
@@ -483,8 +524,15 @@ impl Renderer {
                 ));
             }
         }
-        if let Some((_, buffer)) = &self.lines {
-            let offset = rel(scene.lines.origin);
+        let offset = rel(scene.lines.origin);
+        if let Some((_, _, Some(buffer))) = &self.lines {
+            for (rgba, range, bounds) in &scene.lines.fill_runs {
+                let draw = push(offset, 0.0, false, *rgba, [0.0; 4]);
+                cmds.push((draw, Cmd::Fill(buffer, range.clone())));
+                cmds.push((push(offset, 0.0, false, *rgba, *bounds), Cmd::Cover));
+            }
+        }
+        if let Some((_, Some(buffer), _)) = &self.lines {
             for (style, range) in &scene.lines.runs {
                 let draw = push(offset, style.width, style.dashed, style.rgba, [0.0; 4]);
                 cmds.push((draw, Cmd::Line(buffer, range.clone())));
@@ -586,6 +634,44 @@ impl Renderer {
 pub(crate) mod tests {
     use super::*;
     use crate::mapping::camera::{TILE, WORLD};
+
+    #[test]
+    fn fill_fans_ring_from_first_point_with_bounds() {
+        let mut lines = Lines::default();
+        let ring = [
+            [1e6, 2e6],
+            [1e6 + 4.0, 2e6],
+            [1e6 + 4.0, 2e6 + 3.0],
+            [1e6, 2e6 + 3.0],
+        ];
+        lines.fill(&ring, [1, 2, 3, 4]);
+        lines.push(
+            [1e6, 2e6],
+            [1e6 + 1.0, 2e6],
+            LineStyle {
+                rgba: [0; 4],
+                width: 1.0,
+                dashed: false,
+            },
+        );
+        assert_eq!(lines.origin, [1e6, 2e6]);
+        assert_eq!(
+            lines.fills,
+            vec![
+                [0.0, 0.0],
+                [4.0, 0.0],
+                [4.0, 3.0],
+                [0.0, 0.0],
+                [4.0, 3.0],
+                [0.0, 3.0]
+            ]
+        );
+        assert_eq!(
+            lines.fill_runs,
+            vec![([1, 2, 3, 4], 0..6, [0.0, 0.0, 4.0, 3.0])]
+        );
+        assert_eq!(lines.segments[0], [0.0, 0.0, 1.0, 0.0]);
+    }
 
     #[test]
     fn segments_pack_relative_to_first_point_in_style_runs() {

@@ -24,12 +24,15 @@ Open **Friends** on map.
   or inactive Trips. A short GPS watch runs for up to 20 seconds when needed.
   This cannot wake a force-stopped or offline phone.
 - **Alert areas**: open Friends → Alert areas → **+ New**. Name the area and
-  adjust the circle on the map or with the radius slider. Choose **Draw shape**
-  to use the same corner tools as regular areas. **Next: add alerts** saves the
-  boundary and lets you choose a friend and Arrive, Leave, or Both. Tap a friend
-  on the map for their details, **Profile**, and **Their areas on map**. A friend's
-  page and the Alert areas list both have **Show on map**, which draws areas with
-  their names; tap a name on the map to open that area for editing.
+  adjust the circle (10 m–10 km) on the map or with the radius slider. Choose
+  **Draw shape** to use the same corner tools as regular areas. **Next: add
+  alerts** saves the boundary and lets you choose a friend or a group and Arrive,
+  Leave, or Both. A group alert covers every member, including ones who join
+  later, except members you mark Skipped. Tap a friend on the map to outline the
+  areas that alert about them; tap empty map to hide them. Layers → **Show alert
+  areas**, a friend's page and the Alert areas list draw areas with their names;
+  the bar under them filters by group or friend. Tap a name on the map to open
+  that area for editing.
   Definitions stay on this phone. First observation sets a
   baseline; two distinct, accurate updates at least 15 seconds apart confirm changes.
   Boundary uncertainty, stale/relayed fixes and gaps over five minutes cannot invent

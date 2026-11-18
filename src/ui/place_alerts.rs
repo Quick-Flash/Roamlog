@@ -1,8 +1,12 @@
 //! User-selected arrival/departure subscriptions, stored only on this phone.
 use super::state::UiState;
-use crate::sharing::{
-    android_app,
-    places::{self, Place},
+use crate::{
+    geo::Point,
+    sharing::{
+        android_app,
+        peers::{Friend, Group},
+        places::{self, Place, Who},
+    },
 };
 use std::collections::BTreeSet;
 use zgui::prelude::*;
@@ -89,36 +93,99 @@ fn boundary_preview(place: &Place, [width, height]: [f64; 2]) -> impl IntoView {
     }
 }
 
-/// Draw every alert area (all, or those with an alert for `peer`) on the map with tappable
-/// names, fit them in view and switch to the map.
-pub fn show_on_map(s: UiState, peer: Option<String>) {
+/// Friends (not blocked) and current groups, for choosing and filtering alert rules.
+type People = (Vec<Friend>, Vec<Group>);
+
+fn load(directory: std::path::PathBuf) -> Result<(Vec<Place>, People), String> {
+    let manager = android_app::manager(&directory).map_err(|e| e.to_string())?;
+    let friends = manager.friends();
+    let people = friends
+        .list()
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .filter(|f| !f.blocked)
+        .collect();
+    let groups = friends
+        .groups()
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .filter(|g| g.leaving_since_ms.is_none())
+        .collect();
+    Ok((
+        places::list(friends).map_err(|e| e.to_string())?,
+        (people, groups),
+    ))
+}
+
+/// Who a rule watches as one key: friend id, or "g:<group id>".
+fn rule_key(place: &Place) -> String {
+    place
+        .group
+        .as_ref()
+        .map_or_else(|| place.peer.to_string(), |id| format!("g:{id}"))
+}
+
+/// Whether rule shows under `filter`: a group key matches that group's rules; a friend key
+/// matches their own rules and their groups' rules unless they opted out.
+fn shown(place: &Place, filter: Option<&str>, friends: &[Friend]) -> bool {
+    let Some(key) = filter else {
+        return true;
+    };
+    if key.starts_with("g:") {
+        return !place.no_rule && rule_key(place) == key;
+    }
+    friends
+        .iter()
+        .find(|f| f.peer_id.to_string() == key)
+        .is_some_and(|f| place.watches(f))
+}
+
+/// Filter choices: groups first, then friends.
+fn filter_options((friends, groups): &People) -> Vec<(String, String)> {
+    groups
+        .iter()
+        .map(|g| (format!("g:{}", g.id), format!("{} (group)", g.name)))
+        .chain(
+            friends
+                .iter()
+                .map(|f| (f.peer_id.to_string(), f.display_name.clone())),
+        )
+        .collect()
+}
+
+fn marks(
+    list: Vec<Place>,
+    filter: Option<&str>,
+    friends: &[Friend],
+) -> Vec<(u32, String, Vec<Point>)> {
+    let mut seen = BTreeSet::new();
+    list.into_iter()
+        .filter(|p| shown(p, filter, friends))
+        .filter(|p| seen.insert(p.area()))
+        .map(|p| (p.area(), p.name.clone(), p.outline()))
+        .collect()
+}
+
+/// Draw every alert area (all, or those watching `filter`: friend id or "g:<group id>") on
+/// the map with tappable names, fit them in view and switch to the map.
+pub fn show_on_map(s: UiState, filter: Option<String>) {
     let directory = s.directory.get_value();
     zgui::reactive::spawn_detached(async move {
-        let result = blocking(move || -> Result<Vec<Place>, String> {
-            let manager = android_app::manager(&directory).map_err(|e| e.to_string())?;
-            places::list(manager.friends()).map_err(|e| e.to_string())
-        })
-        .await;
-        match result {
-            Ok(list) => {
-                let mut seen = BTreeSet::new();
-                let marks = list
-                    .into_iter()
-                    .filter(|p| {
-                        peer.as_ref()
-                            .is_none_or(|id| !p.no_rule && *id == p.peer.to_string())
-                    })
-                    .filter(|p| seen.insert(p.area()))
-                    .map(|p| (p.area(), p.name.clone(), p.outline()))
-                    .collect::<Vec<_>>();
+        match blocking(move || load(directory)).await {
+            Ok((list, people)) => {
+                let marks = marks(list, filter.as_deref(), &people.0);
+                s.area_filters.set(filter_options(&people));
+                s.place_peer.set(filter);
                 if marks.is_empty() {
                     s.message.set("No alert areas to show yet".into());
                     return;
                 }
                 s.fit(marks.iter().flat_map(|mark| mark.2.iter().copied()));
                 s.place_outline.set(Vec::new());
+                s.marks_friend.set_value(None);
                 s.area_marks.set(marks);
                 s.map_friend_selected.set(None);
+                s.message.set(String::new());
                 s.places_open.set(false);
                 s.friends_open.set(false);
                 s.trips_open.set(false);
@@ -129,11 +196,71 @@ pub fn show_on_map(s: UiState, peer: Option<String>) {
     });
 }
 
+/// Selecting a friend on the map outlines the areas that alert about them, without moving
+/// the map; deselecting hides them again.
+pub fn follow_selected_friend(s: UiState) {
+    let effect = zgui::reactive::RenderEffect::new(move |_| {
+        let Some(peer) = s.map_friend_selected.get() else {
+            if s.marks_friend.get_value().is_some() {
+                s.marks_friend.set_value(None);
+                s.area_marks.set(Vec::new());
+            }
+            return;
+        };
+        let directory = s.directory.get_value();
+        zgui::reactive::spawn_detached(async move {
+            let Ok((list, people)) = blocking(move || load(directory)).await else {
+                return;
+            };
+            if s.map_friend_selected
+                .with_untracked(|p| p.as_ref() != Some(&peer))
+            {
+                return;
+            }
+            s.marks_friend.set_value(Some(peer.clone()));
+            s.area_marks.set(marks(list, Some(&peer), &people.0));
+        });
+    });
+    on_cleanup_local(move || drop(effect));
+}
+
+fn trigger_key(rule: places::Trigger) -> &'static str {
+    match rule {
+        places::Trigger::Entering => "entering",
+        places::Trigger::Exiting => "exiting",
+        places::Trigger::Both => "both",
+    }
+}
+
+/// Radius slider on a log scale, so 10 m and 10 km are both easy to reach.
+fn radius_slider_view(radius: RwSignal<f64, LocalStorage>) -> impl IntoView {
+    let span = (places::MAX_RADIUS / places::MIN_RADIUS).ln();
+    let to_position = move |r: f64| (r / places::MIN_RADIUS).ln() / span * 1000.;
+    let to_radius = move |p: f64| {
+        let r = places::MIN_RADIUS * (p / 1000. * span).exp();
+        let step = if r < 100. {
+            5.
+        } else if r < 1000. {
+            10.
+        } else {
+            50.
+        };
+        ((r / step).round() * step).clamp(places::MIN_RADIUS, places::MAX_RADIUS)
+    };
+    view! {
+        Slider(value=Binding::controlled(Signal::derive_local(move ||to_position(radius.get())),move |p|radius.set(to_radius(p))),
+            min=0.0,max=1000.0,step=1.0,label="Radius in meters")
+    }
+}
+
 #[component]
 pub fn PlaceAlerts(open: RwSignal<bool, LocalStorage>) -> impl IntoView {
     let s = UiState::current();
     let saved = RwSignal::new_local(Vec::<Place>::new());
     let people = RwSignal::new_local(Vec::<(String, String)>::new());
+    let records = RwSignal::new_local((Vec::<Friend>::new(), Vec::<Group>::new()));
+    // Group members the chosen group rule skips.
+    let opt_out = RwSignal::new_local(Vec::<String>::new());
     let name = RwSignal::new_local(String::new());
     let peer = RwSignal::new_local("none".to_owned());
     let trigger = RwSignal::new_local("both".to_owned());
@@ -151,24 +278,13 @@ pub fn PlaceAlerts(open: RwSignal<bool, LocalStorage>) -> impl IntoView {
     let reload = move || {
         let directory = s.directory.get_value();
         zgui::reactive::spawn_detached(async move {
-            let result = blocking(move || -> Result<_, String> {
-                let manager = android_app::manager(&directory).map_err(|e| e.to_string())?;
-                let people = manager
-                    .friends()
-                    .list()
-                    .map_err(|e| e.to_string())?
-                    .into_iter()
-                    .filter(|f| !f.blocked)
-                    .map(|f| (f.peer_id.to_string(), f.display_name))
-                    .collect::<Vec<_>>();
-                Ok((
-                    places::list(manager.friends()).map_err(|e| e.to_string())?,
-                    people,
-                ))
-            })
-            .await;
-            match result {
-                Ok((list, friends)) => {
+            match blocking(move || load(directory)).await {
+                Ok((list, loaded)) => {
+                    let friends: Vec<_> = loaded
+                        .0
+                        .iter()
+                        .map(|f| (f.peer_id.to_string(), f.display_name.clone()))
+                        .collect();
                     if peer.get_untracked() != "none"
                         && !friends.iter().any(|(id, _)| *id == peer.get_untracked())
                         && let Some((id, _)) = friends.first()
@@ -177,6 +293,7 @@ pub fn PlaceAlerts(open: RwSignal<bool, LocalStorage>) -> impl IntoView {
                     }
                     saved.set(list);
                     people.set(friends);
+                    records.set(loaded);
                 }
                 Err(e) => status.set(e),
             }
@@ -216,6 +333,13 @@ pub fn PlaceAlerts(open: RwSignal<bool, LocalStorage>) -> impl IntoView {
             }
         });
     };
+    // Alert sheet opens without a result left over from last time.
+    let fresh_rule = zgui::reactive::RenderEffect::new(move |_| {
+        if editing_rule.get() {
+            status.set(String::new());
+        }
+    });
+    on_cleanup_local(move || drop(fresh_rule));
     let effect = zgui::reactive::RenderEffect::new(move |_| {
         if open.get() {
             status.set(String::new());
@@ -259,6 +383,7 @@ pub fn PlaceAlerts(open: RwSignal<bool, LocalStorage>) -> impl IntoView {
         let directory = s.directory.get_value();
         let name_value = name.get_untracked();
         let peer_value = peer.get_untracked();
+        let skip = opt_out.get_untracked();
         let [lon, lat] = crate::mapping::camera::geographic(s.camera.get_untracked().center);
         let circle = s.editing_circle.get_untracked();
         let polygon = s.alert_polygon.get_untracked();
@@ -279,8 +404,13 @@ pub fn PlaceAlerts(open: RwSignal<bool, LocalStorage>) -> impl IntoView {
                     radius,
                     if selected.is_none() || peer_value == "none" {
                         None
+                    } else if let Some(group) = peer_value.strip_prefix("g:") {
+                        Some(Who::Group(
+                            group.into(),
+                            skip.iter().filter_map(|p| p.parse().ok()).collect(),
+                        ))
                     } else {
-                        Some(peer_value.parse()?)
+                        Some(Who::Friend(peer_value.parse()?))
                     },
                     trigger_value,
                     if selected.is_none() {
@@ -300,8 +430,11 @@ pub fn PlaceAlerts(open: RwSignal<bool, LocalStorage>) -> impl IntoView {
                         s.place_outline.set(Vec::new());
                         area.set(Some(id));
                         open.set(true);
-                        if let Some((id, _)) = people.with_untracked(|p| p.first().cloned()) {
+                        if let Some((id, _)) =
+                            records.with_untracked(filter_options).into_iter().next()
+                        {
                             peer.set(id);
+                            opt_out.set(Vec::new());
                             existing_rule.set(false);
                             editing_rule.set(true);
                         }
@@ -330,14 +463,42 @@ pub fn PlaceAlerts(open: RwSignal<bool, LocalStorage>) -> impl IntoView {
         places::Trigger::Exiting => "Leaves",
         places::Trigger::Both => "Arrives + leaves",
     };
-    let person_name = move |id: String| {
-        people
-            .with(|list| {
-                list.iter()
-                    .find(|(peer, _)| *peer == id)
-                    .map(|(_, name)| name.clone())
+    // Rule's subject: friend name, or group name with opt-out count.
+    let who_name = move |place: &Place| {
+        records.with(|(friends, groups)| match &place.group {
+            Some(id) => groups.iter().find(|g| g.id == *id).map_or_else(
+                || "Removed group".into(),
+                |g| match place.opt_out.len() {
+                    0 => format!("{} (group)", g.name),
+                    n => format!("{} (group, {n} skipped)", g.name),
+                },
+            ),
+            None => friends
+                .iter()
+                .find(|f| f.peer_id == place.peer)
+                .map_or_else(|| "Removed friend".into(), |f| f.display_name.clone()),
+        })
+    };
+    // Rule already exists for chosen friend or group in this area: saving updates it.
+    let updating = move || {
+        existing_rule.get()
+            || saved.with(|list| {
+                list.iter().any(|p| {
+                    Some(p.area()) == area.get() && !p.no_rule && peer.with(|k| rule_key(p) == *k)
+                })
             })
-            .unwrap_or_else(|| "Removed friend".into())
+    };
+    let group_members = move |key: &str| {
+        let Some(id) = key.strip_prefix("g:") else {
+            return Vec::new();
+        };
+        records.with(|(friends, _)| {
+            friends
+                .iter()
+                .filter(|f| f.groups.iter().any(|g| g == id))
+                .map(|f| (f.peer_id.to_string(), f.display_name.clone()))
+                .collect::<Vec<_>>()
+        })
     };
     let view_boundary = move |place: Place| {
         let boundary = place.outline();
@@ -498,7 +659,7 @@ pub fn PlaceAlerts(open: RwSignal<bool, LocalStorage>) -> impl IntoView {
                             Input(value=name,label="Area name",placeholder="Name")
                             if move ||saved.with(|list|list.iter().any(|p|Some(p.area())==area.get()&&p.polygon.is_empty())) {
                                 text {{move ||format!("{:.0} m radius",radius_slider.get())}}
-                                Slider(value=radius_slider,min=100.0,max=10_000.0,step=25.0,label="Radius in meters")
+                                {radius_slider_view(radius_slider)}
                                 Button(variant=ButtonVariant::Outline,on:click=move |_|{
                                     let Some(center) = edit_center.get_untracked() else {return;};
                                     let radius = radius_slider.get_untracked();
@@ -513,7 +674,7 @@ pub fn PlaceAlerts(open: RwSignal<bool, LocalStorage>) -> impl IntoView {
                                 }) {"Move or resize on map"}
                             }
                             if move ||!s.alert_polygon.with(Vec::is_empty) {
-                                Button(variant=ButtonVariant::Outline,on:click=move |_|draw()) {"Edit corners on map"}
+                                Button(variant=ButtonVariant::Outline,on:click=move |_|draw()) {"Edit area"}
                             }
                             row(class="actions") {
                                 Button(variant=ButtonVariant::Outline,on:click=move |_|{editing.set(false);name.set(String::new());}) {"Cancel"}
@@ -531,7 +692,7 @@ pub fn PlaceAlerts(open: RwSignal<bool, LocalStorage>) -> impl IntoView {
                                     row(class="actions") {
                                         Button(variant=ButtonVariant::Outline,on:click=move |_|{
                                             if let Some(place)=selected.get_untracked(){move_boundary(place);}
-                                        }) {{move ||if selected.with(|p|p.as_ref().is_some_and(|p|p.polygon.is_empty())) {"Move or resize on map"}else{"Edit corners on map"}}}
+                                        }) {"Edit area"}
                                         Button(variant=ButtonVariant::Outline,on:click=move |_|{
                                             if let Some(place)=selected.get_untracked(){
                                                 name.set(place.name);
@@ -548,9 +709,13 @@ pub fn PlaceAlerts(open: RwSignal<bool, LocalStorage>) -> impl IntoView {
                                 }
                                 row(class="page-heading") {
                                     text(class="list-title grow") {"Alerts"}
-                                    Button(variant=ButtonVariant::Outline,disabled=Signal::derive_local(move ||people.with(Vec::is_empty)),on:click=move |_|{
-                                        if let Some((id,_))=people.with_untracked(|list| list.first().cloned()){peer.set(id);}
+                                    Button(variant=ButtonVariant::Outline,disabled=Signal::derive_local(move ||records.with(|r|r.0.is_empty()&&r.1.is_empty())),on:click=move |_|{
+                                        // First friend or group without an alert here, so this is a new alert.
+                                        let keys:Vec<String>=records.with_untracked(filter_options).into_iter().map(|o|o.0).collect();
+                                        let free=keys.iter().find(|k|!saved.with_untracked(|list|list.iter().any(|p|Some(p.area())==area.get_untracked()&&!p.no_rule&&rule_key(p)==**k)));
+                                        if let Some(key)=free.or(keys.first()){peer.set(key.clone());}
                                         existing_rule.set(false);
+                                        opt_out.set(Vec::new());
                                         trigger.set("both".into());
                                         editing_rule.set(true);
                                     }) {"+ Add alert"}
@@ -572,11 +737,11 @@ pub fn PlaceAlerts(open: RwSignal<bool, LocalStorage>) -> impl IntoView {
                                             text(class="muted") {"Tap + New, place a circle or draw a shape on the map, then choose which friends to watch."}
                                         }
                                     }
-                                    if move ||!people.with(Vec::is_empty)&&!saved.with(Vec::is_empty) {
+                                    if move ||records.with(|r|!r.0.is_empty()||!r.1.is_empty())&&!saved.with(Vec::is_empty) {
                                     scroll(class="alert-filter") {
                                         row(class="friend-strip-row") {
                                             Button(variant=ButtonVariant::Outline,class:seg-on=move ||s.place_peer.with(Option::is_none),on:click=move |_|s.place_peer.set(None)) {"All"}
-                                            for person in move ||people.get(),key=|p|p.0.clone() {
+                                            for person in move ||records.with(filter_options),key=|p|p.clone() {
                                                 {{
                                                     let id=person.0.clone();
                                                     let selected_id=id.clone();
@@ -594,7 +759,7 @@ pub fn PlaceAlerts(open: RwSignal<bool, LocalStorage>) -> impl IntoView {
                                     text(class="muted") {{move ||format!("Drawn shape · {} corners",s.alert_polygon.with(Vec::len))}}
                                     row(class="friends-timer-presets") {
                                         Button(variant=ButtonVariant::Outline,on:click=move |_|use_circle()) {"Use circle"}
-                                        Button(variant=ButtonVariant::Outline,on:click=move |_|draw()) {"Edit corners"}
+                                        Button(variant=ButtonVariant::Outline,on:click=move |_|draw()) {"Edit area"}
                                         Button(disabled=Signal::derive_local(move ||name.with(|n|n.trim().is_empty())||s.alert_polygon.with(Vec::is_empty)),on:click=move |_|add()) {"Next: add alerts"}
                                     }
                                 }
@@ -606,27 +771,50 @@ pub fn PlaceAlerts(open: RwSignal<bool, LocalStorage>) -> impl IntoView {
                         Dialog(open=editing_rule) {
                             DialogContent(class="sheet") {
                                 DialogHeader {
-                                    DialogTitle {{move ||if existing_rule.get() {"Edit alert"} else {"New alert"}}}
+                                    DialogTitle {{move ||if updating() {"Update alert"} else {"New alert"}}}
                                     DialogDescription {{move ||selected.with(|p|p.as_ref().map(|p|p.name.clone()).unwrap_or_default())}}
                                 }
                                 text(class="section-title") {"Who"}
-                                scroll(class="sheet-scroll") {
+                                scroll(class="sheet-scroll alert-who") {
                                     column(class="friends-nav-group") {
-                                        for person in move ||people.get(),key=|p|p.0.clone() {
+                                        for person in move ||records.with(filter_options),key=|p|p.clone() {
                                             {{
                                                 let id=person.0.clone();
                                                 let selected_id=id.clone();
                                                 let alert_id=id.clone();
                                                 view! {
                                                     Button(variant=ButtonVariant::Ghost,class="friends-nav",class:seg-on=move ||peer.with(|p|*p==selected_id),
-                                                        disabled=Signal::derive_local(move ||existing_rule.get()),a11y:label=person.1.clone(),on:click=move |_|peer.set(id.clone())) {
+                                                        disabled=Signal::derive_local(move ||existing_rule.get()),a11y:label=person.1.clone(),on:click=move |_|{
+                                                            // Picking someone with an alert here edits that alert.
+                                                            let current=saved.with_untracked(|list|list.iter().find(|p|Some(p.area())==area.get_untracked()&&!p.no_rule&&rule_key(p)==id).cloned());
+                                                            opt_out.set(current.as_ref().map(|p|p.opt_out.iter().map(ToString::to_string).collect()).unwrap_or_default());
+                                                            if let Some(rule)=current {trigger.set(trigger_key(rule.trigger).into());}
+                                                            peer.set(id.clone());
+                                                        }) {
                                                         text(class="grow") {{person.1.clone()}}
-                                                        if move ||saved.with(|list|list.iter().any(|p|Some(p.area())==area.get()&&!p.no_rule&&p.peer.to_string()==alert_id)) {
+                                                        if move ||saved.with(|list|list.iter().any(|p|Some(p.area())==area.get()&&!p.no_rule&&rule_key(p)==alert_id)) {
                                                             text(class="friend-badge") {"Has alert"}
                                                         }
                                                     }
                                                 }
                                             }}
+                                        }
+                                        if move ||!group_members(&peer.get()).is_empty() {
+                                            text(class="section-title") {"Alert for these members"}
+                                            for member in move ||group_members(&peer.get()),key=|m|m.clone() {
+                                                {{
+                                                    let id=member.0.clone();
+                                                    let on_id=id.clone();
+                                                    let off_id=id.clone();
+                                                    view! {
+                                                        Button(variant=ButtonVariant::Ghost,class="friends-nav",class:seg-on=move ||opt_out.with(|o|!o.contains(&on_id)),a11y:label=member.1.clone(),
+                                                            on:click=move |_|opt_out.update(|o|if let Some(i)=o.iter().position(|p|*p==id){o.remove(i);}else{o.push(id.clone());})) {
+                                                            text(class="grow") {{member.1.clone()}}
+                                                            text(class="muted") {{move ||if opt_out.with(|o|o.contains(&off_id)) {"Skipped"} else {"✓"}}}
+                                                        }
+                                                    }
+                                                }}
+                                            }
                                         }
                                     }
                                 }
@@ -636,13 +824,13 @@ pub fn PlaceAlerts(open: RwSignal<bool, LocalStorage>) -> impl IntoView {
                                         Button(variant=ButtonVariant::Ghost,class:seg-on=move ||trigger.with(|value|value==option.0),on:click=move |_|trigger.set(option.0.into())) {{option.1}}
                                     }
                                 }
-                                text(class="muted") {"Alerts work while this friend shares their location with you."}
+                                text(class="muted") {{move ||if peer.with(|p|p.starts_with("g:")) {"Covers members who join later too. Works while each member shares their location with you."} else {"Alerts work while this friend shares their location with you."}}}
                                 if move ||!status.with(String::is_empty) {text(class="muted") {{move ||status.get()}}}
                                 DialogFooter {
                                     if move ||existing_rule.get() {
-                                        Button(variant=ButtonVariant::Destructive,on:click=move |_|remove_alert()) {"Remove"}
+                                        Button(variant=ButtonVariant::Outline,class="danger-text",on:click=move |_|remove_alert()) {"Remove"}
                                     }
-                                    Button(disabled=Signal::derive_local(move ||peer.with(|p|p=="none")),on:click=move |_|add()) {{move ||if existing_rule.get() {"Save alert"}else{"Add alert"}}}
+                                    Button(disabled=Signal::derive_local(move ||peer.with(|p|p=="none")),on:click=move |_|add()) {{move ||if updating() {"Update alert"}else{"Add alert"}}}
                                 }
                             }
                         }
@@ -653,7 +841,7 @@ pub fn PlaceAlerts(open: RwSignal<bool, LocalStorage>) -> impl IntoView {
                             let mut seen = BTreeSet::new();
                             saved.get().into_iter().filter(|p| {
                                 if let Some(id) = selected { return p.area() == id && !p.no_rule; }
-                                filter.as_ref().is_none_or(|id| !p.no_rule && *id == p.peer.to_string()) && seen.insert(p.area())
+                                records.with(|r| shown(p, filter.as_deref(), &r.0)) && seen.insert(p.area())
                             }).map(|p|(selected.is_some(),p)).collect::<Vec<_>>()
                         },key=|entry|{
                             let (details,p)=entry;
@@ -663,24 +851,23 @@ pub fn PlaceAlerts(open: RwSignal<bool, LocalStorage>) -> impl IntoView {
                                 let (details,place)=entry;
                                 let area_id = place.area();
                                 let rule_id_saved = place.id;
-                                let rule_peer = place.peer.to_string();
+                                let rule_peer = rule_key(&place);
+                                let rule_skip: Vec<String> = place.opt_out.iter().map(ToString::to_string).collect();
+                                let rule_who = who_name(&place);
                                 let rule_trigger = place.trigger;
                                 if details {
                                     AnyView::new(view! {
                                         column { row(class="list-row") {
                                             column(class="grow") {
-                                                text(class="list-title") {{move ||person_name(place.peer.to_string())}}
+                                                text(class="list-title") {{rule_who.clone()}}
                                                 text(class="muted") {{caption(rule_trigger)}}
                                             }
                                             Button(variant=ButtonVariant::Ghost,on:click=move |_|{
                                                 rule_id.set(Some(rule_id_saved));
                                                 existing_rule.set(true);
                                                 peer.set(rule_peer.clone());
-                                                trigger.set(match rule_trigger {
-                                                    places::Trigger::Entering=>"entering",
-                                                    places::Trigger::Exiting=>"exiting",
-                                                    places::Trigger::Both=>"both",
-                                                }.into());
+                                                opt_out.set(rule_skip.clone());
+                                                trigger.set(trigger_key(rule_trigger).into());
                                                 editing_rule.set(true);
                                             }) {"Edit"}
                                         }
@@ -703,8 +890,8 @@ pub fn PlaceAlerts(open: RwSignal<bool, LocalStorage>) -> impl IntoView {
                                                 text(class="chevron") {"›"}
                                             }
                                             for tag in move ||saved.with(|list|list.iter().filter(|p|p.area()==area_id&&!p.no_rule)
-                                                .map(|p|(p.peer,p.trigger)).collect::<Vec<_>>()),key=|tag|(tag.0,tag.1 as u8) {
-                                                text(class="alert-tag") {{move ||format!("{} · {}",person_name(tag.0.to_string()),caption(tag.1))}}
+                                                .map(|p|(who_name(p),caption(p.trigger))).collect::<Vec<_>>()),key=|tag|tag.clone() {
+                                                text(class="alert-tag") {{format!("{} · {}",tag.0,tag.1)}}
                                             }
                                         }
                                     })
@@ -764,7 +951,7 @@ pub fn PlaceAlerts(open: RwSignal<bool, LocalStorage>) -> impl IntoView {
                         text(class="section-title grow") {"Radius"}
                         text(class="list-title") {{move ||format!("{:.0} m",radius_slider.get())}}
                     }
-                    Slider(value=radius_slider,min=100.0,max=10_000.0,step=25.0,label="Radius in meters")
+                    {radius_slider_view(radius_slider)}
                 }
                 if move ||!status.with(String::is_empty) {text(class="muted") {{move ||status.get()}}}
                 row(class="alert-create-actions") {

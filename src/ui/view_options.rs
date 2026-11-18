@@ -15,6 +15,11 @@ pub fn ViewOptions() -> impl IntoView {
     let heat_label = NodeRef::new();
     let friends_label = NodeRef::new();
     let open = RwSignal::new_local(false);
+    let show_alert_areas = move || {
+        open.set(false);
+        #[cfg(target_os = "android")]
+        super::place_alerts::show_on_map(s, None);
+    };
     view! {
         Dialog(open=open) {
             DialogTrigger(variant=ButtonVariant::Secondary,class="map-chip layers-button",a11y:label="Layers and areas") {Icon(icon=LAYERS)}
@@ -62,6 +67,10 @@ pub fn ViewOptions() -> impl IntoView {
                             text(class="muted") {"Positions friends share with you. Gray: not live."}
                         }
                         Switch(class="show-friends",labelled_by=friends_label,checked=Binding::controlled(s.show_friends,move |value|s.set_show_friends(value)))
+                    }
+                    row(class="actions") {
+                        Button(variant=ButtonVariant::Outline,on:click=move |_|{open.set(false);s.places_open.set(true)}) {"Edit alert areas"}
+                        Button(variant=ButtonVariant::Outline,on:click=move |_|show_alert_areas()) {"Show alert areas"}
                     }
                 }
                 text(class="section-title") {"Areas"}

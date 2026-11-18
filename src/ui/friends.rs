@@ -245,11 +245,13 @@ fn load(directory: PathBuf) -> Result<Loaded, String> {
     let mut alerts_by_friend = std::collections::BTreeMap::<String, Vec<String>>::new();
     for area in crate::sharing::places::list(manager.friends()).unwrap_or_default() {
         alerts.insert(area.area(), area.name.clone());
-        if !area.no_rule {
-            alerts_by_friend
-                .entry(area.peer.to_string())
-                .or_default()
-                .push(area.name);
+        for friend in friends.iter().filter(|f| area.watches(f)) {
+            let names = alerts_by_friend
+                .entry(friend.peer_id.to_string())
+                .or_default();
+            if !names.contains(&area.name) {
+                names.push(area.name.clone());
+            }
         }
     }
     let alert_names = alerts.into_values().collect();
