@@ -76,6 +76,17 @@ Install with `adb install -r` using same signing key and package ID to retain
 local history. Do not uninstall or clear app data to work around signature
 mismatches. Use in-app Back up before installation changes.
 
+## Emulators
+
+For testing sharing between two devices on one PC, build x86_64 with
+`ROAMLOG_ANDROID_ABI=x86_64 cargo xtask android --demo`
+(writes `roamlog-demo-x86_64.apk`; needs `rustup target add x86_64-linux-android`).
+Install SDK `emulator` and `system-images;android-35;google_apis;x86_64`, create two
+AVDs, and start them with `-gpu host` (SwiftShader software Vulkan crashes on the
+app's shaders). Each emulator uses about 2 GB RAM. Pair them by opening one's
+invitation link on the other:
+`adb -s emulator-5556 shell am start -a android.intent.action.VIEW -d "'roamlog://pair/…'" dev.traveler.demo`.
+
 ## Isolated demo
 
 Demo uses `dev.traveler.demo`, separate storage, and simulated location only.

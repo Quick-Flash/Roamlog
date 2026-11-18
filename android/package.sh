@@ -10,16 +10,26 @@ case "$profile" in debug|release) ;; *) echo 'Usage: android/package.sh [debug|r
 android_jar="$ANDROID_HOME/platforms/android-35/android.jar"
 build_tools="$ANDROID_HOME/build-tools/35.0.0"
 ndk_tools="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
-for tool in "$android_jar" "$build_tools/aapt" "$build_tools/zipalign" "$build_tools/apksigner" "$ndk_tools/aarch64-linux-android26-clang"; do
+# ROAMLOG_ANDROID_ABI=x86_64 builds for desktop emulators; phones use default arm64-v8a.
+abi="${ROAMLOG_ANDROID_ABI:-arm64-v8a}"
+case "$abi" in
+    arm64-v8a) triple=aarch64-linux-android ;;
+    x86_64) triple=x86_64-linux-android ;;
+    *) echo 'ROAMLOG_ANDROID_ABI must be arm64-v8a or x86_64' >&2; exit 2 ;;
+esac
+clang="$ndk_tools/${triple}26-clang"
+for tool in "$android_jar" "$build_tools/aapt" "$build_tools/zipalign" "$build_tools/apksigner" "$clang"; do
     [[ -f "$tool" ]] || { echo "Missing Android tool: $tool" >&2; exit 1; }
 done
-export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$ndk_tools/aarch64-linux-android26-clang"
-export CC_aarch64_linux_android="$CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER"
-export AR_aarch64_linux_android="$ndk_tools/llvm-ar"
-export CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS="${CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS:-} -C link-arg=-Wl,-z,max-page-size=16384"
+env_triple="${triple//-/_}"
+export "CARGO_TARGET_${env_triple^^}_LINKER=$clang"
+export "CC_${env_triple}=$clang"
+export "AR_${env_triple}=$ndk_tools/llvm-ar"
+rustflags_var="CARGO_TARGET_${env_triple^^}_RUSTFLAGS"
+export "$rustflags_var=${!rustflags_var:-} -C link-arg=-Wl,-z,max-page-size=16384"
 args=()
 if [[ "$profile" == release ]]; then args+=(--release); fi
-cargo build --locked --package roamlog --lib --features sharing --target aarch64-linux-android "${args[@]}"
+cargo build --locked --package roamlog --lib --features sharing --target "$triple" "${args[@]}"
 target_dir="$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
@@ -67,7 +77,7 @@ if sys.argv[2] == '1':
 pathlib.Path(sys.argv[1]).write_text(source)
 PY
 fi
-mkdir -p "$work/lib/arm64-v8a" "$work/res/drawable-nodpi"
+mkdir -p "$work/lib/$abi" "$work/res/drawable-nodpi"
 cp -R android/res/. "$work/res/"
 # Package original artwork unchanged; adaptive drawable supplies mask-safe padding.
 cp assets/logo.png "$work/res/drawable-nodpi/roamlog_logo.png"
@@ -78,16 +88,18 @@ javac --release 11 -cp "$android_jar" -d "$work/java" android/src/dev/roamlog/an
 jar cf "$work/updates.jar" -C "$work/java" .
 "$build_tools/d8" --lib "$android_jar" --min-api 26 --output "$work/dex" "$zgui_dex" "$work/updates.jar"
 cp "$work/dex/classes.dex" "$work/classes.dex"
-cp "$target_dir/aarch64-linux-android/$profile/libroamlog.so" "$work/lib/arm64-v8a/"
-"$ndk_tools/llvm-strip" "$work/lib/arm64-v8a/libroamlog.so"
+cp "$target_dir/$triple/$profile/libroamlog.so" "$work/lib/$abi/"
+"$ndk_tools/llvm-strip" "$work/lib/$abi/libroamlog.so"
 "$build_tools/aapt" package -f -M "$manifest" -I "$android_jar" -S "$work/res" -F "$work/roamlog.apk"
-python3 - "$work" <<'PY'
+python3 - "$work" "$abi" <<'PY'
 import pathlib, sys, zipfile
 root = pathlib.Path(sys.argv[1])
+lib = f'lib/{sys.argv[2]}/libroamlog.so'
 with zipfile.ZipFile(root / 'roamlog.apk', 'a') as apk:
     apk.write(root / 'classes.dex', 'classes.dex', compress_type=zipfile.ZIP_DEFLATED)
-    apk.write(root / 'lib/arm64-v8a/libroamlog.so', 'lib/arm64-v8a/libroamlog.so', compress_type=zipfile.ZIP_STORED)
+    apk.write(root / lib, lib, compress_type=zipfile.ZIP_STORED)
 PY
+if [[ "$abi" != arm64-v8a ]]; then name="$name-$abi"; fi
 mkdir -p "$target_dir/$profile/apk"
 output="$target_dir/$profile/apk/$name.apk"
 "$build_tools/zipalign" -f -P 16 4 "$work/roamlog.apk" "$output"

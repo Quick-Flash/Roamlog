@@ -32,14 +32,18 @@
 .gps-dot { position: absolute; left: 0; top: 0; width: 16px; height: 16px; box-sizing: border-box; border-radius: 50%; background: #4285f4; border: 2.5px solid #ffffff; pointer-events: none; }
 .attribution { max-width: calc(100% - 12px); box-sizing: border-box; position: absolute; right: 6px; bottom: 5px; background: var(--zui-color-card); color: var(--zui-color-muted-foreground); border-radius: 4px; padding: 3px 5px; font-size: 10px; }
 
-.trip-bar { gap: 8px; padding: 10px 12px 8px; background: var(--zui-color-card); border-top: 1px solid var(--zui-color-border); flex-shrink: 0; }
-.metric-row { align-items: baseline; gap: 10px; }
-.trip-distance { font-size: 22px; font-weight: 650; }
+/* Trip card: same 76 px footprint idle, recording and paused, so map controls never move. */
+.trip-bar { gap: 8px; height: 76px; box-sizing: border-box; padding: 10px; align-items: center; background: var(--zui-color-card); border: 1px solid var(--zui-color-border); border-radius: 18px; flex-shrink: 0; }
+.trip-bar .category-row, .trip-metrics { flex: 1; min-width: 0; gap: 4px; }
+.metric-row { align-items: center; gap: 6px; }
+.trip-distance { font-size: 22px; font-weight: 650; letter-spacing: -0.3px; }
 .trip-clock { font-size: 16px; font-weight: 600; color: var(--zui-color-muted-foreground); }
 .category-row { gap: 8px; align-items: center; }
 .category-select { flex: 1; min-width: 0; }
 .trip-actions { gap: 8px; }
-.trip-actions .zui-button { flex: 1; padding: 0 8px; }
+.trip-actions { flex-shrink: 0; }
+.trip-actions .zui-button { min-width: 50px; padding: 0 10px; }
+.trip-actions .start-trip { min-width: 132px; }
 
 .category-dialog, .map-dialog { width: 88%; max-width: 420px; }
 .map-sizes { gap: 8px; }
@@ -68,7 +72,7 @@
 .stat-track { height: 8px; border-radius: 4px; background: var(--zui-color-muted); overflow: hidden; }
 .stat-bar { height: 8px; border-radius: 4px; background: var(--zui-color-primary); }
 /* Keep dialogs above on-screen keyboard: centre in space left over, never under it. */
-.category-dialog, .map-dialog, .trips-dialog, .sheet { top: calc(50% - var(--zgui-keyboard-height, 0px) / 2); max-height: calc(100% - 32px - var(--zgui-keyboard-height, 0px)); }
+.category-dialog, .map-dialog, .trips-dialog, .sheet { top: calc(50% - var(--zgui-keyboard-height, 0px) / 2) !important; max-height: calc(100% - 32px - var(--zgui-keyboard-height, 0px)) !important; }
 
 /* Theme: floating map controls are cards with hairline border and soft shadow. */
 .map-chip, .map-button, .map-history, .area-bar, .map-message { border: 1px solid var(--zui-color-border); box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25); }
@@ -79,7 +83,6 @@
 .segmented .unit { height: 32px; min-height: 32px; }
 /* Over Button variant fill. */
 .segmented .zui-button.seg-on { background-color: var(--zui-color-accent) !important; color: var(--zui-color-accent-foreground) !important; font-weight: 600; }
-.trip-distance { letter-spacing: -0.3px; }
 .history-summary { font-weight: 600; }
 
 /* Sheets: consistent width, sections, lists. */
@@ -99,13 +102,18 @@
 .wide { width: 100%; }
 .actions { gap: 8px; }
 .actions .zui-button { flex: 1; }
-.filter-row { gap: 8px; align-items: center; }
+.filter-row { gap: 8px; align-items: flex-start; }
+.history-dates-block { flex: 1; min-width: 0; gap: 4px; }
+.selection-row { align-items: center; gap: 4px; }
+.selection-row .zui-button { height: 36px; min-height: 36px; padding: 0 10px; }
+.trip-number { font-size: 13px; }
+.trip-meta { align-items: baseline; gap: 6px; flex-wrap: wrap; }
+.trip-new { font-size: 12px; font-weight: 600; color: #1f9d55; }
 .filter-row .history-filter { flex: 1; min-width: 0; }
 .stat-cards { gap: 8px; }
 .stat-card { flex: 1; gap: 2px; padding: 12px; border-radius: 12px; background: var(--zui-color-card); border: 1px solid var(--zui-color-border); }
 .stat-value { font-size: 20px; font-weight: 700; }
 .toggle-text { gap: 2px; flex: 1; min-width: 0; }
-.map-button { font-size: 18px; }
 .map-rotor { position: absolute; transform-origin: 50% 50%; pointer-events: none; }
 .compass-needle { width: 26px; height: 26px; transform-origin: 50% 50%; }
 .compass-needle .zui-icon { width: 26px !important; height: 26px !important; }
@@ -145,7 +153,7 @@
 .friend-label { padding: 2px 6px; border-radius: 8px; background: var(--zui-color-card); color: var(--zui-color-card-foreground); font-size: 11px; white-space: nowrap; }
 .friend-stale .friend-dot { background: #8a8f98; }
 .friend-stale .friend-label { color: var(--zui-color-muted-foreground); }
-.friend-row { gap: 6px; padding: 10px 0; border-top: 1px solid var(--zui-color-border); }
+.friend-row { gap: 4px; padding: 8px 0; border-top: 1px solid var(--zui-color-border); }
 .friend-name { font-weight: 600; }
 .qr-frame { align-self: center; padding: 8px; background: #ffffff; border-radius: 8px; }
 .qr-image { width: 280px; height: 280px; }
@@ -156,7 +164,6 @@
 .row-actions { gap: 6px; flex-wrap: wrap; }
 .row-actions .zui-button { flex: 1; min-width: 0; height: 34px; min-height: 34px; padding: 0 8px; font-size: 13px; }
 .create-row { gap: 8px; align-items: center; }
-.create-row .grow { flex: 1; min-width: 0; }
 .history-sheet { height: min(88vh, 820px); }
 /* Dropdown list at least as wide as its button. */
 .zui-select__list { min-width: var(--zui-popper-anchor-width, 128px) !important; }
@@ -181,8 +188,7 @@
 .friend-text { flex: 1; min-width: 0; gap: 1px; }
 .small { font-size: 12px; }
 .access-select { width: 104px; height: 34px; min-height: 34px; font-size: 13px; }
-.row-menu, .icon-button { width: 36px; height: 36px; min-height: 36px; padding: 0; }
-.friend-row { padding: 8px 0; gap: 4px; }
+.row-menu { width: 36px; height: 36px; min-height: 36px; padding: 0; flex-shrink: 0; }
 .confirm-line { gap: 6px; align-items: center; }
 .confirm-line .zui-button { height: 32px; min-height: 32px; padding: 0 12px; }
 .pair-panel { gap: 8px; padding: 10px 12px; border-radius: 12px; border: 1px solid var(--zui-color-border); }
@@ -208,3 +214,138 @@
 .sheet-scroll, .trips-scroll, .area-scroll, .trip-editor-scroll { touch-action: pan-y; }
 .you-avatar { width: 48px; height: 48px; min-height: 48px; padding: 0; border-radius: 24px; }
 .avatar-empty { align-items: center; justify-content: center; border: 2px dashed var(--zui-color-muted-foreground); box-sizing: border-box; }
+
+.friend-pin.place-pin { pointer-events: auto; }
+/* Place center target while picking; viewport center is camera center. */
+.map-crosshair { position: absolute; left: 50%; top: 50%; width: 24px; height: 24px; box-sizing: border-box; border-radius: 50%; border: 3px solid var(--zui-color-primary); box-shadow: 0 0 0 2px #ffffff; transform: translate(-50%, -50%); pointer-events: none; }
+
+/* Main tabs and floating map controls. */
+.tab-stage { flex: 1; min-height: 0; position: relative; gap: 0; }
+.tab-page { position: absolute; inset: 0; width: 100%; height: 100%; max-width: none; box-sizing: border-box; padding: calc(14px + var(--zgui-safe-area-top, 0px)) 16px 12px; gap: 12px; background: var(--zui-color-background); z-index: 2; }
+.page-title { font-size: 26px; font-weight: 700; }
+.page-scroll, .tab-page .settings-scroll { flex: 1; min-height: 0; max-height: none; }
+.page-list, .friends-list { gap: 10px; }
+.tab-page .friends-tabs { flex: 0 0 auto; }
+.bottom-tabs { flex-shrink: 0; height: 62px; gap: 4px; padding: 4px 8px; border-top: 1px solid var(--zui-color-border); background: var(--zui-color-card); }
+.bottom-tabs .zui-button { flex: 1; min-width: 0; height: 52px; flex-direction: column; padding: 0 3px; gap: 3px; font-size: 12px; color: var(--zui-color-muted-foreground); }
+.bottom-tabs .tab-selected { color: var(--zui-color-primary); background: var(--zui-color-muted); }
+.map-top { left: 10px; right: 10px; max-width: none; align-items: stretch; flex-wrap: nowrap; gap: 7px; }
+.map-summary { align-items: center; gap: 8px; min-height: 66px; border-radius: 17px; padding: 7px 10px; background: var(--zui-color-card); border: 1px solid var(--zui-color-border); box-shadow: 0 3px 12px rgba(0,0,0,.18); }
+.map-summary-link { flex: 1; min-width: 0; justify-content: flex-start; height: 50px; padding: 0 4px; }
+.map-summary-link column { width: 100%; align-items: flex-start; gap: 2px; }
+.summary-title { font-weight: 700; font-size: 15px; }
+.friend-strip { margin-right: 60px; height: 45px; min-height: 45px; overflow-x: auto; overflow-y: hidden; }
+.friend-strip-row { width: max-content; align-items: center; gap: 6px; }
+.friend-strip-chip { flex-shrink: 0; gap: 5px; }
+.map-heading-controls { position: absolute; top: calc(88px + var(--zgui-safe-area-top, 0px)); right: 12px; gap: 8px; }
+.map-heading-controls .compass { position: relative; top: auto; right: auto; }
+.map-controls { top: auto; bottom: 30px; right: 8px; gap: 7px; align-items: center; }
+.zoom-pair { gap: 0; border-radius: 22px; overflow: hidden; background: var(--zui-color-card); border: 1px solid var(--zui-color-border); }
+.zoom-pair .map-button { border: none; border-radius: 0; box-shadow: none; }
+.map-button.locate-button { width: 52px; height: 52px; border-radius: 26px; color: var(--zui-color-primary); }
+.map-button.locating { background: var(--zui-color-primary); color: var(--zui-color-primary-foreground); }
+.map-message { top: auto; bottom: 32px; right: 72px; }
+.record-dot { width: 9px; height: 9px; border-radius: 50%; background: #d92d20; }
+.record-dot.paused { background: var(--zui-color-muted-foreground); }
+.area-bar { right: 68px; flex-wrap: wrap; }
+.circle-handle { position: absolute; top: 0; left: 0; width: 44px; height: 44px; align-items: center; justify-content: center; pointer-events: auto; }
+.circle-handle-dot { position: absolute; left: 13px; top: 13px; box-sizing: border-box; width: 18px; height: 18px; border: 2px solid white; border-radius: 50%; background: #aa6eff; pointer-events: none; }
+.area-result-title { font-weight: 700; }
+.coverage-banner { gap: 8px; align-items: center; padding: 8px; border-radius: 12px; background: var(--zui-color-muted); }
+.page-heading { align-items: center; gap: 10px; }
+.alert-card { gap: 8px; padding: 12px; border-radius: 16px; border: 1px solid var(--zui-color-border); background: var(--zui-color-card); }
+.alert-tag { border-radius: 10px; padding: 7px 9px; background: var(--zui-color-muted); }
+.map-retry { align-self: flex-start; }
+.map-card .map-button { border-radius: 22px; }
+.map-card .zoom-pair .map-button { border-radius: 0; }
+.map-card .locate-button { border-radius: 26px; }
+.trip-state { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.map-tab-label { align-items: center; gap: 5px; }
+.friend-initial { justify-content: center; align-items: center; background: var(--zui-color-muted); font-size: 12px; font-weight: 700; }
+.friend-strip-chip.friend-stale { color: var(--zui-color-muted-foreground); }
+
+/* Map extends under its floating trip card. */
+.tab-stage > .trip-bar { position: absolute; left: 10px; right: 10px; bottom: 10px; margin: 0; box-shadow: 0 4px 16px rgba(0,0,0,.24); }
+.tab-stage > .update-notice { position: absolute; left: 10px; right: 70px; bottom: 106px; border-radius: 14px; flex-wrap: wrap; }
+.map-card .attribution { bottom: 88px; }
+.map-card .area-bar, .map-card .map-message { bottom: 106px; }
+.map-card .map-controls { bottom: 116px; }
+.map-card .terrain-help { bottom: 172px; }
+.map-summary .layers-button { width: 44px; min-width: 44px; height: 44px; min-height: 44px; padding: 0; border: 0; border-radius: 22px; box-shadow: none; background: var(--zui-color-muted); }
+.alert-page .alert-back { align-self: flex-start; }
+
+.friends-nav-group { border: 1px solid var(--zui-color-border); border-radius: 14px; background: var(--zui-color-card); overflow: hidden; }
+.friends-sheet .friends-nav { width: 100%; min-height: 56px; height: auto; padding: 8px 12px; gap: 10px; justify-content: flex-start; text-align: left; border-radius: 0; }
+.friends-nav + .friends-nav { border-top: 1px solid var(--zui-color-border); }
+.friends-nav .grow { align-items: flex-start; min-width: 0; }
+.friends-avatar { width: 40px; height: 40px; flex-shrink: 0; border-radius: 20px; overflow: hidden; justify-content: center; align-items: center; background: var(--zui-color-muted); border: 2px solid #8a8f98; font-weight: 700; }
+.friends-avatar.avatar-live { border-color: #16a34a; }
+.friend-badge { flex-shrink: 0; padding: 4px 8px; border-radius: 10px; background: var(--zui-color-muted); font-size: 11px; }
+.friend-detail { gap: 12px; }
+.friends-timer-presets { gap: 6px; flex-wrap: wrap; }
+.friends-sheet .friends-mode-choice { justify-content: space-between; height: auto; min-height: 48px; gap: 12px; }
+.friends-sheet .friends-mode-choice.seg-on { border-color: var(--zui-color-primary); background: var(--zui-color-accent); }
+
+/* Checkbox: framework style does not reach this element; show one mark by state. */
+.zui-checkbox { display: inline-grid; align-items: center; justify-items: center; width: 22px; height: 22px; flex: none; box-sizing: border-box; border: 2px solid var(--zui-color-muted-foreground); border-radius: 6px; color: var(--zui-color-primary-foreground); }
+.zui-checkbox:checked { background-color: var(--zui-color-primary); border-color: var(--zui-color-primary); }
+.zui-checkbox > .zui-icon { grid-area: 1 / 1; display: none; width: 16px; height: 16px; }
+.zui-checkbox:checked > .zui-checkbox__tick { display: block; }
+.alert-filter { min-height: 46px; height: 46px; overflow-x: auto; overflow-y: hidden; }
+.alert-preview { height: 150px; overflow: hidden; align-items: center; justify-content: center; border-radius: 12px; background: var(--zui-color-muted); }
+.alert-shape { position: relative; overflow: hidden; flex-shrink: 0; border-radius: 12px; background: var(--zui-color-muted); }
+.alert-shape-edge { position: absolute; left: 0; top: 0; height: 2px; transform-origin: 0 50%; background: #aa6eff; }
+.map-profile { position: absolute; left: 10px; right: 70px; bottom: 106px; gap: 8px; padding: 10px; border: 1px solid var(--zui-color-border); border-radius: 16px; background: var(--zui-color-card); box-shadow: 0 4px 16px rgba(0,0,0,.22); }
+.map-profile-avatar { width: 58px; height: 58px; flex-shrink: 0; border-radius: 29px; align-items: center; justify-content: center; overflow: hidden; background: var(--zui-color-muted); font-size: 22px; font-weight: 700; }
+.alert-filter .seg-on, .alert-page .friends-nav.seg-on, .sheet .friends-nav.seg-on { background: var(--zui-color-accent); border-color: var(--zui-color-primary); color: var(--zui-color-accent-foreground); }
+
+.circle-setup .bottom-tabs, .circle-setup .trip-bar, .circle-setup .update-notice,
+.circle-setup .map-top, .circle-setup .map-heading-controls, .circle-setup .map-controls,
+.circle-setup .area-bar, .circle-setup .map-crosshair, .circle-setup .map-message { display: none; }
+.circle-setup .map-viewport { bottom: min(200px, 44%); }
+.circle-setup .attribution { bottom: 4px; }
+.alert-create-header { position: absolute; top: calc(10px + var(--zgui-safe-area-top, 0px)); left: 10px; right: 10px; z-index: 3; gap: 6px; pointer-events: none; }
+.alert-create-title { min-height: 52px; align-items: center; gap: 8px; padding: 0 6px 0 14px; border: 1px solid var(--zui-color-border); border-radius: 16px; background: var(--zui-color-card); box-shadow: 0 2px 8px rgba(0,0,0,.18); pointer-events: auto; }
+.alert-create-hint { align-self: center; align-items: center; gap: 3px; padding: 0 6px 0 10px; border-radius: 10px; background: var(--zui-color-card); pointer-events: auto; }
+.alert-create-hint .zui-button { padding: 0 8px; }
+.alert-create-panel { position: absolute; bottom: 0; left: 0; right: 0; z-index: 3; border: 1px solid var(--zui-color-border); background: var(--zui-color-card); padding: 8px 16px 18px; gap: 10px; border-radius: 20px 20px 0 0; box-shadow: 0 -4px 20px rgba(0,0,0,.18); }
+.alert-create-grip { align-self: center; width: 36px; height: 4px; background: var(--zui-color-border); border-radius: 2px; }
+.alert-create-field { gap: 5px; }
+.alert-create-field .section-title { margin-top: 0; }
+.alert-create-actions { gap: 8px; }
+.alert-create-actions .zui-button { flex: 1; min-width: 0; height: 48px; padding: 0 6px; }
+.alert-create-actions .alert-create-next { flex: 1.3; }
+.circle-draft-outline, .circle-draft-spoke, .circle-draft-caption { position: absolute; left: 0; top: 0; pointer-events: none; }
+.circle-draft-outline { box-sizing: border-box; border: 3px dashed #aa6eff; border-radius: 50%; background: rgba(170,110,255,.14); }
+.circle-draft-spoke { height: 0; border-top: 2px dashed #aa6eff; }
+.circle-draft-caption { color: #6b2bd9; background: var(--zui-color-card); border-radius: 6px; padding: 1px 4px; font-size: 12px; font-weight: 700; }
+.circle-handle-dot { left: 8px; top: 8px; width: 28px; height: 28px; border: 3px solid var(--zui-color-primary); background: transparent; box-shadow: 0 0 0 2px white; }
+.circle-handle-dot.circle-edge { left: 6px; top: 6px; width: 32px; height: 32px; border: 3px solid #aa6eff; background: white; box-shadow: 0 1px 6px rgba(0,0,0,.24); }
+
+/* Sub-page back: full 44 px target, chevron large enough to read as navigation. */
+.page-heading .page-back { width: 44px; min-width: 44px; height: 44px; min-height: 44px; padding: 0; font-size: 30px; line-height: 1; flex-shrink: 0; }
+/* Sharing mode choices: label above its description, not squeezed beside it. */
+.friends-sheet .friends-mode-choice { flex-direction: column; align-items: flex-start; justify-content: center; height: auto; min-height: 58px; padding: 8px 14px; gap: 2px; text-align: left; }
+/* Timer presets share each row evenly, so a wrapped last chip doesn't sit alone. */
+.friends-timer-presets .zui-button { flex: 1 1 auto; }
+.zui-button.danger-text { color: var(--zui-color-destructive) !important; border-color: color-mix(in oklab, var(--zui-color-destructive) 45%, transparent); }
+/* Initial-letter avatars: centre the letter (box is not a flex container by default). */
+.friend-initial { display: flex; }
+/* Friend page header: picture large enough to recognise someone. */
+.friend-detail .alert-card .friends-avatar { width: 56px; height: 56px; border-radius: 28px; font-size: 20px; }
+.friend-detail .alert-card .page-heading .muted { font-size: 14px; }
+.friends-sheet .share-card .friends-nav { min-height: 44px; padding: 0 12px; }
+/* Alert area name on map: tap to open that area. */
+.area-label { position: absolute; left: 0; top: 0; padding: 6px 12px; border-radius: 14px; background: #6b2bd9; color: #ffffff; font-size: 13px; font-weight: 600; white-space: nowrap; box-shadow: 0 2px 8px rgba(0,0,0,.3); border: 2px solid #ffffff; }
+.show-areas { align-self: stretch; }
+.map-profile-actions { gap: 8px; }
+.map-profile-actions .zui-button { flex: 1; }
+.alert-card-button { width: 100%; height: auto; min-height: 0; flex-direction: column; align-items: stretch; justify-content: flex-start; text-align: left; padding: 12px; }
+.alert-card-button .chevron { font-size: 20px; color: var(--zui-color-muted-foreground); }
+.zui-button.alert-card-button { height: auto !important; min-height: 0 !important; padding: 12px !important; background: var(--zui-color-card) !important; border: 1px solid var(--zui-color-border) !important; border-radius: 16px; }
+.alert-card-button > .page-heading { width: 100%; }
+.stat-period-head { align-items: center; gap: 8px; margin-top: 6px; }
+.stat-period .zui-button { height: 32px; min-height: 32px; padding: 0 12px; flex: none; }
+.stat-cards .stat-card { min-width: 0; }
+.trip-editor-scroll .category-select { width: 100%; }
+.summary-reset { height: 40px; min-height: 40px; padding: 0 12px; border-radius: 20px; background: var(--zui-color-muted); font-weight: 600; flex-shrink: 0; }

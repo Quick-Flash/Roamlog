@@ -8,10 +8,14 @@ use std::io::Read;
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Place {
     pub id: u32,
+    #[serde(default)]
+    pub area_id: u32,
     pub name: String,
     pub center: Point,
     pub radius_m: f64,
     pub peer: EndpointId,
+    #[serde(default)]
+    pub no_rule: bool,
     #[serde(default)]
     pub polygon: Vec<Point>,
     #[serde(default)]
@@ -25,21 +29,6 @@ pub enum Trigger {
     Exiting,
     #[default]
     Both,
-}
-pub fn configure(friends: &Friends, id: u32, polygon: Vec<Point>, trigger: Trigger) -> Result<()> {
-    if polygon.len() < 3 || polygon.len() > 256 || polygon.iter().any(|p| !p.valid()) {
-        return Err("Draw 3–256 valid corners".into());
-    }
-    let _lock = friends.lock()?;
-    let mut saved = load(friends)?;
-    let place = saved
-        .places
-        .iter_mut()
-        .find(|p| p.id == id)
-        .ok_or("Place missing")?;
-    place.polygon = polygon;
-    place.trigger = trigger;
-    save(friends, &saved)
 }
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 struct State {
@@ -75,10 +64,11 @@ fn load(friends: &Friends) -> Result<Saved> {
     Ok(saved)
 }
 fn save(friends: &Friends, saved: &Saved) -> Result<()> {
-    atomic_json(
-        &friends.directory().join("places.json"),
-        &serde_json::to_vec(saved)?,
-    )
+    let bytes = serde_json::to_vec(saved)?;
+    if bytes.len() > 65_536 {
+        return Err("Alert area storage is full".into());
+    }
+    atomic_json(&friends.directory().join("places.json"), &bytes)
 }
 fn validate(name: &str, center: Point, radius: f64) -> Result<()> {
     if name.trim().is_empty()
@@ -96,25 +86,129 @@ pub fn list(friends: &Friends) -> Result<Vec<Place>> {
     let _lock = friends.lock()?;
     Ok(load(friends)?.places)
 }
-pub fn add(
+#[cfg(test)]
+fn add(
     friends: &Friends,
     name: &str,
     center: Point,
-    radius: f64,
+    radius_m: f64,
     peer: EndpointId,
 ) -> Result<()> {
-    validate(name, center, radius)?;
+    set_rule(
+        friends,
+        None,
+        name,
+        center,
+        radius_m,
+        Some(peer),
+        Trigger::Both,
+        Vec::new(),
+    )
+    .map(|_| ())
+}
+
+impl Place {
+    pub fn area(&self) -> u32 {
+        if self.area_id == 0 {
+            self.id
+        } else {
+            self.area_id
+        }
+    }
+
+    pub fn outline(&self) -> Vec<Point> {
+        if !self.polygon.is_empty() {
+            return self.polygon.clone();
+        }
+        circle_outline(self.center, self.radius_m)
+    }
+}
+
+pub fn circle_outline(center: Point, radius: f64) -> Vec<Point> {
+    let lat = center.lat.to_radians();
+    let lon = center.lon.to_radians();
+    let angle = radius / 6_371_008.8;
+    (0..64)
+        .map(|i| {
+            let bearing = f64::from(i) * std::f64::consts::TAU / 64.;
+            let next = (lat.sin() * angle.cos() + lat.cos() * angle.sin() * bearing.cos()).asin();
+            let east = lon
+                + (bearing.sin() * angle.sin() * lat.cos())
+                    .atan2(angle.cos() - lat.sin() * next.sin());
+            Point {
+                lat: next.to_degrees(),
+                lon: (east.to_degrees() + 180.).rem_euclid(360.) - 180.,
+            }
+        })
+        .collect()
+}
+
+pub fn set_rule(
+    friends: &Friends,
+    existing: Option<u32>,
+    name: &str,
+    center: Point,
+    radius: f64,
+    peer: Option<EndpointId>,
+    trigger: Trigger,
+    polygon: Vec<Point>,
+) -> Result<u32> {
+    if !polygon.is_empty()
+        && (polygon.len() < 3 || polygon.len() > 256 || polygon.iter().any(|point| !point.valid()))
+    {
+        return Err("Draw a boundary with 3–256 valid corners".into());
+    }
     let _lock = friends.lock()?;
-    if !friends
-        .list_locked()?
-        .iter()
-        .any(|f| f.peer_id == peer && !f.blocked)
+    if let Some(peer) = peer
+        && !friends
+            .list_locked()?
+            .iter()
+            .any(|f| f.peer_id == peer && !f.blocked)
     {
         return Err("Choose a current, unblocked friend".into());
     }
+    if existing.is_some() && peer.is_none() {
+        return Err("Choose a friend for this rule".into());
+    }
+    let no_rule = peer.is_none();
+    let peer = peer.unwrap_or(friends.owner);
     let mut saved = load(friends)?;
+    let area = if let Some(id) = existing {
+        let area = saved
+            .places
+            .iter()
+            .find(|p| p.area() == id)
+            .ok_or("Place was removed")?
+            .clone();
+        if let Some(rule) = saved
+            .places
+            .iter_mut()
+            .find(|p| p.area() == id && p.peer == peer)
+        {
+            rule.trigger = trigger;
+            rule.no_rule = false;
+            save(friends, &saved)?;
+            return Ok(id);
+        }
+        Some(area)
+    } else {
+        validate(name, center, radius)?;
+        None
+    };
+    if let Some(id) = existing
+        && let Some(rule) = saved
+            .places
+            .iter_mut()
+            .find(|p| p.area() == id && p.no_rule)
+    {
+        rule.peer = peer;
+        rule.trigger = trigger;
+        rule.no_rule = false;
+        save(friends, &saved)?;
+        return Ok(id);
+    }
     if saved.places.len() >= 64 {
-        return Err("Maximum 64 place alerts".into());
+        return Err("Maximum 64 alerts across alert areas".into());
     }
     saved.next_id = saved
         .next_id
@@ -122,21 +216,81 @@ pub fn add(
         .filter(|id| *id < 1_000_000)
         .ok_or("place ID limit reached")?;
     saved.places.push(Place {
-        polygon: Vec::new(),
-        trigger: Trigger::Both,
+        polygon: area.as_ref().map_or(polygon, |p| p.polygon.clone()),
+        trigger,
+        area_id: existing.unwrap_or(saved.next_id),
         id: saved.next_id,
-        name: name.trim().into(),
-        center,
-        radius_m: radius,
+        name: area
+            .as_ref()
+            .map(|p| p.name.clone())
+            .unwrap_or_else(|| name.trim().into()),
+        center: area.as_ref().map_or(center, |p| p.center),
+        radius_m: area.as_ref().map_or(radius, |p| p.radius_m),
         peer,
+        no_rule,
         state: State::default(),
     });
-    save(friends, &saved)
+    save(friends, &saved)?;
+    Ok(existing.unwrap_or(saved.next_id))
 }
 pub fn remove(friends: &Friends, id: u32) -> Result<()> {
     let _lock = friends.lock()?;
     let mut saved = load(friends)?;
-    saved.places.retain(|p| p.id != id);
+    if let Some(rule) = saved.places.iter().find(|p| p.id == id) {
+        let area = rule.area();
+        if saved.places.iter().any(|p| p.area() == area && p.id != id) {
+            saved.places.retain(|p| p.id != id);
+        } else if let Some(rule) = saved.places.iter_mut().find(|p| p.id == id) {
+            rule.no_rule = true;
+            rule.state = State::default();
+        }
+    }
+    save(friends, &saved)
+}
+
+pub fn edit_area(
+    friends: &Friends,
+    area: u32,
+    name: &str,
+    center: Point,
+    radius: f64,
+    polygon: Option<Vec<Point>>,
+) -> Result<()> {
+    validate(name, center, radius)?;
+    if polygon
+        .as_ref()
+        .is_some_and(|p| p.len() < 3 || p.len() > 256 || p.iter().any(|point| !point.valid()))
+    {
+        return Err("Draw a boundary with 3–256 valid corners".into());
+    }
+    let _lock = friends.lock()?;
+    let mut saved = load(friends)?;
+    let mut found = false;
+    for place in saved.places.iter_mut().filter(|p| p.area() == area) {
+        found = true;
+        place.name = name.trim().to_owned();
+        if let Some(points) = polygon.as_ref() {
+            if place.polygon != *points {
+                place.polygon = points.clone();
+                place.center = center;
+                place.state = State::default();
+            }
+        } else if place.polygon.is_empty() && (place.center != center || place.radius_m != radius) {
+            place.center = center;
+            place.radius_m = radius;
+            place.state = State::default();
+        }
+    }
+    if !found {
+        return Err("Alert area was removed".into());
+    }
+    save(friends, &saved)
+}
+
+pub fn remove_area(friends: &Friends, area: u32) -> Result<()> {
+    let _lock = friends.lock()?;
+    let mut saved = load(friends)?;
+    saved.places.retain(|p| p.area() != area);
     save(friends, &saved)
 }
 
@@ -248,7 +402,7 @@ pub(super) fn observe(
     let mut saved = load(friends)?;
     let mut changed = false;
     let mut notices = Vec::new();
-    for place in &mut saved.places {
+    for place in saved.places.iter_mut().filter(|p| !p.no_rule) {
         if !records
             .iter()
             .any(|f| f.peer_id == place.peer && !f.blocked)
@@ -282,7 +436,8 @@ pub(super) fn confirmation_requests(friends: &Friends, now: i64) -> Result<()> {
             .places
             .into_iter()
             .filter(|p| {
-                p.state.candidate.is_some()
+                !p.no_rule
+                    && p.state.candidate.is_some()
                     && now.saturating_sub(p.state.since_ms) >= 15_000
                     && now.saturating_sub(p.state.last_ms) <= 120_000
             })
@@ -320,6 +475,77 @@ mod tests {
             path: None,
         }
     }
+    #[test]
+    fn drawn_boundary_is_shared_by_rules_and_can_be_reshaped() {
+        let dir = tempfile::tempdir().unwrap();
+        let owner = iroh::SecretKey::generate().public();
+        let peer = iroh::SecretKey::generate().public();
+        let friends = Friends::open(dir.path(), owner).unwrap();
+        friends.add_confirmed(peer, "Sam".into()).unwrap();
+        let polygon = vec![
+            Point {
+                lat: -0.001,
+                lon: -0.001,
+            },
+            Point {
+                lat: -0.001,
+                lon: 0.001,
+            },
+            Point {
+                lat: 0.001,
+                lon: 0.001,
+            },
+            Point {
+                lat: 0.001,
+                lon: -0.001,
+            },
+        ];
+        let center = polygon[0];
+        let id = set_rule(
+            &friends,
+            None,
+            "Park",
+            center,
+            200.,
+            None,
+            Trigger::Both,
+            polygon.clone(),
+        )
+        .unwrap();
+        set_rule(
+            &friends,
+            Some(id),
+            "",
+            center,
+            200.,
+            Some(peer),
+            Trigger::Entering,
+            Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(list(&friends).unwrap()[0].outline(), polygon);
+        observe(&friends, &[observation(peer, 100_000, 0.01)], 100_000).unwrap();
+        observe(&friends, &[observation(peer, 130_000, 0.)], 130_000).unwrap();
+        assert_eq!(
+            observe(&friends, &[observation(peer, 145_000, 0.)], 145_000).unwrap()[0].1,
+            "Sam arrived at Park"
+        );
+        let moved = polygon
+            .iter()
+            .map(|p| Point {
+                lat: p.lat,
+                lon: p.lon + 0.01,
+            })
+            .collect::<Vec<_>>();
+        edit_area(&friends, id, "Park", moved[0], 200., Some(moved.clone())).unwrap();
+        assert_eq!(list(&friends).unwrap()[0].outline(), moved);
+        assert!(
+            observe(&friends, &[observation(peer, 160_000, 0.)], 160_000)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
     #[test]
     fn places_confirm_transitions_persist_and_ignore_stale_relay_uncertain_fixes() {
         let dir = tempfile::tempdir().unwrap();
@@ -391,6 +617,9 @@ mod tests {
         assert!(add(&friends, "Home", Point { lat: 91., lon: 0. }, 250., peer).is_err());
         add(&friends, "Home", Point { lat: 0., lon: 0. }, 250., peer).unwrap();
         remove(&friends, list(&friends).unwrap()[0].id).unwrap();
+        let place = &list(&friends).unwrap()[0];
+        assert!(place.no_rule);
+        remove_area(&friends, place.area()).unwrap();
         assert!(list(&friends).unwrap().is_empty());
     }
 

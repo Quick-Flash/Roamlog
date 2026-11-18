@@ -27,13 +27,9 @@ pub(super) fn duration(ms: u64) -> String {
 pub fn History() -> impl IntoView {
     let s = UiState::current();
     view! {
-        Dialog(open=s.trips_open) {
-            DialogTrigger(variant=ButtonVariant::Outline) {"History"}
-            DialogContent(class="sheet history-sheet") {
-                DialogHeader {
-                    DialogTitle {"History"}
-                    DialogDescription {{move ||s.data.with(|d|format!("{} trips · {} lifetime",d.trips.len(),s.distance(d.total_distance(None))))}}
-                }
+        if move ||s.trips_open.get() {
+            column(class="tab-page history-sheet") {
+                text(class="page-title") {"History"}
                 PersonPicker()
                 Tabs(default_value="trips".to_string(),class="history-tabs") {
                     TabsList(class="tabs-list") {
@@ -130,21 +126,39 @@ fn TripsTab() -> impl IntoView {
         })
     };
     let coverage = move || {
+        // Coverage is computed for what the map shows; only quote it when the list matches.
+        if period.get() != "all" || parse_filter(&browse.get()) != Some(s.history_filter.get()) {
+            return "Show these trips on map to see their road coverage.".to_string();
+        }
         if s.coverage_filter.get() != s.history_filter.get() {
             return "Updating road coverage…".to_string();
         }
         let (total, traveled) = s.road_totals.get();
-        if total == 0.0 {
-            "Road coverage appears after recording with offline map.".to_string()
-        } else {
-            format!(
-                "{} of {} nearby roads traveled ({:.0}%)",
-                s.distance(traveled),
-                s.distance(total),
-                traveled / total * 100.0
-            )
-        }
+        s.coverage_percent().map_or_else(
+            || "Road coverage appears after recording with offline map.".to_string(),
+            |percent| {
+                format!(
+                    "{percent} of nearby roads traveled · {} of {}",
+                    s.distance(traveled),
+                    s.distance(total)
+                )
+            },
+        )
     };
+    let weeks = Memo::new(move |_| {
+        let ids = listed();
+        let now = s.now.get();
+        s.data.with(|data| {
+            let mut weeks = std::collections::BTreeMap::<u64, Vec<u64>>::new();
+            for id in ids {
+                if let Some(trip) = data.trips.iter().find(|t| t.id == id) {
+                    let days = now.saturating_sub(trip.started_ms) / 86_400_000;
+                    weeks.entry(days / 7).or_default().push(id);
+                }
+            }
+            weeks.into_iter().collect::<Vec<_>>()
+        })
+    });
     view! {
         column(class="tab-body") {
             row(class="filter-row") {
@@ -161,34 +175,50 @@ fn TripsTab() -> impl IntoView {
                         }
                     }
                 }
-                Button(variant=ButtonVariant::Outline,class="select-all-trips",on:click=move |_|selected.update(|ids|ids.extend(listed()))) {"Select all"}
-                Button(variant=ButtonVariant::Ghost,class="clear-trip-selection",on:click=move |_|selected.set(BTreeSet::new())) {"Clear"}
+                HistoryDates(period=period,days=days,range=range)
             }
-            HistoryDates(period=period,days=days,range=range)
-            text(class="muted") {{move ||format!("{} matching · {} selected",listed().len(),selected.with(BTreeSet::len))}}
-            text(class="muted") {{move ||format!("On map: {} · {}",s.history_summary(),coverage())}}
+            row(class="selection-row") {
+                text(class="muted grow") {{move ||{let n=listed().len();let picked=selected.with(BTreeSet::len);
+                    format!("{n} {}{}",if n==1 {"trip"} else {"trips"},if picked>0 {format!(" · {picked} selected")} else {String::new()})}}}
+                Button(variant=ButtonVariant::Ghost,class="select-all-trips",on:click=move |_|selected.update(|ids|ids.extend(listed()))) {"Select all"}
+                if move ||selected.with(|ids|!ids.is_empty()) {
+                    Button(variant=ButtonVariant::Ghost,class="clear-trip-selection",on:click=move |_|selected.set(BTreeSet::new())) {"Clear"}
+                }
+            }
+            text(class="muted small coverage-line") {{coverage}}
             scroll(class="sheet-scroll") {
                 column(class="list") {
-                    for id in move ||listed().into_iter(),key=|id|*id {
-                        HistoryTrip(id=id,selected=selected)
+                    for week in move ||weeks.get(),key=|week|week.clone() {
+                        text(class="section-title") {{match week.0 {
+                            0 => "Last 7 days".into(),
+                            1 => "1 week ago".into(),
+                            weeks => format!("{weeks} weeks ago"),
+                        }}}
+                        for id in move ||week.1.clone(),key=|id|*id {
+                            HistoryTrip(id=id,selected=selected)
+                        }
                     }
                     if move ||listed().is_empty() {
                         text(class="empty") {"No trips match these filters. Trips stay on this device."}
                     }
                 }
             }
-            row(class="actions") {
-                Button(class="show-history",disabled=Signal::derive_local(move ||selected.with(BTreeSet::is_empty)),on:click=move |_|{
-                    let ids=selected.with_untracked(|ids|ids.iter().copied().collect::<Vec<_>>());
-                    let filter=if ids.len()==1 {TripFilter::Trip {trip_id:ids[0]}} else {TripFilter::Trips {trip_ids:ids}};
-                    s.set_history_filter(filter);
-                    s.show_history();
-                }) {{move ||format!("Show selected ({})",selected.with(BTreeSet::len))}}
-                Button(variant=ButtonVariant::Outline,class="show-all-trips",on:click=move |_|{
-                    s.set_history_filter(TripFilter::All);
-                    s.show_history();
-                }) {"Show all trips"}
-            }
+            // One action: show the selection, or else everything this list shows.
+            Button(class="show-history wide",disabled=Signal::derive_local(move ||listed().is_empty()),on:click=move |_|{
+                let picked=selected.with_untracked(|ids|ids.iter().copied().collect::<Vec<_>>());
+                let ids=if picked.is_empty() {listed()} else {picked};
+                let whole=selected.with_untracked(BTreeSet::is_empty)&&period.get_untracked()=="all";
+                let filter=match parse_filter(&browse.get_untracked()) {
+                    Some(filter) if whole => filter,
+                    _ if ids.len()==1 => TripFilter::Trip {trip_id:ids[0]},
+                    _ => TripFilter::Trips {trip_ids:ids},
+                };
+                s.set_history_filter(filter);
+                s.show_history();
+            }) {{move ||match selected.with(BTreeSet::len) {
+                0 => {let n=listed().len();format!("Show {n} {} on map",if n==1 {"trip"} else {"trips"})}
+                n => format!("Show {n} selected on map"),
+            }}}
         }
     }
 }
@@ -209,7 +239,7 @@ mod tests {
 /// Whose trips History and map show: you by default; tap friends to add them, or a group
 /// to show you and all its members together.
 #[component]
-fn PersonPicker() -> impl IntoView {
+pub(crate) fn PersonPicker() -> impl IntoView {
     let s = UiState::current();
     type People = Vec<(String, String)>;
     let people = RwSignal::new_local(People::new());

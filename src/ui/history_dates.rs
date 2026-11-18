@@ -39,6 +39,7 @@ pub fn HistoryDates(
     let s = super::state::UiState::current();
     let today = Date::from_iso(&date(s.now.get_untracked()));
     view! {
+        column(class="history-dates-block") {
         row(class="filter-row history-dates") {
             Select(value=period) {
                 SelectTrigger(label="History date filter",class="history-filter history-period") {SelectValue()}
@@ -61,14 +62,17 @@ pub fn HistoryDates(
         if move ||period.get()=="days" && !days.with(|v|v.parse::<u32>().is_ok_and(|n|(1..=36500).contains(&n))) {
             text(class="muted") {"Enter 1–36500 days."}
         }
+        if move ||period.get()=="range" {
         text(class="muted") {{move ||{
             if period.get()=="range" {
                 if let Some(r)=range.get() {
                     return r.to.map_or_else(||"Choose end date. Dates use device timezone.".into(),|to|format!("{} – {} · Both dates included.",r.from.to_iso(),to.to_iso()));
                 }
                 "Choose start and end dates. Dates use device timezone.".into()
-            } else {"Dates use trip start, in device timezone.".into()}
+            } else {String::new()}
         }}}
+        }
+        }
     }
 }
 

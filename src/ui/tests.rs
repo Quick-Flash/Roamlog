@@ -1,5 +1,5 @@
 use super::*;
-use super::{settings::SettingsProps, view_options::ViewOptionsProps};
+use super::{history::HistoryProps, settings::SettingsProps, view_options::ViewOptionsProps};
 use crate::{
     model::{Event, Fix, Status, TripFilter},
     store::Store,
@@ -7,6 +7,10 @@ use crate::{
 use zgui_testkit_view::Window;
 
 fn find(window: &Window, class: &str) -> NodeId {
+    find_opt(window, class).unwrap_or_else(|| panic!("Missing {class}"))
+}
+
+fn find_opt(window: &Window, class: &str) -> Option<NodeId> {
     let mut nodes = vec![window.root];
     while let Some(node) = nodes.pop() {
         if window
@@ -16,11 +20,11 @@ fn find(window: &Window, class: &str) -> NodeId {
             .iter()
             .any(|c| c.as_str() == class)
         {
-            return node;
+            return Some(node);
         }
         nodes.extend(window.dom.tree().children(node));
     }
-    panic!("Missing {class}");
+    None
 }
 
 #[test]
@@ -51,6 +55,10 @@ fn zgui_controls_follow_trip_state() {
             .ui_state(start)
             .contains(zgui::vocab::UiState::DISABLED)
     );
+    assert!(
+        find_opt(&window, "pause-trip").is_none() && find_opt(&window, "finish-trip").is_none(),
+        "idle shows only Start"
+    );
     let mut store = Store::open(directory.path().join("test-trips.jsonl")).unwrap();
     store
         .commit(Event::Start {
@@ -73,22 +81,27 @@ fn zgui_controls_follow_trip_state() {
     window.frame();
     assert_eq!(s.status(), Some(Status::Recording));
     assert!(
-        window
-            .dom
-            .tree()
-            .ui_state(start)
-            .contains(zgui::vocab::UiState::DISABLED)
+        find_opt(&window, "start-trip").is_none(),
+        "recording hides Start"
     );
+    find(&window, "pause-trip");
+    find(&window, "finish-trip");
     store.commit(Event::Pause { timestamp_ms: 3000 }).unwrap();
     s.data.set(store.state.clone());
     window.frame();
+    let resume = find(&window, "start-trip");
     assert!(
         !window
             .dom
             .tree()
-            .ui_state(start)
+            .ui_state(resume)
             .contains(zgui::vocab::UiState::DISABLED)
     );
+    assert!(
+        find_opt(&window, "pause-trip").is_none(),
+        "paused hides Pause"
+    );
+    find(&window, "finish-trip");
     let click = |class: &str| {
         window.dispatcher().send_to(
             find(&window, class),
@@ -354,7 +367,7 @@ fn history_selects_multiple_trips_keeps_list_and_edits_empty_trips() {
         s
     });
     let mut mounted = window.scope.with(|| {
-        view! {ThemeProvider { Recorder() TripEditorDialog() }}
+        view! {ThemeProvider { Recorder() History() TripEditorDialog() }}
             .into_view()
             .build(&mut window.cx.cx())
     });

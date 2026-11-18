@@ -48,3 +48,16 @@ pub const PEOPLE: IconData = IconData::new(
     "M5.5 8a3.5 3.5 0 1 1 7 0a3.5 3.5 0 1 1 -7 0z M1 20c0-4 3-6.5 8-6.5s8 2.5 8 6.5z \
      M14 5.2a3.2 3.2 0 1 1 3 5.6a5.5 5.5 0 0 0 -3 -5.6z M17.5 13.6c3.3.6 5.5 2.7 5.5 6.4h-4.2c0-2.6-.5-4.7-1.3-6.4z",
 );
+
+pub const HISTORY: IconData = IconData::new(
+    "history",
+    24.0,
+    "M2 12a10 10 0 1 1 20 0a10 10 0 1 1 -20 0z M4 12a8 8 0 1 0 16 0a8 8 0 1 0 -16 0z M11 6h2v5l4 3-1 2-5-4z",
+);
+
+/// Two stacked map layers.
+pub const LAYERS: IconData = IconData::new(
+    "layers",
+    24.0,
+    "M12 2L2 8l10 6 10-6z M12 4.3L18.1 8 12 11.7 5.9 8z M2.5 12.5l9.5 5.7 9.5-5.7 1 1.7L12 20.5 1.5 14.2z",
+);

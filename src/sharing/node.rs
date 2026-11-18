@@ -158,7 +158,7 @@ async fn publish(manager: Manager, path: PathBuf) {
                 let _ = zgui::app::android::notification::post(
                     &zgui::app::android::notification::Notification {
                         id,
-                        title: "Place alert".into(),
+                        title: "Alert area".into(),
                         text,
                         ..Default::default()
                     },

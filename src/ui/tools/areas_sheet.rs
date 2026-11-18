@@ -14,7 +14,6 @@ pub fn AreasSheet() -> impl IntoView {
     };
     view! {
         Dialog(open=s.areas_open) {
-            DialogTrigger(variant=ButtonVariant::Secondary,class="map-chip") {"Areas"}
             DialogContent(class="sheet") {
                 DialogHeader {DialogTitle {"Areas"} DialogDescription {"Share of roads you have traveled inside an area."}}
                 Button(class="new-area wide",on:click=move |_|{s.areas_open.set(false);s.start_area()}) {"Draw new area"}

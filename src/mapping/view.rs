@@ -10,9 +10,8 @@ use super::{
     tiles::{Config, Provider, Service},
     vector_tiles::VectorTiles,
 };
-use crate::ui::icons::{COMPASS, EXPLORE, FIT, LOCATE, PEOPLE, SLIDERS};
+use crate::ui::icons::{COMPASS, EXPLORE, FIT, LOCATE, PEOPLE};
 use crate::ui::{
-    settings::SettingsProps,
     state::UiState,
     tools::{AreaBarProps, AreaDialogProps, AreasSheetProps, TripEditorDialogProps},
     view_options::ViewOptionsProps,
@@ -30,14 +29,65 @@ use zgui::{
 use zgui_ui::prelude::*;
 use zgui_ui_icons::{
     prelude::*,
-    set::mark::{CROSS, MINUS, PLUS},
+    set::mark::{MINUS, PLUS},
 };
 
 #[component]
 pub fn MapView() -> impl IntoView {
     let s = UiState::current();
     let camera = s.camera;
-    let three_d = RwSignal::new_local(false);
+    let map_people_open = RwSignal::new_local(false);
+    let map_people_search = RwSignal::new_local(String::new());
+    let map_people = Signal::derive_local(move || {
+        let query = map_people_search.get().trim().to_lowercase();
+        let mut friends = s.friend_markers.get();
+        friends.retain(|friend| friend.name.to_lowercase().contains(&query));
+        friends.sort_by_key(|friend| std::cmp::Reverse(friend.timestamp_ms));
+        friends
+    });
+    let friend_chips = Memo::new(move |_| {
+        let mut chips = s.friend_markers.with(|markers| {
+            markers
+                .iter()
+                .map(|friend| (friend.id.clone(), friend.name.clone(), Some(friend.clone())))
+                .collect::<Vec<_>>()
+        });
+        s.map_friends.with(|roster| {
+            for (id, name) in roster {
+                if !chips.iter().any(|chip| chip.0 == *id) {
+                    chips.push((id.clone(), name.clone(), None));
+                }
+            }
+        });
+        chips.sort_by_key(|chip| {
+            std::cmp::Reverse(
+                chip.2
+                    .as_ref()
+                    .map(|friend| (friend.live, friend.timestamp_ms)),
+            )
+        });
+        chips
+    });
+    let map_profile = Memo::new(move |_| {
+        let id = s.map_friend_selected.get()?;
+        s.friend_markers
+            .with(|markers| markers.iter().find(|f| f.id == id).cloned())
+    });
+    let three_d = s.terrain_enabled;
+    let circle_setup =
+        move || s.picking_place_center.get() && s.editing_circle.with(Option::is_some);
+    let circle_drag = RwSignal::new_local(None::<u64>);
+    let circle_sync = RenderEffect::new(move |_| {
+        if let Some((center, radius)) = s.editing_circle.get() {
+            three_d.set(false);
+            #[cfg(feature = "sharing")]
+            s.place_outline
+                .set(crate::sharing::places::circle_outline(center, radius));
+            #[cfg(not(feature = "sharing"))]
+            let _ = (center, radius);
+        }
+    });
+    on_cleanup_local(move || drop(circle_sync));
     let orbit = RwSignal::new_local(super::terrain::Orbit::default());
     let map_bearing = move || {
         if three_d.get() {
@@ -51,7 +101,7 @@ pub fn MapView() -> impl IntoView {
         local: None,
         network: true,
     });
-    let offline = RwSignal::new_local(false);
+    let offline = s.map_offline;
     let retry = RenderEffect::new(move |_| {
         if !offline.get() {
             service.retry();
@@ -83,7 +133,6 @@ pub fn MapView() -> impl IntoView {
     // Online raster tiles: no offline map at all, or satellite underlay. Beyond downloaded
     // area, basemap streams same vector tiles online instead.
     let raster = Memo::new(move |_| !three_d.get() && (!vector.get() || s.satellite.get()));
-    let outside = Memo::new(move |_| vector.get() && s.basemap.outside(camera.get(), size.get()));
     let provider = Memo::new(move |_| {
         if s.satellite.get() {
             Provider::EsriImagery
@@ -162,7 +211,40 @@ pub fn MapView() -> impl IntoView {
                     if ev.key != Key::Named(NamedKey::BrowserBack) {
                         return;
                     }
-                    if s.area_drawing.get_untracked() {
+                    if s.places_open.get_untracked() {
+                        if let Some(back) = s.alert_areas_back.get_value() {
+                            back.run(());
+                        } else {
+                            s.places_open.set(false);
+                        }
+                    } else if s.friends_open.get_untracked() {
+                        if let Some(back) = s.friends_page_back.get_value() {
+                            back.run(());
+                        } else {
+                            s.friends_open.set(false);
+                        }
+                    } else if s.trips_open.get_untracked()
+                        || s.friends_open.get_untracked()
+                        || s.settings_open.get_untracked()
+                    {
+                        s.trips_open.set(false);
+                        s.friends_open.set(false);
+                        s.settings_open.set(false);
+                    } else if s.map_friend_selected.with_untracked(Option::is_some) {
+                        s.map_friend_selected.set(None);
+                    } else if s.editing_circle.with_untracked(Option::is_some) {
+                        if s.picking_place_center.get_untracked()
+                            && let Some(back) = s.alert_areas_back.get_value()
+                        {
+                            back.run(());
+                        } else {
+                            s.places_open.set(true);
+                        }
+                    } else if s.picking_place_center.get_untracked() {
+                        s.picking_place_center.set(false);
+                    } else if !s.place_outline.with_untracked(Vec::is_empty) {
+                        s.place_outline.set(Vec::new());
+                    } else if s.area_drawing.get_untracked() {
                         if s.area_history.with_value(Vec::is_empty) {
                             s.cancel_area();
                         } else {
@@ -224,6 +306,24 @@ pub fn MapView() -> impl IntoView {
             crate::geo::Point { lat, lon },
             lat.to_radians().cos() / camera.scale(),
         )
+    };
+    let circle_screen = Memo::new(move |_| {
+        let (center, radius) = s.editing_circle.get()?;
+        let [x, y] = project(center.lon, center.lat)?;
+        let camera = camera.get();
+        let [w, h] = size.get();
+        let radius_px = radius * camera.scale() / center.lat.to_radians().cos().max(0.08);
+        Some((
+            (x - camera.center[0]) * camera.scale() + w / 2.,
+            h / 2. - (y - camera.center[1]) * camera.scale(),
+            radius_px,
+            radius,
+        ))
+    });
+    let circle_handle = move |edge: bool| {
+        let (x, y, radius, _) = circle_screen.get()?;
+        let offset = if edge { radius } else { 0. };
+        Some(format!("translate({}px, {}px)", x + offset - 22., y - 22.))
     };
     // Corner under viewport position while editing area.
     let corner_at = move |xy: [f64; 2]| {
@@ -304,6 +404,14 @@ pub fn MapView() -> impl IntoView {
                         s.follow.set(false);
                     }
                     camera.set(next);
+                    if s.picking_place_center.get_untracked() {
+                        let [lon, lat] = camera::geographic(next.center);
+                        s.editing_circle.update(|circle| {
+                            if let Some((center, _)) = circle {
+                                *center = crate::geo::Point { lat, lon }
+                            }
+                        });
+                    }
                     if bearing != s.bearing.get_untracked() {
                         s.bearing.set(bearing);
                     }
@@ -366,20 +474,54 @@ pub fn MapView() -> impl IntoView {
         })
     });
     // Friend markers: name, screen position, label, live. Separate overlay from trips.
-    let friend_marks = Memo::new(move |_| {
-        if !s.show_friends.get() {
+    // Name label at each shown alert area's centre: (area id, name, x, y).
+    let area_labels = Memo::new(move |_| {
+        if three_d.get() {
             return Vec::new();
         }
         let camera = camera.get();
-        let [w, h] = size.get();
+        let [w, h] = view_size.get();
+        let (sin, cos) = s.bearing.get().sin_cos();
+        s.area_marks.with(|marks| {
+            marks
+                .iter()
+                .filter_map(|(id, name, points)| {
+                    let n = points.len() as f64;
+                    if n == 0.0 {
+                        return None;
+                    }
+                    let lon = points.iter().map(|p| p.lon).sum::<f64>() / n;
+                    let lat = points.iter().map(|p| p.lat).sum::<f64>() / n;
+                    let xy = project(lon, lat)?;
+                    let dx = (xy[0] - camera.center[0]) * camera.scale();
+                    let dy = (camera.center[1] - xy[1]) * camera.scale();
+                    Some((
+                        *id,
+                        name.clone(),
+                        w / 2.0 + dx * cos - dy * sin,
+                        h / 2.0 + dx * sin + dy * cos,
+                    ))
+                })
+                .collect::<Vec<_>>()
+        })
+    });
+    let friend_marks = Memo::new(move |_| {
+        if three_d.get() || !s.show_friends.get() {
+            return Vec::new();
+        }
+        let camera = camera.get();
+        let [w, h] = view_size.get();
+        let (sin, cos) = s.bearing.get().sin_cos();
         let now = s.now.get() as i64;
         s.friend_markers.with(|markers| {
             markers
                 .iter()
                 .filter_map(|f| {
                     let xy = project(f.point.lon, f.point.lat)?;
-                    let x = (xy[0] - camera.center[0]) * camera.scale() + w / 2.0;
-                    let y = h / 2.0 - (xy[1] - camera.center[1]) * camera.scale();
+                    let dx = (xy[0] - camera.center[0]) * camera.scale();
+                    let dy = (camera.center[1] - xy[1]) * camera.scale();
+                    let x = w / 2.0 + dx * cos - dy * sin;
+                    let y = h / 2.0 + dx * sin + dy * cos;
                     let age = (now - f.timestamp_ms).max(0) / 1000;
                     let when = match age {
                         0..60 => "now".to_owned(),
@@ -397,6 +539,7 @@ pub fn MapView() -> impl IntoView {
                         },
                         live,
                         f.avatar.clone(),
+                        f.id.clone(),
                     ))
                 })
                 .collect::<Vec<_>>()
@@ -429,9 +572,15 @@ pub fn MapView() -> impl IntoView {
                 }
             });
         }
-        if s.show_gps.get() {
+        if s.show_gps.get() || s.status().is_some() {
             s.data.with(|d| {
-                for trip in d.trips_for(filter) {
+                let show_history = s.show_gps.get();
+                let active = d.active().map(|t| t.id);
+                for trip in d
+                    .trips_for(filter)
+                    .filter(|t| show_history && Some(t.id) != active)
+                    .chain(d.active())
+                {
                     for pair in trip.points.windows(2).filter(|p| p[1].connected) {
                         add(
                             if pair[1].estimated { 5 } else { 4 },
@@ -448,6 +597,20 @@ pub fn MapView() -> impl IntoView {
             }
             if points.len() >= 3 {
                 add(6, points[points.len() - 1], points[0]);
+            }
+        });
+        if s.editing_circle.with(Option::is_none) {
+            s.place_outline.with(|points| {
+                for (a, b) in points.iter().zip(points.iter().cycle().skip(1)) {
+                    add(6, *a, *b);
+                }
+            });
+        }
+        s.area_marks.with(|marks| {
+            for (_, _, points) in marks {
+                for (a, b) in points.iter().zip(points.iter().cycle().skip(1)) {
+                    add(6, *a, *b);
+                }
             }
         });
         if let Some(target) = s.target.get() {
@@ -611,90 +774,222 @@ pub fn MapView() -> impl IntoView {
                     box(class="gps-accuracy",style:transform=move ||marker.get().map(|m|format!("translate({}px, {}px)",m.x-m.radius,m.y-m.radius)),
                         style:width=move ||marker.get().map(|m|format!("{}px",2.0*m.radius)),style:height=move ||marker.get().map(|m|format!("{}px",2.0*m.radius))) {}
                 }
+                if move ||circle_screen.with(Option::is_some) {
+                    box(class="circle-draft-outline",
+                        style:width=move ||circle_screen.get().map(|(_,_,r,_)|format!("{}px",2.*r)),
+                        style:height=move ||circle_screen.get().map(|(_,_,r,_)|format!("{}px",2.*r)),
+                        style:transform=move ||circle_screen.get().map(|(x,y,r,_)|format!("translate({}px, {}px)",x-r,y-r))) {}
+                    box(class="circle-draft-spoke",
+                        style:width=move ||circle_screen.get().map(|(_,_,r,_)|format!("{r}px")),
+                        style:transform=move ||circle_screen.get().map(|(x,y,_,_)|format!("translate({x}px, {y}px)"))) {}
+                    text(class="circle-draft-caption",style:transform=move ||circle_screen.get().map(|(x,y,r,_)|
+                        format!("translate({}px, {}px) translateX(-50%) rotate({}rad)",x+r/2.,y-20.,-s.bearing.get()))) {
+                        {move ||circle_screen.get().map(|(_,_,_,r)|format!("{r:.0} m")).unwrap_or_default()}
+                    }
+
+                    for edge in ||vec![false,true],key=|edge|*edge {
+                        box(class="circle-handle",style:transform=move ||circle_handle(edge),
+                            on:pointer_down=move |ev|{ev.stop_propagation();ev.capture_pointer();circle_drag.set(Some(ev.id.raw()));},
+                            on:pointer_move=move |ev|{
+                                ev.stop_propagation();
+                                if circle_drag.get_untracked()!=Some(ev.id.raw()) {return;}
+                                if let Some(xy)=viewport([f64::from(ev.position.x.0),f64::from(ev.position.y.0)]) {
+                                    let point=geo(xy).0;
+                                    s.editing_circle.update(|draft|{
+                                        if let Some((center,radius))=draft {
+                                            if edge {*radius=center.distance(point).clamp(100.,10_000.);}
+                                            else {*center=point;}
+                                        }
+                                    });
+                                }
+                            },
+                            on:pointer_up=move |ev|{ev.stop_propagation();ev.release_pointer();circle_drag.set(None);},
+                            on:pointer_cancel=move |ev|{ev.stop_propagation();ev.release_pointer();circle_drag.set(None);}) {
+                            box(class="circle-handle-dot",class:circle-edge=edge) {}
+                        }
+                    }
+                }
                 for corner in move ||corners.get(),key=|c|(c.0.to_bits(),c.1.to_bits()) {
                     box(class="area-corner",style:transform=format!("translate({}px, {}px)",corner.0-9.0,corner.1-9.0)) {}
-                }
-                // Marker box is 160 px wide; its dot or picture sits centered on the position
-                // and the label centered underneath.
-                for friend in move ||friend_marks.get(),key=|f|(f.0.clone(),f.1.to_bits(),f.2.to_bits(),f.3.clone(),f.4,f.5.clone()) {
-                    FriendPin(name=friend.0.clone(),x=friend.1,y=friend.2,label=friend.3.clone(),live=friend.4,avatar=friend.5.clone())
                 }
                 if move ||marker.get().is_some() {
                     if move ||s.own_avatar.get().is_none() {
                         box(class="gps-dot",style:transform=move ||marker.get().map(|m|format!("translate({}px, {}px)",m.x-8.0,m.y-8.0))) {}
                     }
                     if move ||s.own_avatar.get().is_some() {
-                        box(class="friend-avatar own-avatar friend-pin",style:transform=move ||marker.get().map(|m|format!("translate({}px, {}px)",m.x-18.0,m.y-18.0))) {
+                        box(class="friend-avatar own-avatar friend-pin",style:transform=move ||marker.get().map(|m|format!("translate({}px, {}px) rotate({}rad)",m.x-18.0,m.y-18.0,-s.bearing.get()))) {
                             {zgui::elements::image().class("friend-avatar-image").src(Signal::derive_local(move ||s.own_avatar.get())).alt(Some("You".to_string())).into_view()}
                         }
                     }
                 }
                 }
+                for label in move ||area_labels.get(),key=|l|(l.0,l.1.clone(),l.2.to_bits(),l.3.to_bits()) {
+                    {{
+                        let (id,name,x,y)=label;
+                        view! {
+                            box(class="area-label place-pin",a11y:label=format!("Edit alert area {name}"),on:pointer_down=|ev|ev.stop_propagation(),
+                                on:click=move |_|{s.open_area.set(Some(id));s.places_open.set(true);},
+                                style:transform=format!("translate({x}px, {y}px) translate(-50%, -50%)")) {
+                                text {{name.clone()}}
+                            }
+                        }
+                    }}
+                }
+                for friend in move ||friend_marks.get(),key=|f|(f.0.clone(),f.1.to_bits(),f.2.to_bits(),f.3.clone(),f.4,f.5.clone(),f.6.clone()) {
+                    FriendPin(id=friend.6.clone(),name=friend.0.clone(),x=friend.1,y=friend.2,label=friend.3.clone(),live=friend.4,avatar=friend.5.clone())
+                }
                 text(class="attribution") {{move ||if three_d.get()&&s.satellite.get(){"Imagery: Esri, Vantor, Earthstar Geographics · Roads: © OpenStreetMap · Terrain: © Mapterhorn"}else if three_d.get(){"Protomaps © OpenStreetMap · Terrain: © Mapterhorn"}else if s.satellite.get(){"Imagery: Esri, Vantor, Earthstar Geographics, GIS User Community · Roads: © OpenStreetMap"}else if vector.get(){"Protomaps © OpenStreetMap"}else{"© OpenStreetMap contributors"}}}
             }
-            if move ||s.area_drawing.get()||s.area_busy.get()||s.area_stats.with(Option::is_some) {
+            if move ||s.picking_place_center.get()&&!circle_setup() {
+                box(class="map-crosshair") {}
+            }
+            if move ||!circle_setup()&&(s.editing_circle.with(Option::is_some)||s.picking_place_center.get()||!s.place_outline.with(Vec::is_empty)||!s.area_marks.with(Vec::is_empty)||s.area_drawing.get()||s.area_busy.get()||s.area_stats.with(Option::is_some)) {
                 AreaBar()
-            } else {
-                Button(variant=ButtonVariant::Secondary,class="map-history",on:click=move |_|s.trips_open.set(true)) {{move ||s.history_summary()}}
             }
-            AreaDialog()
-            Settings()
-            TripEditorDialog()
-            // Siblings of viewport, so taps reach buttons instead of starting a drag.
-            row(class="map-top") {
-                ViewOptions()
-                AreasSheet()
-                if move ||cfg!(target_os="android") {
-                    Button(variant=ButtonVariant::Secondary,class="map-chip friends-chip",on:click=move |_|s.friends_open.set(true)) {"Friends"}
-                }
-                if move ||s.people.with(|p|!p.is_empty()) {
-                    Button(class="map-chip person-chip",on:click=move |_|s.set_people(Vec::new()),a11y:label=move ||format!("Showing trips of {}; tap for only yours",s.people_label())) {
-                        text {{move ||s.people_label()}}
-                        Icon(icon=CROSS)
+            Dialog(open=map_people_open) {
+                DialogContent(class="sheet") {
+                    DialogHeader {DialogTitle {"Friends on map"}}
+                    Input(value=map_people_search,label="Search friends",placeholder="Search friends")
+                    Button(variant=ButtonVariant::Outline,disabled=Signal::derive_local(move ||!s.friend_markers.with(|friends|friends.iter().any(|f|f.live))),on:click=move |_|{
+                        map_people_open.set(false);
+                        s.fit(s.friend_markers.get_untracked().into_iter().filter(|f|f.live).map(|f|f.point));
+                    }) {"Fit all live friends"}
+                    if move ||s.friend_markers.with(Vec::is_empty) {
+                        text(class="muted") {"No friend locations yet."}
                     }
-                }
-                if move ||three_d.get()||raster.get()||outside.get() {
-                    Button(variant=ButtonVariant::Secondary,class="map-chip",on:click=move |_|offline.update(|v| *v = !*v)) {{move ||if offline.get(){"Offline"}else{"Online"}}}
-                }
-                if move ||raster.get()&&service.status().contains("errors") {
-                    Button(variant=ButtonVariant::Secondary,class="map-chip",on:click=move |_|service.retry()) {"Retry"}
-                    Button(variant=ButtonVariant::Secondary,class="map-chip",on:click=move |_|s.open_settings()) {"Settings"}
-                }
-            }
-            if move ||!s.message.get().is_empty() {
-                text(class="map-message",a11y:role=Role::Status,on:click=move |_|s.message.set(String::new())) {{move ||s.message.get()}}
-            }
-            Button(variant=ButtonVariant::Secondary,class="map-button compass",on:click=move |_|{if three_d.get_untracked(){orbit.update(|v|v.bearing=0.0);}else{s.bearing.set(0.0);}},a11y:label=move ||format!("Map heading {:.0} degrees; reset north",(-map_bearing().to_degrees()).rem_euclid(360.0))) {
-                box(class="compass-needle",style:transform=move ||Some(format!("rotate({}rad)",map_bearing()))) {Icon(icon=COMPASS)}
-            }
-            column(class="map-controls") {
-                Button(variant=ButtonVariant::Secondary,class="map-button terrain-toggle",disabled=Signal::derive_local(move ||s.area_drawing.get()),on:click=move |_|three_d.update(|v|*v = !*v),a11y:label=move ||if three_d.get(){"Switch to 2D map"}else{"Switch to 3D terrain map"}) {{move ||if three_d.get(){"2D"}else{"3D"}}}
-
-                if move ||s.follow.get() {
-                    Button(class="map-button",on:click=move |_|s.locate(),a11y:label="Following my location") {Icon(icon=LOCATE)}
-                } else {
-                    Button(variant=ButtonVariant::Secondary,class="map-button",on:click=move |_|s.locate(),a11y:label="Follow my location") {Icon(icon=LOCATE)}
-                }
-                Button(variant=ButtonVariant::Secondary,class="map-button",on:click=move |_|camera.update(|c|c.zoom=(c.zoom+1.0).min(camera::MAX_INTERACTIVE_ZOOM)),a11y:label="Zoom in") {Icon(icon=PLUS)}
-                Button(variant=ButtonVariant::Secondary,class="map-button",on:click=move |_|camera.update(|c|c.zoom=(c.zoom-1.0).max(0.0)),a11y:label="Zoom out") {Icon(icon=MINUS)}
-                Button(variant=ButtonVariant::Secondary,class="map-button",on:click=move |_|fit(),a11y:label="Fit selected paths") {Icon(icon=FIT)}
-                Button(variant=ButtonVariant::Secondary,class="map-button",on:click=move |_|s.settings_open.set(true),a11y:label="Settings") {Icon(icon=SLIDERS)}
-                Button(variant=ButtonVariant::Secondary,class="map-button",on:click=move |_|s.nearest_road(),a11y:label="Nearest untraveled road") {Icon(icon=EXPLORE)}
-                if move ||s.show_friends.get()&&!s.friend_markers.with(Vec::is_empty) {
-                    DropdownMenu {
-                        DropdownMenuTrigger(variant=ButtonVariant::Secondary,class="map-button",a11y:label="Find a friend on map") {Icon(icon=PEOPLE)}
-                        DropdownMenuContent(class="people-menu") {
-                            MenuLabel {"Center map on"}
-                            for friend in move ||s.friend_markers.get(),key=|f|(f.id.clone(),f.name.clone(),f.timestamp_ms) {
-                                MenuItem(class="people-item",on_select=zgui::reactive::UnsyncCallback::new({let point=friend.point;move |()|s.center_on(point)})) {
-                                    {friend.avatar.clone().map(|url|view!{box(class="menu-avatar") {{zgui::elements::image().class("friend-avatar-image").src(Some(url)).alt(Some(String::new())).into_view()}}})}
-                                    {friend.avatar.is_none().then(||view!{box(class="menu-avatar menu-avatar-empty") {}})}
-                                    text {{format!("{}{}",friend.name,if friend.live {""} else {" (last seen)"})}}
+                    Button(variant=ButtonVariant::Ghost,on:click=move |_|{map_people_open.set(false);s.friends_open.set(true)}) {"Open Friends"}
+                    scroll(class="sheet-scroll") {
+                        column(class="list") {
+                            for live in ||vec![true,false],key=|live|*live {
+                                if move ||map_people.with(|friends|friends.iter().any(|f|f.live==live)) {
+                                    text(class="section-title") {{if live {"Live now"} else {"Last seen"}}}
+                                    for friend in move ||map_people.get().into_iter().filter(|f|f.live==live).collect::<Vec<_>>(),key=|f|(f.id.clone(),f.name.clone(),f.timestamp_ms) {
+                                        Button(variant=ButtonVariant::Outline,class="wide",on:click=move |_|{
+                                            s.set_show_friends(true);
+                                            s.center_on(friend.point);
+                                            map_people_open.set(false);
+                                        }) {{friend.name.clone()}}
+                                    }
                                 }
                             }
                         }
                     }
                 }
+            }
+            AreaDialog()
+            AreasSheet()
+            TripEditorDialog()
+            if move ||!circle_setup() {
+            column(class="map-top") {
+                row(class="map-summary") {
+                    Button(variant=ButtonVariant::Ghost,class="map-summary-link",a11y:label="Open trip history",on:click=move |_|s.trips_open.set(true)) {
+                        column {
+                            text(class="summary-title") {{move ||if s.loaded.get() {s.history_summary().0} else {"Loading trips…".into()}}}
+                            text(class="muted") {{move ||{if !s.loaded.get() {return String::new();} let count=s.history_summary().1;s.coverage_percent().map_or(count.clone(),|p|format!("{count} · {p} of nearby roads"))}}}
+                        }
+                    }
+                    // Filtered map (a trip, category, selection): one tap back to everything.
+                    if move ||s.history_filter.get()!=crate::model::TripFilter::All {
+                        Button(variant=ButtonVariant::Ghost,class="summary-reset",a11y:label="Show all trips",on:click=move |_|{s.set_history_filter(crate::model::TripFilter::All);s.show_history();}) {"All"}
+                    }
+                    ViewOptions()
+                }
+                if move ||!friend_chips.with(Vec::is_empty) {
+                    scroll(class="friend-strip") {
+                        row(class="friend-strip-row") {
+                            Button(variant=ButtonVariant::Secondary,class="map-chip",a11y:label="Friends on map",on:click=move |_|{map_people_search.set(String::new());map_people_open.set(true)}) {Icon(icon=PEOPLE) text {{move ||friend_chips.with(Vec::len).to_string()}}}
+                            for chip in move ||friend_chips.get(),key=|chip|(chip.0.clone(),chip.1.clone(),chip.2.as_ref().map(|f|(f.timestamp_ms,f.live,f.avatar.clone()))) {
+                                {{
+                                    let position = chip.2.as_ref().map(|friend|friend.point);
+                                    let profile_id=chip.0.clone();
+                                    let avatar = chip.2.as_ref().and_then(|friend|friend.avatar.clone());
+                                    let name = chip.1.clone();
+                                    let missing = format!("No location received for {name} yet.");
+                                    let initial = name.chars().next().unwrap_or('?').to_uppercase().to_string();
+                                    view! {
+                                        Button(variant=ButtonVariant::Secondary,class="map-chip friend-strip-chip",class:friend-stale=!chip.2.is_some_and(|friend|friend.live),
+                                            a11y:label=if position.is_some(){format!("Show {name} on map")}else{format!("{name}, no location yet")},
+                                            on:click=move |_|{
+                                                if let Some(point)=position {s.set_show_friends(true);s.center_on(point);s.map_friend_selected.set(Some(profile_id.clone()));}
+                                                else {s.message.set(missing.clone());}
+                                            }) {
+                                            {avatar.map_or_else(||view!{box(class="menu-avatar friend-initial") {text {{initial}}}},
+                                                |url|view!{box(class="menu-avatar") {{zgui::elements::image().class("friend-avatar-image").src(Some(url)).alt(Some(String::new())).into_view()}}})}
+                                            text {{name}}
+                                        }
+                                    }
+                                }}
+                            }
+
+                        }
+                    }
+                }
+                if move ||raster.get()&&service.status().contains("errors") {
+                    row(class="map-retry") {
+                        Button(variant=ButtonVariant::Secondary,class="map-chip",on:click=move |_|service.retry()) {"Retry map"}
+                    }
+                }
+            }
+            }
+            if move ||map_profile.with(Option::is_some) && !s.editing_circle.with(Option::is_some) && !s.area_drawing.get() {
+                column(class="map-profile") {
+                    row(class="page-heading") {
+                        row(class="map-profile-avatar") {
+                            if move ||map_profile.with(|p|p.as_ref().is_some_and(|p|p.avatar.is_some())) {
+                                {zgui::elements::image().class("friend-avatar-image").src(Signal::derive_local(move ||map_profile.with(|p|p.as_ref().and_then(|p|p.avatar.clone())))).into_view()}
+                            } else {
+                                text {{move ||map_profile.with(|p|p.as_ref().and_then(|p|p.name.chars().next()).map(|c|c.to_uppercase().to_string()).unwrap_or_default())}}
+                            }
+                        }
+                        column(class="grow") {
+                            text(class="list-title") {{move ||map_profile.with(|p|p.as_ref().map(|p|p.name.clone()).unwrap_or_default())}}
+                            text(class="muted") {{move ||map_profile.with(|p|p.as_ref().map(|p|{
+                                let mins=(s.now.get() as i64-p.timestamp_ms).max(0)/60_000;
+                                let when=if mins==0{"Just now".into()}else if mins<60{format!("{mins} min ago")}else{format!("{} h ago",mins/60)};
+                                let connection=if let Some(via)=&p.via{format!("via {via}")}else if p.live{"Live".into()}else{"Last seen".into()};
+                                format!("{connection} · {when} · ±{:.0} m",p.accuracy_m)
+                            }).unwrap_or_default())}}
+                        }
+                        Button(variant=ButtonVariant::Ghost,a11y:label="Close friend profile",on:click=move |_|s.map_friend_selected.set(None)) {"×"}
+                    }
+                    row(class="map-profile-actions") {
+                        Button(variant=ButtonVariant::Outline,class="open-friend-page",on:click=move |_|{
+                            s.friend_detail.set(s.map_friend_selected.get_untracked());
+                            s.map_friend_selected.set(None);
+                            s.friends_open.set(true);
+                        }) {"Profile"}
+                        if move ||cfg!(target_os="android") {
+                            Button(variant=ButtonVariant::Outline,on:click=move |_|{
+                                #[cfg(target_os="android")]
+                                crate::ui::place_alerts::show_on_map(s,s.map_friend_selected.get_untracked());
+                            }) {"Their areas on map"}
+                        }
+                    }
+                }
+            }
+            if move ||!s.message.get().is_empty() {
+                text(class="map-message",a11y:role=Role::Status,on:click=move |_|s.message.set(String::new())) {{move ||s.message.get()}}
+            }
+            if move ||!circle_setup() {
+            column(class="map-heading-controls") {
+            Button(variant=ButtonVariant::Secondary,class="map-button compass",on:click=move |_|{if three_d.get_untracked(){orbit.update(|v|v.bearing=0.0);}else{s.bearing.set(0.0);}},a11y:label=move ||format!("Map heading {:.0} degrees; reset north",(-map_bearing().to_degrees()).rem_euclid(360.0))) {
+                box(class="compass-needle",style:transform=move ||Some(format!("rotate({}rad)",map_bearing()))) {Icon(icon=COMPASS)}
+            }
+                Button(variant=ButtonVariant::Secondary,class="map-button terrain-toggle",disabled=Signal::derive_local(move ||s.area_drawing.get()),on:click=move |_|three_d.update(|v|*v = !*v),a11y:label=move ||if three_d.get(){"Switch to 2D map"}else{"Switch to 3D terrain map"}) {{move ||if three_d.get(){"2D"}else{"3D"}}}
+            }
+            column(class="map-controls") {
+                Button(variant=ButtonVariant::Secondary,class="map-button",on:click=move |_|s.nearest_road(),a11y:label="Nearest untraveled road") {Icon(icon=EXPLORE)}
+                Button(variant=ButtonVariant::Secondary,class="map-button",on:click=move |_|fit(),a11y:label="Fit selected paths") {Icon(icon=FIT)}
+                column(class="zoom-pair") {
+                Button(variant=ButtonVariant::Secondary,class="map-button",on:click=move |_|camera.update(|c|c.zoom=(c.zoom+1.0).min(camera::MAX_INTERACTIVE_ZOOM)),a11y:label="Zoom in") {Icon(icon=PLUS)}
+                Button(variant=ButtonVariant::Secondary,class="map-button",on:click=move |_|camera.update(|c|c.zoom=(c.zoom-1.0).max(0.0)),a11y:label="Zoom out") {Icon(icon=MINUS)}
+                }
+                if move ||s.follow.get() {
+                    Button(class="map-button locate-button locating",on:click=move |_|s.locate(),a11y:label="Following my location") {Icon(icon=LOCATE)}
+                } else {
+                    Button(variant=ButtonVariant::Secondary,class="map-button locate-button",on:click=move |_|s.locate(),a11y:label="Follow my location") {Icon(icon=LOCATE)}
+                }
+            }
             }
         }
     }
@@ -809,6 +1104,7 @@ struct Marker {
 /// centered underneath by its own width.
 #[component]
 pub(super) fn FriendPin(
+    id: String,
     name: String,
     x: f64,
     y: f64,
@@ -816,16 +1112,33 @@ pub(super) fn FriendPin(
     live: bool,
     avatar: Option<String>,
 ) -> impl IntoView {
+    let s = UiState::current();
+    let selected_id = id.clone();
+    let open = move || s.map_friend_selected.set(Some(id.clone()));
+    let selected = move || {
+        s.map_friend_selected
+            .with(|peer| peer.as_ref() == Some(&selected_id))
+    };
     let radius = if avatar.is_some() { 18.0 } else { 8.0 };
+    let transform = move || {
+        let scale = if selected() { 1.5 } else { 1. };
+        Some(format!(
+            "translate({}px, {}px) scale({scale})",
+            x - radius,
+            y - radius
+        ))
+    };
+    let open_picture = open.clone();
+    let picture_transform = transform.clone();
     let picture = avatar.map(|url| {
         view! {
-            box(class="friend-avatar friend-pin",class:friend-stale=!live,style:transform=format!("translate({}px, {}px)",x-radius,y-radius)) {
+            box(class="friend-avatar friend-pin place-pin",on:pointer_down=|ev|ev.stop_propagation(),on:click=move |_|open_picture(),class:friend-stale=!live,style:transform=picture_transform) {
                 {zgui::elements::image().class("friend-avatar-image").src(Some(url)).alt(Some(format!("{name} picture"))).into_view()}
             }
         }
     });
     let dot = picture.is_none().then(|| {
-        view! {box(class="friend-dot friend-pin",class:friend-stale=!live,style:transform=format!("translate({}px, {}px)",x-radius,y-radius)) {}}
+        view! {box(class="friend-dot friend-pin place-pin",on:pointer_down=|ev|ev.stop_propagation(),on:click=move |_|open(),class:friend-stale=!live,style:transform=transform) {}}
     });
     view! {
         {picture}

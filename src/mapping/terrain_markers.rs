@@ -60,7 +60,7 @@ pub fn TerrainMarkers(
     });
     view! {
             for friend in move ||friend_marks.get(),key=|f|(f.0.clone(),f.2.to_bits(),f.3.to_bits(),f.4.clone(),f.5,f.6.clone()) {
-                FriendPin(name=friend.1.clone(),x=friend.2,y=friend.3,label=friend.4.clone(),live=friend.5,avatar=friend.6.clone())
+                FriendPin(id=friend.0.clone(),name=friend.1.clone(),x=friend.2,y=friend.3,label=friend.4.clone(),live=friend.5,avatar=friend.6.clone())
             }
             if move ||marker.get().is_some() {
                 if move ||s.own_avatar.get().is_none() {

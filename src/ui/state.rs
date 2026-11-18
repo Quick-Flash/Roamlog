@@ -44,6 +44,8 @@ pub struct UiState {
     pub draft: RwSignal<String, LocalStorage>,
     pub dialog: RwSignal<bool, LocalStorage>,
     pub busy: RwSignal<bool, LocalStorage>,
+    /// First snapshot arrived; until then counts would wrongly read as zero.
+    pub loaded: RwSignal<bool, LocalStorage>,
     pub message: RwSignal<String, LocalStorage>,
     pub now: RwSignal<u64, LocalStorage>,
     pub camera: RwSignal<Camera, LocalStorage>,
@@ -92,6 +94,7 @@ pub struct UiState {
     /// Corner lists before each change, for Undo.
     pub area_history: StoredValue<Vec<Vec<Point>>, LocalStorage>,
     pub area_stats: RwSignal<Option<Stats>, LocalStorage>,
+    pub area_naming: RwSignal<bool, LocalStorage>,
     pub area_open: RwSignal<bool, LocalStorage>,
     pub area_name: RwSignal<String, LocalStorage>,
     pub area_busy: RwSignal<bool, LocalStorage>,
@@ -108,9 +111,31 @@ pub struct UiState {
     pub edit_open: RwSignal<bool, LocalStorage>,
     /// Trips finished since last coverage refresh; announced with their new roads.
     pub(super) announce: StoredValue<Vec<u64>, LocalStorage>,
+    pub map_offline: RwSignal<bool, LocalStorage>,
+    pub terrain_enabled: RwSignal<bool, LocalStorage>,
+    pub map_friend_selected: RwSignal<Option<String>, LocalStorage>,
+    pub alert_draw_back_to_circle: RwSignal<bool, LocalStorage>,
+    pub alert_use_circle: StoredValue<Option<zgui::reactive::UnsyncCallback<()>>, LocalStorage>,
+    pub drawing_alert: RwSignal<bool, LocalStorage>,
+    pub alert_polygon: RwSignal<Vec<Point>, LocalStorage>,
+    pub editing_circle: RwSignal<Option<(Point, f64)>, LocalStorage>,
+    pub picking_place_center: RwSignal<bool, LocalStorage>,
+    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+    pub place_peer: RwSignal<Option<String>, LocalStorage>,
+    pub alert_areas_back: StoredValue<Option<zgui::reactive::UnsyncCallback<()>>, LocalStorage>,
+    pub places_open: RwSignal<bool, LocalStorage>,
+    pub place_outline: RwSignal<Vec<Point>, LocalStorage>,
+    /// Alert areas drawn together on map, each with a tappable name: (area id, name, outline).
+    pub area_marks: RwSignal<Vec<(u32, String, Vec<Point>)>, LocalStorage>,
+    /// Area the Alert areas page opens straight to (set from a map label).
+    pub open_area: RwSignal<Option<u32>, LocalStorage>,
+    /// Friend page shown in Friends tab; shared so map can open it.
+    pub friend_detail: RwSignal<Option<String>, LocalStorage>,
+    pub friends_page_back: StoredValue<Option<zgui::reactive::UnsyncCallback<()>>, LocalStorage>,
     pub friends_open: RwSignal<bool, LocalStorage>,
     /// Friend overlay, separate from trip layers. Saved in `show-friends` file.
     pub show_friends: RwSignal<bool, LocalStorage>,
+    pub map_friends: RwSignal<Vec<(String, String)>, LocalStorage>,
     pub friend_markers: RwSignal<Vec<FriendMarker>, LocalStorage>,
     /// Invitation link opened from camera, link or image, awaiting user action.
     #[cfg_attr(not(target_os = "android"), allow(dead_code))]
@@ -174,6 +199,7 @@ impl UiState {
             draft: RwSignal::new_local(String::new()),
             dialog: RwSignal::new_local(false),
             busy: RwSignal::new_local(false),
+            loaded: RwSignal::new_local(false),
             message: RwSignal::new_local(String::new()),
             now: RwSignal::new_local(now_ms()),
             camera: RwSignal::new_local(Camera::default()),
@@ -206,6 +232,7 @@ impl UiState {
             area_id: RwSignal::new_local(None),
             area_history: StoredValue::new_local(Vec::new()),
             area_stats: RwSignal::new_local(None),
+            area_naming: RwSignal::new_local(false),
             area_open: RwSignal::new_local(false),
             area_name: RwSignal::new_local(String::new()),
             area_busy: RwSignal::new_local(false),
@@ -217,8 +244,26 @@ impl UiState {
             editing: RwSignal::new_local(None),
             edit_open: RwSignal::new_local(false),
             announce: StoredValue::new_local(Vec::new()),
+            map_offline: RwSignal::new_local(false),
+            terrain_enabled: RwSignal::new_local(false),
+            map_friend_selected: RwSignal::new_local(None),
+            alert_draw_back_to_circle: RwSignal::new_local(false),
+            alert_use_circle: StoredValue::new_local(None),
+            drawing_alert: RwSignal::new_local(false),
+            alert_polygon: RwSignal::new_local(Vec::new()),
+            editing_circle: RwSignal::new_local(None),
+            picking_place_center: RwSignal::new_local(false),
+            place_peer: RwSignal::new_local(None),
+            alert_areas_back: StoredValue::new_local(None),
+            places_open: RwSignal::new_local(false),
+            place_outline: RwSignal::new_local(Vec::new()),
+            area_marks: RwSignal::new_local(Vec::new()),
+            open_area: RwSignal::new_local(None),
+            friend_detail: RwSignal::new_local(None),
+            friends_page_back: StoredValue::new_local(None),
             friends_open: RwSignal::new_local(false),
             show_friends: RwSignal::new_local(show_friends),
+            map_friends: RwSignal::new_local(Vec::new()),
             friend_markers: RwSignal::new_local(Vec::new()),
             invite_link: RwSignal::new_local(String::new()),
             friend_trips: RwSignal::new_local(None),
@@ -275,6 +320,9 @@ impl UiState {
                     self.announce.update_value(|a| a.extend(finished));
                     if self.data.with_untracked(|old| old != &state) {
                         self.data.set(state);
+                    }
+                    if !self.loaded.get_untracked() {
+                        self.loaded.set(true);
                     }
                     if map && filter == self.history_filter.get_untracked() {
                         let sections = value.sections.unwrap_or_default();
@@ -522,6 +570,19 @@ impl UiState {
         }
     }
 
+    /// Road coverage share; "<1%" so a little progress never reads as none.
+    pub fn coverage_percent(self) -> Option<String> {
+        let (total, traveled) = self.road_totals.get();
+        (total > 0.0).then(|| {
+            let percent = traveled / total * 100.0;
+            if traveled > 0.0 && percent < 1.0 {
+                "<1%".into()
+            } else {
+                format!("{percent:.0}%")
+            }
+        })
+    }
+
     pub fn distance(self, meters: f64) -> String {
         if self.metric.get() {
             format!("{:.2} km", meters / 1000.0)
@@ -586,8 +647,18 @@ impl UiState {
                 .avatars
                 .with_value(|a| a.iter().map(|(k, v)| (k.clone(), v.0)).collect());
             zgui::reactive::spawn_detached(async move {
-                let (markers, pictures) = blocking(move || {
+                let (markers, pictures, roster) = blocking(move || {
                     let published = crate::sharing::node::read_published(&directory);
+                    let roster = crate::sharing::android_app::manager(&directory)
+                        .and_then(|manager| manager.friends().list())
+                        .ok()
+                        .map(|friends| {
+                            friends
+                                .into_iter()
+                                .filter(|friend| !friend.blocked)
+                                .map(|friend| (friend.peer_id.to_string(), friend.display_name))
+                                .collect::<Vec<_>>()
+                        });
                     let now = now_ms() as i64;
                     let fresh =
                         now - published.updated_ms <= crate::sharing::node::HEARTBEAT_MS * 2;
@@ -633,9 +704,16 @@ impl UiState {
                             })
                         })
                         .collect::<Vec<_>>();
-                    (markers, pictures)
+                    (markers, pictures, roster)
                 })
                 .await;
+                if let Some(roster) = roster
+                    && self
+                        .map_friends
+                        .with_untracked(|current| *current != roster)
+                {
+                    self.map_friends.set(roster);
+                }
                 self.avatars.update_value(|avatars| {
                     avatars.retain(|id, _| pictures.iter().any(|p| &p.0 == id));
                     for (id, time, bytes) in pictures {
@@ -882,7 +960,8 @@ impl UiState {
         })
     }
 
-    pub fn history_summary(self) -> String {
+    /// Summary card: (title, trip count), e.g. ("All trips · 10.04 km", "4 trips").
+    pub fn history_summary(self) -> (String, String) {
         let filter = self.history_filter.get();
         let (count, distance) = self.data.with(|d| {
             d.trips_for(filter).fold((0, 0.0), |(count, total), trip| {
@@ -896,11 +975,13 @@ impl UiState {
                 format!("{}: ", self.people_label())
             }
         });
-        format!(
-            "{whose}{} · {count} {} · {}",
-            self.history_label(),
-            if count == 1 { "trip" } else { "trips" },
-            self.distance(distance)
+        (
+            format!(
+                "{whose}{} · {}",
+                self.history_label(),
+                self.distance(distance)
+            ),
+            format!("{count} {}", if count == 1 { "trip" } else { "trips" }),
         )
     }
 

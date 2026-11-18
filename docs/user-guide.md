@@ -1,6 +1,6 @@
 # Using Roamlog
 
-Map fills screen; trip bar sits at bottom. Create category (**+**), select it, tap **Start**. Grant precise location; pending
+Map fills screen; trip card sits above tabs. Pick a category, or **New category…** in same list, then tap **Start trip**. Grant precise location; pending
 start resumes after permission prompt. Android 13+ requests notification permission
 once. **Settings (sliders button) → Appearance** explicitly selects Light/Dark independently
 of system setting and saves choice. **Pause**
@@ -70,8 +70,8 @@ repeated routes still add miles or kilometers.
 **History → Trips** selects all trips, one user-created category (walking,
 biking, motorcycle, etc.), or uncategorized trips. Selected count and distance
 appear in sheet and on map badge; lifetime totals stay visible separately.
-**Show on map** fits selected routes. **Show only** beside old trip isolates that
-trip and fits its route. **All trips** restores combined history. Trip list follows
+Tick trips to pick some; bottom button shows picked trips, or every listed trip
+when none are ticked, and fits them on map. **All trips** restores combined history. Trip list follows
 selection, while category totals remain totals across all saved history.
 
 Map's blue paths and green traveled-road sections follow history selection.
@@ -137,7 +137,7 @@ roads by trips that covered them (1, 2, 3–4, 5+). Tapping traveled road shows 
 trip count and first-traveled date. Finished trips announce and list road length they
 traveled before any earlier trip ("new roads").
 
-History trip **Edit** changes category, trims start/end, splits finished trip in two,
+History trip **Edit** renames or changes category (one **Save changes**), trims start/end, splits finished trip in two,
 or deletes it.
 Edits are journal events; recorded fixes stay in journal. Trimmed/split recording time is
 estimated from GPS times. **Settings → Data → Back up** saves journal (trips, categories, edits,

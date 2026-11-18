@@ -287,9 +287,9 @@ impl Pairing {
                 &set,
             );
             set(match result {
-                Ok(true) => PairStep::Done(
-                    "Paired. Direct friends start Hidden; group access uses your selection.".into(),
-                ),
+                Ok(true) => {
+                    PairStep::Done("Paired. Open their page to change what they see.".into())
+                }
                 Ok(false) => PairStep::Idle,
                 Err(error) => PairStep::Failed(error.to_string()),
             });
@@ -365,12 +365,13 @@ fn pair(
                 joining: !pending.is_inviter(),
                 group_details: pending.group_state.as_ref().map(|state| {
                     let creator = &state.creator_name;
+                    let count = state.members.len();
                     format!(
-                        "Created by {creator} · {} members · {}",
-                        state.members.len(),
+                        "Created by {creator} · {count} {} · {}",
+                        if count == 1 { "member" } else { "members" },
                         match state.policy {
-                            super::groups::Policy::Managed => "Managed: admins invite and remove",
-                            super::groups::Policy::Open => "Open: any member can invite",
+                            super::groups::Policy::Managed => "Admins invite and remove",
+                            super::groups::Policy::Open => "Any member can invite",
                         }
                     )
                 }),
@@ -381,7 +382,12 @@ fn pair(
                 }
                 votes.changed().await?;
             };
+            let direct = pending.group.is_none();
+            let peer = pending.peer_id;
             pending.confirm(accepted, &friends, share).await?;
+            if direct {
+                friends.set_permission(peer, share)?;
+            }
             Ok::<_, Box<dyn std::error::Error + Send + Sync>>(true)
         };
         let result = tokio::select! {

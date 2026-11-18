@@ -1,31 +1,38 @@
-use super::state::UiState;
+use super::icons::LAYERS;
+use super::{history::PersonPickerProps, state::UiState};
 use zgui::prelude::*;
 use zgui_ui::prelude::*;
+use zgui_ui_icons::prelude::*;
 
 /// Map layers: background and trip overlays.
 #[component]
 pub fn ViewOptions() -> impl IntoView {
     let s = UiState::current();
+    let three_d = s.terrain_enabled;
+    let online_label = NodeRef::new();
     let gps_label = NodeRef::new();
     let roads_label = NodeRef::new();
     let heat_label = NodeRef::new();
     let friends_label = NodeRef::new();
+    let open = RwSignal::new_local(false);
     view! {
-        Dialog {
-            DialogTrigger(variant=ButtonVariant::Secondary,class="map-chip") {"Layers"}
+        Dialog(open=open) {
+            DialogTrigger(variant=ButtonVariant::Secondary,class="map-chip layers-button",a11y:label="Layers and areas") {Icon(icon=LAYERS)}
             DialogContent(class="sheet") {
                 DialogHeader {DialogTitle {"Layers"} DialogDescription {"What the map shows. Saved on this device."}}
                 text(class="section-title") {"Background"}
                 row(class="segmented") {
-                    if move ||s.satellite.get() {
-                        Button(variant=ButtonVariant::Ghost,class="layer-map",on:click=move |_|s.set_satellite(false)) {"Map"}
-                        Button(variant=ButtonVariant::Secondary,class="layer-satellite seg-on",on:click=move |_|s.set_satellite(true)) {"Satellite"}
-                    } else {
-                        Button(variant=ButtonVariant::Secondary,class="layer-map seg-on",on:click=move |_|s.set_satellite(false)) {"Map"}
-                        Button(variant=ButtonVariant::Ghost,class="layer-satellite",on:click=move |_|s.set_satellite(true)) {"Satellite"}
-                    }
+                    Button(variant=ButtonVariant::Ghost,class="layer-map",class:seg-on=move ||!three_d.get()&&!s.satellite.get(),on:click=move |_|{three_d.set(false);s.set_satellite(false)}) {"Map"}
+                    Button(variant=ButtonVariant::Ghost,class="layer-satellite",class:seg-on=move ||!three_d.get()&&s.satellite.get(),on:click=move |_|{three_d.set(false);s.set_satellite(true)}) {"Satellite"}
+                    Button(variant=ButtonVariant::Ghost,class:seg-on=move ||three_d.get(),disabled=Signal::derive_local(move ||s.area_drawing.get()),on:click=move |_|three_d.set(true)) {"3D terrain"}
+                }
+                row(class="view-toggle") {
+                    Label(node_ref=online_label) {"Load map tiles online"}
+                    Switch(labelled_by=online_label,checked=Binding::controlled(
+                        Signal::derive_local(move ||!s.map_offline.get()),move |enabled: bool|s.map_offline.set(!enabled)))
                 }
                 text(class="section-title") {"Trips"}
+                PersonPicker()
                 row(class="view-toggle") {
                     column(class="toggle-text") {
                         Label(node_ref=roads_label) {"Traveled roads"}
@@ -57,7 +64,11 @@ pub fn ViewOptions() -> impl IntoView {
                         Switch(class="show-friends",labelled_by=friends_label,checked=Binding::controlled(s.show_friends,move |value|s.set_show_friends(value)))
                     }
                 }
-                text(class="muted") {"Tap a traveled road for trips and first date. Ambiguous routes never mark guessed roads."}
+                text(class="section-title") {"Areas"}
+                row(class="actions") {
+                    Button(variant=ButtonVariant::Outline,on:click=move |_|{open.set(false);s.areas_open.set(true)}) {"Saved areas"}
+                    Button(on:click=move |_|{open.set(false);s.start_area()}) {"Draw new area"}
+                }
             }
         }
     }

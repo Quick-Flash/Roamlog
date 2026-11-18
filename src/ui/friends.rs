@@ -20,10 +20,7 @@ use zgui_image::ImageBytes;
 use zgui_ui::prelude::*;
 use zgui_ui_icons::{
     prelude::*,
-    set::{
-        mark::{CROSS, PLUS},
-        ui::ELLIPSIS,
-    },
+    set::{mark::PLUS, ui::ELLIPSIS},
 };
 
 #[derive(Clone, PartialEq)]
@@ -67,6 +64,8 @@ struct Loaded {
     mode: Mode,
     expires_at_ms: Option<i64>,
     share_battery: bool,
+    alert_names: Vec<String>,
+    alerts_by_friend: std::collections::BTreeMap<String, Vec<String>>,
     rows: Vec<Row>,
     groups: Vec<GroupRow>,
 }
@@ -242,10 +241,24 @@ fn load(directory: PathBuf) -> Result<Loaded, String> {
             row
         })
         .collect();
+    let mut alerts = std::collections::BTreeMap::new();
+    let mut alerts_by_friend = std::collections::BTreeMap::<String, Vec<String>>::new();
+    for area in crate::sharing::places::list(manager.friends()).unwrap_or_default() {
+        alerts.insert(area.area(), area.name.clone());
+        if !area.no_rule {
+            alerts_by_friend
+                .entry(area.peer.to_string())
+                .or_default()
+                .push(area.name);
+        }
+    }
+    let alert_names = alerts.into_values().collect();
     Ok(Loaded {
         mode: manager.mode().map_err(|e| e.to_string())?,
         expires_at_ms: manager.expires_at_ms().map_err(|e| e.to_string())?,
         share_battery: manager.shares_battery().map_err(|e| e.to_string())?,
+        alert_names,
+        alerts_by_friend,
         rows,
         groups,
     })
@@ -318,6 +331,10 @@ pub fn Friends() -> impl IntoView {
             }
         });
     };
+    // Pairing panel: open while adding a friend, joining from a link, or pairing.
+    let adding = RwSignal::new_local(false);
+    // Who and which group the last confirm step was about; Done arrives after Waiting.
+    let last_confirm = StoredValue::new_local(None::<(String, Option<String>, bool)>);
     // Poll pairing progress and friend status while sheet is open.
     let timer = set_interval(Duration::from_millis(500), move || {
         if !s.friends_open.get_untracked() {
@@ -338,6 +355,26 @@ pub fn Friends() -> impl IntoView {
                 next,
                 PairStep::Done(_) | PairStep::Failed(_) | PairStep::Idle
             );
+            // Success: close the pairing panel and report on the Friends list itself; group
+            // invites say what happened to the group instead of the generic pairing text.
+            if let PairStep::Confirm {
+                name,
+                group,
+                joining,
+                ..
+            } = &next
+            {
+                last_confirm.set_value(Some((name.clone(), group.clone(), *joining)));
+            }
+            if let PairStep::Done(message) = &next {
+                let text = match last_confirm.get_value() {
+                    Some((_, Some(group), true)) => format!("Joined {group}."),
+                    Some((name, Some(group), false)) => format!("Added {name} to {group}."),
+                    _ => message.clone(),
+                };
+                s.message.set(text);
+                adding.set(false);
+            }
             step.set(next);
             if finished {
                 pairing.set_value(None);
@@ -390,19 +427,58 @@ pub fn Friends() -> impl IntoView {
     };
     let set_mode = move |mode: Mode| change(s, loaded, true, move |m| m.set_mode(mode));
     let options_open = RwSignal::new_local(false);
+    let direct_access = RwSignal::new_local(Permission::Off);
+    let invite_until = RwSignal::new_local(None::<u64>);
+    let invite_clock = zgui::reactive::RenderEffect::new(move |_| {
+        if matches!(step.get(), PairStep::Invite { .. }) {
+            if invite_until.with_untracked(Option::is_none) {
+                invite_until.set(Some(now_ms() + 300_000));
+            }
+        } else {
+            invite_until.set(None);
+            if !matches!(
+                step.get_untracked(),
+                PairStep::Confirm { .. } | PairStep::Waiting
+            ) {
+                direct_access.set(Permission::Off);
+            }
+        }
+    });
+    on_cleanup_local(move || drop(invite_clock));
     let duration = RwSignal::new_local("1".to_string());
     let duration_unit = RwSignal::new_local("60".to_string());
-    let places_open = RwSignal::new_local(false);
+    let places_open = s.places_open;
     let group_name = RwSignal::new_local(String::new());
     let group_policy = RwSignal::new_local("managed".to_string());
     let group_access = RwSignal::new_local(Permission::Always);
-    let tab = RwSignal::new_local("people".to_string());
-    // Pairing panel: open while adding a friend, joining from a link, or pairing.
-    let adding = RwSignal::new_local(false);
+    let groups_open = RwSignal::new_local(false);
+    let new_group = RwSignal::new_local(false);
+    let detail = s.friend_detail;
+    // Opened straight to a friend (e.g. from the map): drop sub-pages left open underneath,
+    // so Back returns to the Friends list.
+    let deep_link = zgui::reactive::RenderEffect::new(move |_| {
+        if s.friends_open.get() && detail.with_untracked(Option::is_some) {
+            options_open.set(false);
+            groups_open.set(false);
+        }
+    });
+    on_cleanup_local(move || drop(deep_link));
+    let custom_timer = RwSignal::new_local(false);
+    // Opened invitation link: start pairing at once when a name is set; otherwise leave the
+    // link in the field until the user enters a name.
     let invited = zgui::reactive::RenderEffect::new(move |_| {
-        if s.invite_link.with(|l| !l.is_empty()) {
-            tab.set("people".into());
-            adding.set(true);
+        let link = s.invite_link.get();
+        if link.trim().is_empty() {
+            return;
+        }
+        adding.set(true);
+        let ready = matches!(
+            step.get_untracked(),
+            PairStep::Idle | PairStep::Done(_) | PairStep::Failed(_)
+        );
+        if ready && !name.get_untracked().trim().is_empty() {
+            s.invite_link.set(String::new());
+            begin(Some(link.trim().to_owned()), None);
         }
     });
     on_cleanup_local(move || drop(invited));
@@ -443,29 +519,195 @@ pub fn Friends() -> impl IntoView {
         step.set(PairStep::Idle);
         adding.set(false);
     };
+    let back = move || -> bool {
+        if adding.get_untracked() || !idle() {
+            close_panel();
+        } else if detail.with_untracked(Option::is_some) {
+            detail.set(None);
+        } else if options_open.get_untracked() {
+            options_open.set(false);
+        } else if groups_open.get_untracked() {
+            groups_open.set(false);
+        } else {
+            return false;
+        }
+        true
+    };
+    s.friends_page_back
+        .set_value(Some(UnsyncCallback::new(move |()| {
+            if !back() {
+                s.friends_open.set(false);
+            }
+        })));
+    on_cleanup_local(move || s.friends_page_back.set_value(None));
+    let title = move || {
+        if adding.get() || !idle() {
+            match step.get() {
+                PairStep::Confirm {
+                    group: Some(group),
+                    joining: true,
+                    ..
+                } => format!("Join {group}"),
+                PairStep::Confirm {
+                    group: Some(group), ..
+                } => format!("Invite to {group}"),
+                _ => "Add friend".into(),
+            }
+        } else if let Some(id) = detail.get() {
+            rows()
+                .into_iter()
+                .find(|row| row.id == id)
+                .map(|row| row.name)
+                .unwrap_or_else(|| "Friend".into())
+        } else if options_open.get() {
+            "Sharing options".into()
+        } else if groups_open.get() {
+            "Groups".into()
+        } else {
+            "Friends".into()
+        }
+    };
+    let home = move || {
+        !adding.get()
+            && idle()
+            && detail.with(Option::is_none)
+            && !options_open.get()
+            && !groups_open.get()
+    };
+    let timer_text = move || {
+        loaded
+            .with(|l| l.as_ref().and_then(|l| l.expires_at_ms))
+            .map(|until| {
+                let mins = ((until - s.now.get() as i64).max(0) + 59_999) / 60_000;
+                if mins >= 1440 {
+                    format!("Stops in {} d {} h", mins / 1440, mins / 60 % 24)
+                } else if mins >= 60 {
+                    format!("Stops in {} h {} min", mins / 60, mins % 60)
+                } else {
+                    format!("Stops in {mins} min")
+                }
+            })
+    };
     view! {
-        Dialog(open=s.friends_open) {
-            DialogContent(class="sheet friends-sheet") {
-                DialogHeader {DialogTitle {"Friends"} DialogDescription {"Encrypted phone-to-phone location sharing. No account or Roamlog server."}}
-                column(class="share-card") {
-                    YouCard(name=name,edit=edit,confirm=confirm)
-                    text(class="section-title") {"Share my location"}
-                    row(class="segmented") {
-                        Button(variant=ButtonVariant::Ghost,class:seg-on=move ||mode()==Mode::Off,class="share-off",on:click=move |_|set_mode(Mode::Off)) {"Off"}
-                        Button(variant=ButtonVariant::Ghost,class:seg-on=move ||mode()==Mode::TripsOnly,class="share-trips",on:click=move |_|set_mode(Mode::TripsOnly)) {"During trips"}
-                        Button(variant=ButtonVariant::Ghost,class:seg-on=move ||mode()==Mode::Always,class="share-always",on:click=move |_|set_mode(Mode::Always)) {"Always"}
+        if move ||s.friends_open.get() {
+            column(class="tab-page friends-sheet") {
+                row(class="page-heading") {
+                    if move ||!home() {
+                        Button(variant=ButtonVariant::Ghost,class="page-back",a11y:label="Back",on:click=move |_|{back();}) {"‹"}
                     }
-                    text(class="muted") {{move ||match mode(){
-                        Mode::Off=>"No sharing connections. Pairing still works.",
-                        Mode::TripsOnly=>"Sends only while recording a trip. Friends still show.",
-                        Mode::Always=>"Sends in background; slower when you are still.",
-                    }}}
+                    text(class="page-title grow") {{title}}
+                    if move ||home() {
+                        Button(class="add-friend",a11y:label="Add friend",on:click=move |_|{
+                            // Fresh start: no result or message left from an earlier pairing.
+                            s.message.set(String::new());
+                            if matches!(step.get_untracked(),PairStep::Done(_)|PairStep::Failed(_)) {step.set(PairStep::Idle);}
+                            adding.set(true);
+                        }) {Icon(icon=PLUS) text {"Add friend"}}
+                    }
+                    if move ||groups_open.get() && !adding.get() && idle() {
+                        Button(on:click=move |_|new_group.set(true)) {"+ New group"}
+                    }
                 }
-                row(class="row-actions") {
-                    Button(variant=ButtonVariant::Outline,on:click=move |_|options_open.update(|v| *v = !*v)) {"Sharing options"}
-                    Button(variant=ButtonVariant::Outline,on:click=move |_|places_open.set(true)) {"Place alerts"}
-                }
-                if move ||options_open.get()&&!adding.get()&&idle() {
+                scroll(class="page-scroll") {
+                    column(class="page-list") {
+                        if move ||!s.message.with(String::is_empty) {
+                            text(class="muted",a11y:role=Role::Status,on:click=move |_|s.message.set(String::new())) {{move ||s.message.get()}}
+                        }
+                        if move ||adding.get() || !idle() {
+                            text(class="section-title") {{move ||if matches!(step.get(),PairStep::Confirm{..}|PairStep::Waiting) {"Step 2 of 2 · Confirm code"} else {"Step 1 of 2 · Connect"}}}
+                        if move ||idle() {
+                            text(class="muted") {"Pair in person: one of you shows a code, the other scans it. Or send the link instead."}
+                            Input(value=name,label="Your name",placeholder="Your name (friends see it)")
+                            row(class="row-actions") {
+                                Button(class="invite-friend",on:click=move |_|begin(None,None)) {"Show my code"}
+                                Button(variant=ButtonVariant::Outline,class="scan-invite",on:click=move |_|{if let Err(error)=crate::android::scan_invite(s.directory.get_value()){s.message.set(error)}}) {"Scan theirs"}
+                            }
+                            row(class="create-row") {
+                                Input(value=s.invite_link,label="Invitation link",placeholder="Or paste roamlog://pair/… link",class="grow")
+                                Button(variant=ButtonVariant::Outline,class="join-invite",disabled=Signal::derive_local(move ||s.invite_link.with(|l|l.trim().is_empty())),on:click=move |_|{let link=s.invite_link.get_untracked().trim().to_owned();s.invite_link.set(String::new());begin(Some(link),None)}) {"Pair"}
+                            }
+                        }
+                        if move ||matches!(step.get(),PairStep::Starting) {
+                            text(class="muted") {"Connecting… up to 30 seconds."}
+                        }
+                        if move ||matches!(step.get(),PairStep::Invite{..}) {
+                            text(class="muted") {{move ||{
+                                let left=invite_until.get().unwrap_or_default().saturating_sub(s.now.get())/1000;
+                                format!("Code expires in {}:{:02}",left/60,left%60)
+                            }}}
+                            if move ||qr_url.get().is_some() {
+                                box(class="qr-frame") {
+                                    {zgui::elements::image().class("qr-image").src(Signal::derive_local(move ||qr_url.get())).alt(Some("Invitation QR code".to_string())).into_view()}
+                                }
+                            }
+                            Button(variant=ButtonVariant::Outline,class="share-invite",on:click=move |_|{if let PairStep::Invite{link,..}=step.get_untracked(){crate::android::share_text(&link)}}) {"Share link"}
+                        }
+                        if move ||matches!(step.get(),PairStep::Confirm{..}) {
+                            text(class="pair-name") {{move ||match step.get(){PairStep::Confirm{name,group:Some(group),joining:true,..}=>format!("Pair with {name} and join {group}?"),PairStep::Confirm{name,group:Some(group),..}=>format!("Pair with {name} and add them to {group}?"),PairStep::Confirm{name,..}=>format!("Pair with {name}?"),_=>String::new()}}}
+                            if move ||matches!(step.get(),PairStep::Confirm{group_details:Some(_),..}) {
+                                text(class="muted") {{move ||match step.get(){PairStep::Confirm{group_details,..}=>group_details.unwrap_or_default(),_=>String::new()}}}
+                            }
+                            text(class="muted") {"Check this code matches their screen exactly."}
+                            text(class="pair-code") {{move ||if let PairStep::Confirm{code,..}=step.get(){code}else{String::new()}}}
+                            if move ||matches!(step.get(),PairStep::Confirm{group:Some(_),joining:true,..}) {
+                                text(class="section-title") {"What members see"}
+                                row(class="segmented") {
+                                    for choice in ||vec![(Permission::Off,"Nothing yet"),(Permission::TripsOnly,"During trips"),(Permission::Always,"Always")],key=|choice|choice.1 {
+                                        Button(variant=ButtonVariant::Ghost,class:seg-on=move ||join_access.get()==choice.0,on:click=move |_|join_access.set(choice.0)) {{choice.1}}
+                                    }
+                                }
+                            }
+                            if move ||matches!(step.get(),PairStep::Confirm{group:None,..}) {
+                                text(class="section-title") {"What they see"}
+                                row(class="segmented") {
+                                    for choice in ||vec![(Permission::Off,"Nothing yet"),(Permission::TripsOnly,"During trips"),(Permission::Always,"Always")],key=|choice|choice.1 {
+                                        Button(variant=ButtonVariant::Ghost,class:seg-on=move ||direct_access.get()==choice.0,on:click=move |_|direct_access.set(choice.0)) {{choice.1}}
+                                    }
+                                }
+                            }
+                            row(class="row-actions") {
+                                Button(class="confirm-pair",on:click=move |_|pairing.with_value(|p|if let Some(p)=p{p.vote(true,if matches!(step.get_untracked(),PairStep::Confirm{group:None,..}) {direct_access.get_untracked()} else {join_access.get_untracked()})})) {"Codes match"}
+                                Button(variant=ButtonVariant::Outline,class="reject-pair",on:click=move |_|pairing.with_value(|p|if let Some(p)=p{p.vote(false,join_access.get_untracked())})) {"Codes differ — reject"}
+                            }
+                        }
+                        if move ||matches!(step.get(),PairStep::Waiting) {
+                            text(class="muted") {"Waiting for friend to confirm…"}
+                        }
+                        if move ||matches!(step.get(),PairStep::Done(_)|PairStep::Failed(_)) {
+                            text(class="muted pair-result") {{move ||match step.get(){PairStep::Done(m)=>m,PairStep::Failed(e)=>pairing_error(&e),_=>String::new()}}}
+                        }
+                        } else {
+                        if move ||detail.with(Option::is_some) {
+                            for friend in move ||rows().into_iter().filter(|r|Some(&r.id)==detail.get().as_ref()).collect::<Vec<_>>(),key=|r|(r.id.clone(),r.name.clone(),r.permission,r.group_permission,r.blocked,r.status.clone(),r.groups.clone()) {
+                                FriendRow(friend=friend.clone(),loaded=loaded,confirm=confirm,edit=edit)
+                            }
+                        } else {
+                        if move ||options_open.get() {
+                            text(class="section-title") {"Share my location"}
+                            for choice in ||vec![
+                                (Mode::Off,"Off","Close sharing connections."),
+                                (Mode::TripsOnly,"During trips","Send location while recording."),
+                                (Mode::Always,"Always","Send location in the background.")
+                            ],key=|choice|choice.1 {
+                                Button(variant=ButtonVariant::Outline,class="friends-mode-choice",a11y:label=choice.1,class:seg-on=move ||mode()==choice.0,on:click=move |_|set_mode(choice.0)) {
+                                    text {{choice.1}}
+                                    text(class="muted") {{choice.2}}
+                                }
+                            }
+                            text(class="section-title") {"Share for a while"}
+                            if move ||timer_text().is_some() {
+                                row(class="alert-card page-heading") {
+                                    text(class="grow") {{move ||timer_text().unwrap_or_default()}}
+                                    Button(variant=ButtonVariant::Outline,on:click=move |_|set_mode(Mode::Off)) {"Stop now"}
+                                }
+                            }
+                            row(class="friends-timer-presets") {
+                                for preset in ||vec![(15u32,"15 min"),(60,"1 hour"),(480,"8 hours"),(1440,"1 day")],key=|preset|preset.0 {
+                                    Button(variant=ButtonVariant::Outline,on:click=move |_|change(s,loaded,true,move |m|m.set_timed(preset.0))) {{preset.1}}
+                                }
+                                Button(variant=ButtonVariant::Outline,on:click=move |_|custom_timer.update(|open|*open = !*open)) {"Custom…"}
+                            }
+                            if move ||custom_timer.get() {
                 row(class="row-actions") {
                     Input(value=duration,label="Sharing duration",placeholder="Amount")
                     Select(value=duration_unit) {
@@ -486,135 +728,170 @@ pub fn Friends() -> impl IntoView {
                         change(s, loaded, true, move |m|m.set_timed(minutes));
                     }) {"Share for this long"}
                 }
-                text(class="muted small") {{move ||loaded.with(|l|l.as_ref().and_then(|l|l.expires_at_ms)).map(|until|{
-                    format!("Sharing stops in {} min, including group grants and receiving.", ((until - s.now.get() as i64).max(0) + 59_999) / 60_000)
-                }).unwrap_or_else(||"Timer uses existing friend/group access. Choosing Off, During trips or Always cancels timer.".into())}}
-                row(class="row-actions") {
-                    Button(variant=ButtonVariant::Outline,on:click=move |_|{
-                        let enabled = !loaded.with_untracked(|l|l.as_ref().is_some_and(|l|l.share_battery));
-                        change(s, loaded, false, move |m|m.set_share_battery(enabled));
-                    },a11y:label="Toggle sharing battery percentage") {{move ||if loaded.with(|l|l.as_ref().is_some_and(|l|l.share_battery)){"Battery sharing: On"}else{"Battery sharing: Off"}}}
-                }
-                }
-                if move ||!options_open.get()&&loaded.with(|l|l.as_ref().and_then(|l|l.expires_at_ms)).is_some() {
-                    text(class="muted small") {{move ||loaded.with(|l|l.as_ref().and_then(|l|l.expires_at_ms)).map(|until|format!("Sharing stops in {} min",((until-s.now.get() as i64).max(0)+59_999)/60_000)).unwrap_or_default()}}
-                }
-                if move ||adding.get()||!idle() {
-                    column(class="pair-panel") {
-                        row(class="pair-head") {
-                            text(class="section-title grow") {"Add friend"}
-                            Button(variant=ButtonVariant::Ghost,class="icon-button",on:click=move |_|close_panel(),a11y:label="Close add friend") {Icon(icon=CROSS)}
-                        }
-                        if move ||idle() {
-                            Input(value=name,label="Your name",placeholder="Your name (friends see it)")
-                            row(class="row-actions") {
-                                Button(class="invite-friend",on:click=move |_|begin(None,None)) {"Show my QR"}
-                                Button(variant=ButtonVariant::Outline,class="scan-invite",on:click=move |_|{if let Err(error)=crate::android::scan_invite(s.directory.get_value()){s.message.set(error)}}) {"Scan QR image"}
+
                             }
-                            row(class="create-row") {
-                                Input(value=s.invite_link,label="Invitation link",placeholder="Or paste roamlog://pair/… link",class="grow")
-                                Button(variant=ButtonVariant::Outline,class="join-invite",disabled=Signal::derive_local(move ||s.invite_link.with(|l|l.trim().is_empty())),on:click=move |_|{let link=s.invite_link.get_untracked().trim().to_owned();s.invite_link.set(String::new());begin(Some(link),None)}) {"Pair"}
+                            text(class="section-title") {"Updates"}
+                            row(class="view-toggle") {
+                                Label {"Share battery level"}
+                                Switch(a11y:label="Share battery level",checked=Binding::controlled(
+                                    Signal::derive_local(move ||loaded.with(|l|l.as_ref().is_some_and(|l|l.share_battery))),
+                                    move |enabled|change(s,loaded,false,move |m|m.set_share_battery(enabled))))
                             }
-                        }
-                        if move ||matches!(step.get(),PairStep::Starting) {
-                            text(class="muted") {"Connecting… up to 30 seconds."}
-                        }
-                        if move ||matches!(step.get(),PairStep::Invite{..}) {
-                            text(class="muted") {"Friend scans this with phone camera or opens shared link. Lasts 5 minutes."}
-                            if move ||qr_url.get().is_some() {
-                                box(class="qr-frame") {
-                                    {zgui::elements::image().class("qr-image").src(Signal::derive_local(move ||qr_url.get())).alt(Some("Invitation QR code".to_string())).into_view()}
-                                }
+                            YouCard(name=name,edit=edit,confirm=confirm)
+                        } else {
+                        if move ||groups_open.get() {
+                            for group in move ||groups(),key=|g|g.clone() {
+                                GroupItem(group=group.clone(),loaded=loaded,confirm=confirm,invite=begin_group,edit=edit)
                             }
-                            Button(variant=ButtonVariant::Outline,class="share-invite",on:click=move |_|{if let PairStep::Invite{link,..}=step.get_untracked(){crate::android::share_text(&link)}}) {"Share link"}
-                        }
-                        if move ||matches!(step.get(),PairStep::Confirm{..}) {
-                            text(class="pair-name") {{move ||match step.get(){PairStep::Confirm{name,group:Some(group),joining:true,..}=>format!("Pair with {name} and join {group}?"),PairStep::Confirm{name,group:Some(group),..}=>format!("Pair with {name} and add them to {group}?"),PairStep::Confirm{name,..}=>format!("Pair with {name}?"),_=>String::new()}}}
-                            text(class="muted") {{move ||match step.get(){PairStep::Confirm{group_details,..}=>group_details.unwrap_or_default(),_=>String::new()}}}
-                            if move ||matches!(step.get(),PairStep::Confirm{group:Some(_),joining:true,..}) {
-                                AccessSelect(current=Permission::TripsOnly,label="What group members see".into(),pick=Callback::new(move |p|join_access.set(p)))
-                            }
-                            text(class="muted") {"Code must match friend's screen exactly."}
-                            text(class="pair-code") {{move ||if let PairStep::Confirm{code,..}=step.get(){code}else{String::new()}}}
-                            row(class="row-actions") {
-                                Button(class="confirm-pair",on:click=move |_|pairing.with_value(|p|if let Some(p)=p{p.vote(true,join_access.get_untracked())})) {"Codes match"}
-                                Button(variant=ButtonVariant::Outline,class="reject-pair",on:click=move |_|pairing.with_value(|p|if let Some(p)=p{p.vote(false,join_access.get_untracked())})) {"Reject"}
-                            }
-                        }
-                        if move ||matches!(step.get(),PairStep::Waiting) {
-                            text(class="muted") {"Waiting for friend to confirm…"}
-                        }
-                        if move ||matches!(step.get(),PairStep::Done(_)|PairStep::Failed(_)) {
-                            text(class="muted pair-result") {{move ||match step.get(){PairStep::Done(m)=>m,PairStep::Failed(e)=>format!("Pairing failed: {e}"),_=>String::new()}}}
-                        }
-                    }
-                }
-                Tabs(value=tab,class="history-tabs friends-tabs") {
-                    TabsList(class="tabs-list") {
-                        TabsTrigger(value="people") {{move ||format!("Friends ({})",all_rows())}}
-                        TabsTrigger(value="groups") {{move ||format!("Groups ({})",groups().len())}}
-                    }
-                    TabsContent(value="people") {
-                        scroll(class="sheet-scroll friends-scroll") {
-                            column(class="tab-body list-body") {
-                                if move ||!adding.get()&&idle() {
-                                    Button(variant=ButtonVariant::Outline,class="add-friend",on:click=move |_|adding.set(true)) {
-                                        Icon(icon=PLUS)
-                                        text {"Add friend"}
-                                    }
-                                }
-                                if move ||all_rows()>=4 {
-                                    Input(value=search,label="Search friends",placeholder="Search friends")
-                                }
-                                if move ||all_rows()==0 {
-                                    text(class="muted") {"No friends yet. New friends see nothing until you choose access."}
-                                }
-                                if move ||all_rows()>0&&rows().is_empty() {
-                                    text(class="muted") {"No friend matches."}
-                                }
-                                for friend in move ||rows(),key=|r|(r.id.clone(),r.name.clone(),r.permission,r.group_permission,r.blocked,r.status.clone(),r.groups.clone()) {
-                                    FriendRow(friend=friend.clone(),loaded=loaded,confirm=confirm,edit=edit)
-                                }
-                            }
-                        }
-                    }
-                    TabsContent(value="groups") {
-                        scroll(class="sheet-scroll friends-scroll") {
-                            column(class="tab-body list-body") {
-                                row(class="create-row") {
-                                    Input(value=group_name,label="New group name",placeholder="New group: Family…",class="grow")
-                                    Button(variant=ButtonVariant::Outline,class="create-group",disabled=Signal::derive_local(move ||group_name.with(|n|n.trim().is_empty())),on:click=move |_|{
-                                        let name=group_name.get_untracked().trim().to_owned();
-                                        let me=name_value();
-                                        if me.is_empty(){adding.set(true);s.message.set("Enter your name first; members see it.".into());return;}
-                                        group_name.set(String::new());
-                                        let policy=if group_policy.get_untracked()=="open" {Policy::Open}else{Policy::Managed};
-                                        let access=group_access.get_untracked();
-                                        change(s,loaded,false,move |m|m.friends().create_group(&sharing::key()?,&name,&me,policy,access).map(drop));
-                                    }) {"Create"}
-                                }
+                            if move ||groups().is_empty() {text(class="muted") {"No groups yet. A group shares locations among several friends at once: create one, then invite people."}}
+                            Dialog(open=new_group) {
+                                DialogContent(class="sheet") {
+                                    DialogHeader {DialogTitle {"New group"}}
+                                    Input(value=group_name,label="New group name",placeholder="New group: Family…",class="wide")
+                                text(class="section-title") {"Who can invite · members see"}
                                 row(class="create-row") {
                                     Select(value=group_policy) {
                                         SelectTrigger(label="Who may invite",class="access-select") {SelectValue()}
                                         SelectContent {
-                                            SelectItem(value="managed") {"Managed"}
-                                            SelectItem(value="open") {"Open"}
+                                            SelectItem(value="managed") {"Admins only"}
+                                            SelectItem(value="open") {"Any member"}
                                         }
                                     }
                                     AccessSelect(current=Permission::Always,label="New group access".into(),pick=Callback::new(move |p|group_access.set(p)))
                                 }
                                 text(class="muted") {{move ||if group_policy.get()=="open" {"Any member may invite. Admins remove members."}else{"Only admins may invite or remove members."}}}
-                                for group in move ||groups(),key=|g|g.clone() {
-                                    GroupItem(group=group.clone(),loaded=loaded,confirm=confirm,invite=begin_group,edit=edit)
+                                    Button(class="create-group wide",disabled=Signal::derive_local(move ||group_name.with(|n|n.trim().is_empty())),on:click=move |_|{
+                                        let name=group_name.get_untracked().trim().to_owned();
+                                        let me=name_value();
+                                        if me.is_empty(){adding.set(true);s.message.set("Enter your name first; members see it.".into());return;}
+                                        group_name.set(String::new());
+                                        new_group.set(false);
+                                        let policy=if group_policy.get_untracked()=="open" {Policy::Open}else{Policy::Managed};
+                                        let access=group_access.get_untracked();
+                                        change(s,loaded,false,move |m|m.friends().create_group(&sharing::key()?,&name,&me,policy,access).map(drop));
+                                    }) {"Create group"}
+
                                 }
-                                text(class="muted") {"Members share with each other using the group's access, or a person's own if higher. Managed groups let admins invite; Open groups let any member invite."}
                             }
-                        }
+                        } else {
+                            column(class="share-card") {
+                                row(class="page-heading") {
+                                    {friend_avatar("me".into(),name.get_untracked(),mode()!=Mode::Off)}
+                                    column(class="grow") {
+                                        text(class="friend-name") {{move ||match mode(){Mode::Off=>"Sharing off",Mode::TripsOnly=>"Sharing during trips",Mode::Always=>"Sharing always"}}}
+                                        text(class="muted") {{move ||{let display = name.get();let display = if display.trim().is_empty(){"You".into()}else{display};timer_text().map_or(display.clone(),|timer|format!("{display} · {timer}"))}}}
+                                    }
+                                }
+                    row(class="segmented") {
+                        Button(variant=ButtonVariant::Ghost,class:seg-on=move ||mode()==Mode::Off,class="share-off",on:click=move |_|set_mode(Mode::Off)) {"Off"}
+                        Button(variant=ButtonVariant::Ghost,class:seg-on=move ||mode()==Mode::TripsOnly,class="share-trips",on:click=move |_|set_mode(Mode::TripsOnly)) {"During trips"}
+                        Button(variant=ButtonVariant::Ghost,class:seg-on=move ||mode()==Mode::Always,class="share-always",on:click=move |_|set_mode(Mode::Always)) {"Always"}
+                    }
+
+                                Button(variant=ButtonVariant::Ghost,class="friends-nav",a11y:label="Sharing options",on:click=move |_|options_open.set(true)) {text {"Sharing options"} spacer() text {"›"}}
+                            }
+                            column(class="friends-nav-group") {
+                                Button(variant=ButtonVariant::Ghost,class="friends-nav",a11y:label="Alert areas",on:click=move |_|{s.place_peer.set(None);places_open.set(true)}) {
+                                    Icon(icon=super::icons::LAYERS)
+                                    column(class="grow") {
+                                        text(class="friend-name") {"Alert areas"}
+                                        text(class="muted") {{move ||loaded.with(|l|l.as_ref().map(|l|l.alert_names.join(", ")).filter(|n|!n.is_empty()).unwrap_or_else(||"No alert areas".into()))}}
+                                    }
+                                    text(class="friend-badge") {{move ||loaded.with(|l|l.as_ref().map_or(0,|l|l.alert_names.len())).to_string()}}
+                                    text {"›"}
+                                }
+                                Button(variant=ButtonVariant::Ghost,class="friends-nav",a11y:label="Groups",on:click=move |_|groups_open.set(true)) {
+                                    Icon(icon=super::icons::PEOPLE)
+                                    column(class="grow") {
+                                        text(class="friend-name") {"Groups"}
+                                        text(class="muted") {{move ||{let names=groups().into_iter().map(|g|g.name).collect::<Vec<_>>();if names.is_empty(){"No groups".into()}else{names.join(", ")}}}}
+                                    }
+                                    text(class="friend-badge") {{move ||groups().len().to_string()}}
+                                    text {"›"}
+                                }
+                            }
+                            text(class="section-title") {{move ||format!("Friends · {}",all_rows())}}
+                            if move ||all_rows()>=4 {Input(value=search,label="Search friends",placeholder="Search friends")}
+                            if move ||rows().is_empty() {text(class="muted") {{move ||if all_rows()==0 {"No friends yet. Tap Add friend to pair with someone nearby."} else {"No friend matches."}}}}
+                            if move ||!rows().is_empty() {
+                            column(class="friends-nav-group") {
+                                for friend in move ||rows(),key=|r|(r.id.clone(),r.name.clone(),r.permission,r.group_permission,r.blocked,r.status.clone()) {
+                                    {{
+                                        let id=friend.id.clone();
+                                        view! {
+                                            Button(variant=ButtonVariant::Ghost,class="friends-nav",a11y:label=format!("Open {}",friend.name),on:click=move |_|detail.set(Some(id.clone()))) {
+                                                {friend_avatar(friend.id.clone(),friend.name.clone(),friend.status.starts_with("Live"))}
+                                                column(class="grow") {
+                                                    text(class="friend-name") {{friend.name.clone()}}
+                                                    text(class="muted") {{friend.status.clone()}}
+                                                }
+                                                text(class="friend-badge") {{if friend.blocked {"Blocked"} else {match friend.permission.max(friend.group_permission) {
+                                                    Permission::Off=>"Hidden",Permission::TripsOnly=>"Sees trips",Permission::Always=>"Sees always"
+                                                }}}}
+                                                text {"›"}
+                                            }
+                                        }
+                                    }}
+                                }
+                            }
+                            }
+                        } } } }
                     }
                 }
             }
         }
         PlaceAlerts(open=places_open)
+    }
+}
+
+/// Pairing failure in plain words; network detail kept short at the end.
+fn pairing_error(error: &str) -> String {
+    let network = [
+        "handshake",
+        "connect",
+        "timed out",
+        "timeout",
+        "unreachable",
+        "protocol",
+    ]
+    .iter()
+    .any(|word| error.to_lowercase().contains(word));
+    if network {
+        "Couldn't reach your friend. Keep both phones online with Roamlog open, then try again."
+            .into()
+    } else {
+        format!("Pairing failed: {error}")
+    }
+}
+
+fn friend_avatar(id: String, name: String, live: bool) -> impl IntoView {
+    let s = UiState::current();
+    let initial = name
+        .chars()
+        .next()
+        .unwrap_or('?')
+        .to_uppercase()
+        .to_string();
+    let picture = Memo::new(move |_| {
+        if id == "me" {
+            s.own_avatar.get()
+        } else {
+            s.friend_markers.with(|markers| {
+                markers
+                    .iter()
+                    .find(|friend| friend.id == id)
+                    .and_then(|friend| friend.avatar.clone())
+            })
+        }
+    });
+    view! {
+        row(class="friends-avatar",class:avatar-live=live) {
+            if move ||picture.with(Option::is_some) {
+                {zgui::elements::image().class("friend-avatar-image").src(Signal::derive_local(move ||picture.get())).into_view()}
+            } else {
+                text {{initial.clone()}}
+            }
+        }
     }
 }
 
@@ -721,6 +998,7 @@ fn FriendRow(
             match point {
                 Some(point) => {
                     s.friends_open.set(false);
+                    s.set_show_friends(true);
                     s.center_on(point);
                 }
                 None => s.message.set(format!("No location from {menu_name} yet")),
@@ -746,21 +1024,22 @@ fn FriendRow(
         "block" => confirm.set(Some(format!("block:{menu_id}"))),
         _ => confirm.set(Some(format!("remove:{menu_id}"))),
     });
-    let items = if friend.blocked {
-        vec![("rename", "Rename"), ("remove", "Remove…")]
-    } else {
-        vec![
-            ("map", "Show on map"),
-            ("locate", "Try to locate"),
-            ("trips", "Their trips"),
-            ("rename", "Rename"),
-            ("block", "Block…"),
-            ("remove", "Remove…"),
-        ]
-    };
     let access_label = format!("What {} sees", friend.name);
-    let menu_label = format!("More for {}", friend.name);
     let note = StoredValue::new_local(note);
+    let alert_peer = StoredValue::new_local(id.clone());
+    let alert_label = StoredValue::new_local(format!("Alert areas for {}", friend.name));
+    let alert_names = move || {
+        loaded.with(|loaded| {
+            loaded
+                .as_ref()
+                .and_then(|data| {
+                    alert_peer
+                        .with_value(|id| data.alerts_by_friend.get(id))
+                        .cloned()
+                })
+                .unwrap_or_default()
+        })
+    };
     let remove_question = if friend.groups.is_empty() {
         format!("Remove {}?", friend.name)
     } else if friend.blocked {
@@ -776,19 +1055,58 @@ fn FriendRow(
     };
     let (blocked, permission) = (friend.blocked, friend.permission);
     view! {
-        column(class="friend-row") {
-            row(class="friend-line") {
-                column(class="friend-text",a11y:label=format!("{}: {}",friend.name,friend.status)) {
-                    text(class="friend-name") {{friend.name.clone()}}
-                    text(class="muted small") {{friend.status.clone()}}
-                    if move ||note.with_value(|n|!n.is_empty()) {
-                        text(class="muted small") {{move ||note.get_value()}}
-                    }
+        column(class="friend-detail") {
+            column(class="alert-card") {
+                row(class="page-heading") {
+                    {friend_avatar(friend.id.clone(),friend.name.clone(),friend.status.starts_with("Live"))}
+                    text(class="muted") {{friend.status.clone()}}
                 }
                 if move ||!blocked {
-                    AccessSelect(current=permission,label=access_label.clone(),pick=pick)
+                    row(class="friends-timer-presets") {
+                        Button(variant=ButtonVariant::Outline,on:click=move |_|chosen.run("map")) {"Show on map"}
+                        Button(variant=ButtonVariant::Outline,on:click=move |_|chosen.run("locate")) {"Try to locate"}
+                        Button(variant=ButtonVariant::Outline,on:click=move |_|chosen.run("trips")) {"Their trips"}
+                    }
                 }
-                RowMenu(label=menu_label,items=items,chosen=chosen)
+            }
+            if move ||!blocked {
+                text(class="section-title") {{access_label.clone()}}
+                row(class="segmented") {
+                    for choice in ||vec![(Permission::Off,"Hidden"),(Permission::TripsOnly,"During trips"),(Permission::Always,"Always")],key=|choice|choice.1 {
+                        Button(variant=ButtonVariant::Ghost,class:seg-on=permission==choice.0,on:click=move |_|pick.run(choice.0)) {{choice.1}}
+                    }
+                }
+                if move ||note.with_value(|n|!n.is_empty()) {
+                    text(class="muted") {{move ||note.get_value()}}
+                }
+                row(class="page-heading") {
+                    text(class="section-title grow") {{move ||alert_label.get_value()}}
+                    Button(variant=ButtonVariant::Ghost,a11y:label="Add alert area for friend",on:click=move |_|{
+                        s.place_peer.set(Some(alert_peer.get_value()));
+                        s.places_open.set(true);
+                    }) {"+ Add"}
+                }
+                if move ||!alert_names().is_empty() {
+                    // Each area opens its own page; whole set can be viewed on the map.
+                    column(class="friends-nav-group") {
+                        for name in move ||alert_names(),key=|name|name.clone() {
+                            Button(variant=ButtonVariant::Ghost,class="friends-nav",on:click=move |_|{
+                                s.place_peer.set(Some(alert_peer.get_value()));
+                                s.places_open.set(true);
+                            }) {text(class="grow") {{name.clone()}} text {"›"}}
+                        }
+                    }
+                    Button(variant=ButtonVariant::Outline,class="wide",on:click=move |_|super::place_alerts::show_on_map(s,Some(alert_peer.get_value()))) {"Show on map"}
+                } else {
+                    text(class="muted") {"No alerts yet. Add one to hear when they arrive or leave a place."}
+                }
+            }
+            row(class="friends-timer-presets") {
+                Button(variant=ButtonVariant::Outline,on:click=move |_|chosen.run("rename")) {"Rename"}
+                if move ||!blocked {
+                    Button(variant=ButtonVariant::Outline,class="danger-text",on:click=move |_|chosen.run("block")) {"Block…"}
+                }
+                Button(variant=ButtonVariant::Outline,class="danger-text",on:click=move |_|chosen.run("remove")) {"Remove…"}
             }
             {edit.field(friend.id.clone(), move |name| {let id=save_id.clone();change(s,loaded,false,move |m|m.friends().rename(id.parse()?,&name))})}
             {confirm_line(confirm,format!("block:{id}"),format!("Block {}? They stop seeing new updates and cannot pair again. Relay of your location stops for every group containing them. Existing copies cannot be recalled.",friend.name),block)}
@@ -807,7 +1125,7 @@ fn RowMenu(
     let items = StoredValue::new_local(items);
     view! {
         DropdownMenu {
-            DropdownMenuTrigger(variant=ButtonVariant::Ghost,class="icon-button row-menu",a11y:label=label) {Icon(icon=ELLIPSIS)}
+            DropdownMenuTrigger(variant=ButtonVariant::Ghost,class="row-menu",a11y:label=label) {Icon(icon=ELLIPSIS)}
             DropdownMenuContent {
                 for item in move ||items.get_value(),key=|i|i.0 {
                     MenuItem(on_select=UnsyncCallback::new(move |()|chosen.run(item.0))) {{item.1}}
@@ -871,14 +1189,7 @@ fn GroupItem(
     let legacy = group.policy.is_none();
     let active = group.active;
     let admin = group.admin;
-    let mut items = vec![
-        ("members", "Members"),
-        ("rename", "Rename"),
-        ("leave", "Leave…"),
-    ];
-    if admin || group.policy == Some(Policy::Open) {
-        items.insert(0, ("invite", "Invite someone"));
-    }
+    let items = vec![("rename", "Rename"), ("leave", "Leave…")];
     let remove_id = id.clone();
     let remove = move || {
         let id = remove_id.clone();
@@ -886,10 +1197,22 @@ fn GroupItem(
             m.friends().forget_inactive_group(&id)
         });
     };
+    let member_line = format!(
+        "{} {} · {}",
+        group.details.len(),
+        if group.details.len() == 1 {
+            "member"
+        } else {
+            "members"
+        },
+        if admin { "Admin" } else { "Member" }
+    );
     let members = if legacy {
-        "Recreate this group".to_string()
+        "Made with an older Roamlog and no longer shares. Remove it, then create a new group."
+            .to_string()
     } else if !active && !leaving {
-        "Removed from group".to_string()
+        "You were removed from this group, so it no longer shares. Remove it to tidy up."
+            .to_string()
     } else if group.leaving {
         "Leaving…".to_string()
     } else if group.members.is_empty() {
@@ -898,18 +1221,38 @@ fn GroupItem(
         format!("You, {}", group.members.join(", "))
     };
     view! {
-        column(class="friend-row") {
+        column(class="alert-card") {
             row(class="friend-line") {
                 column(class="friend-text") {
                     text(class="friend-name") {{group.name.clone()}}
-                    text(class="muted small") {{members.clone()}}
+                    if move ||active {
+                        text(class="muted") {{member_line.clone()}}
+                    }
+                    text(class="muted small") {{if active {match group.policy {
+                        Some(Policy::Managed)=>"Admins invite".into(),
+                        Some(Policy::Open)=>"Any member can invite".into(),
+                        None=>members.clone(),
+                    }}else{members.clone()}}}
                 }
                 if move ||legacy || (!active && !leaving) {
-                    Button(variant=ButtonVariant::Destructive,on:click={let remove=remove.clone();move |_|remove()}) {"Remove"}
+                    Button(variant=ButtonVariant::Outline,class="danger-text",on:click={let remove=remove.clone();move |_|remove()}) {"Remove"}
                 }
                 if move ||!leaving && active && !legacy {
                     AccessSelect(current=share,label=access_label.clone(),pick=pick)
                     RowMenu(label=menu_label.clone(),items=items.clone(),chosen=chosen)
+                }
+            }
+            if move ||active && !leaving {
+                row(class="friends-timer-presets") {
+                    for member in move ||sheet_group.with_value(|g|g.details.iter().take(6).cloned().collect::<Vec<_>>()),key=|member|member.id.clone() {
+                        {friend_avatar(if member.me {"me".into()}else{member.id.clone()},member.name.clone(),false)}
+                    }
+                }
+                row(class="actions") {
+                    if move ||admin ||sheet_group.with_value(|g|g.policy==Some(Policy::Open)) {
+                        Button(variant=ButtonVariant::Outline,on:click=move |_|chosen.run("invite")) {"Invite"}
+                    }
+                    Button(variant=ButtonVariant::Outline,on:click=move |_|members_open.set(true)) {"Members"}
                 }
             }
             {if legacy {None}else{Some(field.into_view())}}
@@ -1036,10 +1379,7 @@ fn YouCard(
             s.reload_own_avatar();
         }
         "name" => edit.start("me", &name.get_untracked()),
-        "15" => set_interval_s(15),
-        "30" => set_interval_s(30),
-        "60" => set_interval_s(60),
-        _ => confirm.set(Some("reset:me".into())),
+        _ => edit.start("me", &name.get_untracked()),
     });
     let reset = move || {
         let directory = s.directory.get_value();
@@ -1053,6 +1393,13 @@ fn YouCard(
         });
     };
     view! {
+        text(class="muted") {"Send location every, while moving"}
+        row(class="segmented") {
+            for seconds in ||vec![15i64,30,60],key=|seconds|*seconds {
+                Button(variant=ButtonVariant::Ghost,class:seg-on=move ||interval.get()==seconds,on:click=move |_|set_interval_s(seconds)) {{format!("{seconds} s")}}
+            }
+        }
+        text(class="section-title") {"Profile"}
         row(class="friend-line you-row") {
             Button(variant=ButtonVariant::Ghost,class="you-avatar",on:click=move |_|pick(),a11y:label="Choose your picture") {
                 if move ||s.own_avatar.get().is_some() {
@@ -1066,15 +1413,16 @@ fn YouCard(
             }
             column(class="friend-text") {
                 text(class="friend-name") {{move ||{let n=name.get();if n.trim().is_empty(){"Set your name".to_string()}else{n}}}}
-                text(class="muted small") {{move ||format!("Friends see this · updates every {} s while moving",interval.get())}}
+                text(class="muted small") {{move ||"Name and picture friends see".to_string()}}
             }
-            RowMenu(label="Your profile and sharing options".to_string(),items=vec![("picture","Choose picture"),("no_picture","Remove picture"),("name","Change name"),("15","Update every 15 s"),("30","Update every 30 s"),("60","Update every 60 s"),("reset","Reset identity…")],chosen=chosen)
+            RowMenu(label="Your profile and sharing options".to_string(),items=vec![("picture","Choose picture"),("no_picture","Remove picture"),("name","Change name")],chosen=chosen)
         }
         {edit.field("me".to_string(), move |value: String| {
             if std::fs::write(s.directory.get_value().join("sharing-name"), &value).is_ok() {
                 name.set(value);
             }
         })}
+        Button(variant=ButtonVariant::Outline,class="danger-text",on:click=move |_|confirm.set(Some("reset:me".into()))) {"Reset sharing identity…"}
         {confirm_line(confirm,"reset:me".to_string(),"Reset identity? All friends and groups are removed; everyone pairs again.".to_string(),reset)}
     }
 }

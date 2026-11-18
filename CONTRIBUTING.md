@@ -16,7 +16,8 @@ working files must match index so checks cover committed source. CI runs
 
 For Android changes, build APK and verify demo launch, light/dark appearance,
 trip filters, and recording lifecycle. Preserve existing device history.
-See [build guide](docs/building.md).
+See [build guide](docs/building.md). UI layout work should follow the
+[UI redesign](docs/ui-redesign/README.md) mockups.
 
 Tests should use synthetic GPS tracks or attributed public map fixtures. Never
 commit personal journals, device backups, signing keys, tokens, or private route

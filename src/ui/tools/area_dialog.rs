@@ -13,7 +13,7 @@ fn area_classes(s: UiState) -> Vec<area::ClassStats> {
 #[component]
 pub fn AreaDialog() -> impl IntoView {
     let s = UiState::current();
-    let naming = RwSignal::new_local(false);
+    let naming = s.area_naming;
     let summary = move || {
         s.area_stats.with(|st| {
             st.as_ref().map_or_else(String::new, |st| {

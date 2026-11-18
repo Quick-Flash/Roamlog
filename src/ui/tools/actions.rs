@@ -61,10 +61,8 @@ impl UiState {
         self.target.set(None);
         self.area_drawing.set(true);
         self.follow.set(false);
-        self.message.set(
-            "Tap map to add corners · drag dot to move · tap dot to remove. Drag map to pan."
-                .into(),
-        );
+        // Hint lives in the drawing bar; a map message would cover that bar.
+        self.message.set(String::new());
     }
 
     pub fn cancel_area(self) {
@@ -74,6 +72,10 @@ impl UiState {
         self.area_stats.set(None);
         self.area_open.set(false);
         self.message.set(String::new());
+        if self.drawing_alert.get_untracked() {
+            self.drawing_alert.set(false);
+            self.places_open.set(true);
+        }
     }
 
     /// Remembers corners before a change.
@@ -129,6 +131,13 @@ impl UiState {
     pub fn finish_area(self) {
         if self.area_points.with_untracked(Vec::len) < 3 {
             self.message.set("Area needs at least 3 corners.".into());
+            return;
+        }
+        if self.drawing_alert.get_untracked() {
+            self.alert_polygon.set(self.area_points.get_untracked());
+            self.drawing_alert.set(false);
+            self.cancel_area();
+            self.places_open.set(true);
             return;
         }
         self.area_drawing.set(false);

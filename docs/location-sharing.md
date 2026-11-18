@@ -23,10 +23,14 @@ Open **Friends** on map.
   limited to once per minute per person and never override Hidden, Block, timer expiry,
   or inactive Trips. A short GPS watch runs for up to 20 seconds when needed.
   This cannot wake a force-stopped or offline phone.
-- **Place alerts**: open Friends → Place alerts → **Draw place**, then draw boundary
-  using area controls and tap Done. Return to Place alerts, choose person, name and
-  Entering, Exiting or Both, then **Add drawn place**. Local notifications report
-  arrivals/departures. Definitions stay on this phone. First observation establishes
+- **Alert areas**: open Friends → Alert areas → **+ New**. Name the area and
+  adjust the circle on the map or with the radius slider. Choose **Draw shape**
+  to use the same corner tools as regular areas. **Next: add alerts** saves the
+  boundary and lets you choose a friend and Arrive, Leave, or Both. Tap a friend
+  on the map for their details, **Profile**, and **Their areas on map**. A friend's
+  page and the Alert areas list both have **Show on map**, which draws areas with
+  their names; tap a name on the map to open that area for editing.
+  Definitions stay on this phone. First observation sets a
   baseline; two distinct, accurate updates at least 15 seconds apart confirm changes.
   Boundary uncertainty, stale/relayed fixes and gaps over five minutes cannot invent
   an arrival. A pending change requests one fresh GPS fix after 15 seconds, subject

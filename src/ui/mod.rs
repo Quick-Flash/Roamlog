@@ -5,7 +5,7 @@ mod history_dates;
 mod history_trip;
 pub(crate) mod icons;
 #[cfg(target_os = "android")]
-mod place_alerts;
+pub(crate) mod place_alerts;
 mod recorder;
 pub(crate) mod settings;
 mod snapshot;
@@ -18,11 +18,15 @@ mod update_state;
 pub(crate) mod view_options;
 
 use crate::mapping::view::MapViewProps;
+use history::HistoryProps;
 use recorder::RecorderProps;
+use settings::SettingsProps;
 use state::{UiState, now_ms};
 use std::{path::PathBuf, time::Duration};
 use update_notice::UpdateNoticeProps;
 use zgui::prelude::*;
+use zgui_ui::prelude::*;
+use zgui_ui_icons::prelude::*;
 use zgui_ui_tokens::prelude::*;
 
 #[component]
@@ -57,13 +61,55 @@ pub fn Roamlog() -> impl IntoView {
         });
         on_cleanup_local(move || drop(bars));
     }
+    let navigate = move |tab| {
+        s.places_open.set(false);
+        if s.editing_circle.with_untracked(Option::is_some) {
+            s.editing_circle.set(None);
+            s.picking_place_center.set(false);
+            s.place_outline.set(Vec::new());
+        }
+        if s.drawing_alert.get_untracked() {
+            s.drawing_alert.set(false);
+            s.cancel_area();
+        }
+        s.trips_open.set(tab == 1);
+        s.friends_open.set(tab == 2);
+        s.settings_open.set(tab == 3);
+    };
+    // Alert areas page belongs to Friends, even when reached from the map.
+    let map_selected = move || {
+        !s.trips_open.get()
+            && !s.friends_open.get()
+            && !s.settings_open.get()
+            && !s.places_open.get()
+    };
+    let circle_setup =
+        move || s.picking_place_center.get() && s.editing_circle.with(Option::is_some);
     view! {
         ThemeProvider(light=Signal::stored_local(light_theme()),dark=Signal::stored_local(dark_theme()),scheme=Signal::derive_local(move ||if s.dark.get(){ColorScheme::Dark}else{ColorScheme::Light})) {
-            column(class="roamlog") {
-                MapView()
-                UpdateNotice()
-                Recorder()
-                FriendsSheet()
+            column(class="roamlog",class:circle-setup=circle_setup) {
+                column(class="tab-stage") {
+                    MapView()
+                    UpdateNotice()
+                    if move ||!circle_setup() {Recorder()}
+                    History()
+                    Settings()
+                    FriendsSheet()
+                }
+                if move ||!circle_setup() { row(class="bottom-tabs") {
+                    Button(variant=ButtonVariant::Ghost,class:tab-selected=map_selected,a11y:label="Map",on:click=move |_|navigate(0)) {
+                        Icon(icon=icons::COMPASS)
+                        row(class="map-tab-label") {
+                            text {"Map"}
+                            if move ||s.status()==Some(crate::model::Status::Recording) {box(class="record-dot") {}}
+                        }
+                    }
+                    Button(variant=ButtonVariant::Ghost,class:tab-selected=move ||s.trips_open.get(),a11y:label="History",on:click=move |_|navigate(1)) {Icon(icon=icons::HISTORY) text {"History"}}
+                    if move ||cfg!(target_os="android") {
+                        Button(variant=ButtonVariant::Ghost,class:tab-selected=move ||s.friends_open.get()||s.places_open.get(),a11y:label="Friends",on:click=move |_|navigate(2)) {Icon(icon=icons::PEOPLE) text {"Friends"}}
+                    }
+                    Button(variant=ButtonVariant::Ghost,class:tab-selected=move ||s.settings_open.get(),a11y:label="Settings",on:click=move |_|navigate(3)) {Icon(icon=icons::SLIDERS) text {"Settings"}}
+                } }
             }
         }
     }
