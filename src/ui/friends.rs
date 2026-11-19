@@ -463,6 +463,9 @@ pub fn Friends() -> impl IntoView {
             options_open.set(false);
             groups_open.set(false);
         }
+        if !s.friends_open.get() {
+            s.profile_from_map.set_value(false);
+        }
     });
     on_cleanup_local(move || drop(deep_link));
     let custom_timer = RwSignal::new_local(false);
@@ -525,6 +528,11 @@ pub fn Friends() -> impl IntoView {
         if adding.get_untracked() || !idle() {
             close_panel();
         } else if detail.with_untracked(Option::is_some) {
+            // Profile opened from map card: Back returns to map with that friend selected.
+            if s.profile_from_map.get_value() {
+                s.map_friend_selected.set(detail.get_untracked());
+                s.friends_open.set(false);
+            }
             detail.set(None);
         } else if options_open.get_untracked() {
             options_open.set(false);

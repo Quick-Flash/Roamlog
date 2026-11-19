@@ -64,15 +64,6 @@ pub fn Roamlog() -> impl IntoView {
     }
     let navigate = move |tab| {
         s.places_open.set(false);
-        if s.editing_circle.with_untracked(Option::is_some) {
-            s.editing_circle.set(None);
-            s.picking_place_center.set(false);
-            s.place_outline.set(Vec::new());
-        }
-        if s.drawing_alert.get_untracked() {
-            s.drawing_alert.set(false);
-            s.cancel_area();
-        }
         s.trips_open.set(tab == 1);
         s.friends_open.set(tab == 2);
         s.settings_open.set(tab == 3);
@@ -84,8 +75,7 @@ pub fn Roamlog() -> impl IntoView {
             && !s.settings_open.get()
             && !s.places_open.get()
     };
-    let circle_setup =
-        move || s.picking_place_center.get() && s.editing_circle.with(Option::is_some);
+    let circle_setup = move || s.setup.with(Option::is_some);
     view! {
         ThemeProvider(light=Signal::stored_local(light_theme()),dark=Signal::stored_local(dark_theme()),scheme=Signal::derive_local(move ||if s.dark.get(){ColorScheme::Dark}else{ColorScheme::Light})) {
             column(class="roamlog",class:circle-setup=circle_setup) {
@@ -125,26 +115,26 @@ fn FriendsSheet() -> impl IntoView {
     view! {box {}}
 }
 
-/// Night map: cool slate surfaces matching dark basemap; blue for actions and selection,
+/// Night map: mid-dark cool slate surfaces (lifted from near-black for softer contrast); blue for actions and selection,
 /// apart from map data colors (green traveled, red untraveled, purple area).
 fn dark_theme() -> Theme {
     Theme::dark().with_css(
-        "--zui-color-background: oklch(0.165 0.012 255);
+        "--zui-color-background: oklch(0.225 0.014 255);
          --zui-color-foreground: oklch(0.95 0.006 255);
-         --zui-color-card: oklch(0.205 0.014 255);
+         --zui-color-card: oklch(0.27 0.016 255);
          --zui-color-card-foreground: oklch(0.95 0.006 255);
-         --zui-color-popover: oklch(0.215 0.015 255);
+         --zui-color-popover: oklch(0.28 0.017 255);
          --zui-color-popover-foreground: oklch(0.95 0.006 255);
          --zui-color-primary: oklch(0.55 0.17 262);
          --zui-color-primary-foreground: oklch(0.99 0.005 262);
-         --zui-color-secondary: oklch(0.29 0.018 255);
+         --zui-color-secondary: oklch(0.35 0.02 255);
          --zui-color-secondary-foreground: oklch(0.95 0.006 255);
-         --zui-color-muted: oklch(0.25 0.015 255);
-         --zui-color-muted-foreground: oklch(0.72 0.018 255);
-         --zui-color-accent: oklch(0.32 0.06 262);
+         --zui-color-muted: oklch(0.315 0.017 255);
+         --zui-color-muted-foreground: oklch(0.76 0.018 255);
+         --zui-color-accent: oklch(0.38 0.07 262);
          --zui-color-accent-foreground: oklch(0.86 0.08 262);
-         --zui-color-border: oklch(0.31 0.016 255);
-         --zui-color-input: oklch(0.34 0.016 255);
+         --zui-color-border: oklch(0.37 0.018 255);
+         --zui-color-input: oklch(0.40 0.018 255);
          --zui-color-ring: oklch(0.68 0.15 262);
          --zui-radius-base: 12px;",
     )

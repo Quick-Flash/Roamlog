@@ -34,6 +34,28 @@ pub struct FriendMarker {
     pub live: bool,
 }
 
+/// Area outlined in map view-only mode. `alert`: alert area (id is its area id), else
+/// saved road area.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Mark {
+    pub alert: bool,
+    pub id: u64,
+    pub name: String,
+    pub outline: Vec<Point>,
+}
+
+/// Owner of the map setup screen: its title and what Done and Cancel do. Shape and name
+/// live in `editing_circle` / `area_points` / `area_name`.
+/// Plain closures, not arena callbacks: the page that opens setup closes, disposing what
+/// its handlers created.
+#[derive(Clone)]
+pub struct Setup {
+    pub title: &'static str,
+    pub done: &'static str,
+    pub finish: std::rc::Rc<dyn Fn()>,
+    pub cancel: std::rc::Rc<dyn Fn()>,
+}
+
 #[derive(Clone, Copy)]
 pub struct UiState {
     pub updates: super::update_state::Updater,
@@ -94,7 +116,6 @@ pub struct UiState {
     /// Corner lists before each change, for Undo.
     pub area_history: StoredValue<Vec<Vec<Point>>, LocalStorage>,
     pub area_stats: RwSignal<Option<Stats>, LocalStorage>,
-    pub area_naming: RwSignal<bool, LocalStorage>,
     pub area_open: RwSignal<bool, LocalStorage>,
     pub area_name: RwSignal<String, LocalStorage>,
     pub area_busy: RwSignal<bool, LocalStorage>,
@@ -114,19 +135,20 @@ pub struct UiState {
     pub map_offline: RwSignal<bool, LocalStorage>,
     pub terrain_enabled: RwSignal<bool, LocalStorage>,
     pub map_friend_selected: RwSignal<Option<String>, LocalStorage>,
-    pub alert_draw_back_to_circle: RwSignal<bool, LocalStorage>,
-    pub alert_use_circle: StoredValue<Option<zgui::reactive::UnsyncCallback<()>>, LocalStorage>,
-    pub drawing_alert: RwSignal<bool, LocalStorage>,
-    pub alert_polygon: RwSignal<Vec<Point>, LocalStorage>,
+    /// Profile opened from map card: Back returns to map.
+    pub profile_from_map: StoredValue<bool, LocalStorage>,
+    /// Map setup screen for a new or edited area (saved or alert), when open.
+    pub setup: RwSignal<Option<Setup>, LocalStorage>,
+    /// Circle kept while setup switches to a drawn shape, restored on switching back.
+    pub setup_circle: StoredValue<Option<(Point, f64)>, LocalStorage>,
+    /// Circle being placed in setup: center follows map pans, handles resize.
     pub editing_circle: RwSignal<Option<(Point, f64)>, LocalStorage>,
-    pub picking_place_center: RwSignal<bool, LocalStorage>,
     #[cfg_attr(not(target_os = "android"), allow(dead_code))]
     pub place_peer: RwSignal<Option<String>, LocalStorage>,
     pub alert_areas_back: StoredValue<Option<zgui::reactive::UnsyncCallback<()>>, LocalStorage>,
     pub places_open: RwSignal<bool, LocalStorage>,
-    pub place_outline: RwSignal<Vec<Point>, LocalStorage>,
-    /// Alert areas drawn together on map, each with a tappable name: (area id, name, outline).
-    pub area_marks: RwSignal<Vec<(u32, String, Vec<Point>)>, LocalStorage>,
+    /// Areas drawn together on map, each with a tappable name.
+    pub area_marks: RwSignal<Vec<Mark>, LocalStorage>,
     /// Who the shown areas can be filtered by: (key, label); "g:<id>" keys are groups.
     #[cfg_attr(not(target_os = "android"), allow(dead_code))]
     pub area_filters: RwSignal<Vec<(String, String)>, LocalStorage>,
@@ -238,7 +260,6 @@ impl UiState {
             area_id: RwSignal::new_local(None),
             area_history: StoredValue::new_local(Vec::new()),
             area_stats: RwSignal::new_local(None),
-            area_naming: RwSignal::new_local(false),
             area_open: RwSignal::new_local(false),
             area_name: RwSignal::new_local(String::new()),
             area_busy: RwSignal::new_local(false),
@@ -253,16 +274,13 @@ impl UiState {
             map_offline: RwSignal::new_local(false),
             terrain_enabled: RwSignal::new_local(false),
             map_friend_selected: RwSignal::new_local(None),
-            alert_draw_back_to_circle: RwSignal::new_local(false),
-            alert_use_circle: StoredValue::new_local(None),
-            drawing_alert: RwSignal::new_local(false),
-            alert_polygon: RwSignal::new_local(Vec::new()),
+            profile_from_map: StoredValue::new_local(false),
+            setup: RwSignal::new_local(None),
+            setup_circle: StoredValue::new_local(None),
             editing_circle: RwSignal::new_local(None),
-            picking_place_center: RwSignal::new_local(false),
             place_peer: RwSignal::new_local(None),
             alert_areas_back: StoredValue::new_local(None),
             places_open: RwSignal::new_local(false),
-            place_outline: RwSignal::new_local(Vec::new()),
             area_marks: RwSignal::new_local(Vec::new()),
             area_filters: RwSignal::new_local(Vec::new()),
             marks_friend: StoredValue::new_local(None),
@@ -874,13 +892,19 @@ impl UiState {
 
     /// Fits map to points (lon/lat), stopping follow.
     pub fn fit(self, points: impl IntoIterator<Item = Point>) {
+        // Bounds along the screen's axes, so a rotated map fits too:
+        // u = right, v = down, both in projected metres (M = [[cos, sin], [sin, -cos]],
+        // its own inverse).
+        let (sin, cos) = self.bearing.get_untracked().sin_cos();
+        let to_screen = |[x, y]: [f64; 2]| [x * cos + y * sin, x * sin - y * cos];
         let mut min = [f64::INFINITY; 2];
         let mut max = [f64::NEG_INFINITY; 2];
         for p in points {
             if let Some(xy) = project(p.lon, p.lat) {
+                let uv = to_screen(xy);
                 for i in 0..2 {
-                    min[i] = min[i].min(xy[i]);
-                    max[i] = max[i].max(xy[i]);
+                    min[i] = min[i].min(uv[i]);
+                    max[i] = max[i].max(uv[i]);
                 }
             }
         }
@@ -891,7 +915,30 @@ impl UiState {
             (min[0] - 40.0, max[0] + 40.0),
             (min[1] - 40.0, max[1] + 40.0),
         );
-        if let Some(next) = Camera::from_ranges(ranges, self.map_size.get_value()) {
+        // Fit inside the map that is actually visible: top bar and status bar above,
+        // trip bar (and room for the area bar) below, map buttons on the right. Setup
+        // screen has a taller header and its panel already outside the map.
+        let [w, h] = self.map_size.get_value();
+        let status_bar = if cfg!(target_os = "android") { 50. } else { 0. };
+        let [top, right, bottom, left] = if self.setup.with_untracked(Option::is_some) {
+            [150. + status_bar, 16., 16., 16.]
+        } else {
+            [86. + status_bar, 70., 170., 16.]
+        };
+        let inner = [w - left - right, h - top - bottom];
+        let (size, offset) = if inner[0] >= 100. && inner[1] >= 100. {
+            (inner, [(left - right) / 2., (top - bottom) / 2.])
+        } else {
+            ([w, h], [0., 0.])
+        };
+        if let Some(mut next) = Camera::from_ranges(ranges, size) {
+            // Bounds center sits at the visible area's center, not the map's.
+            let scale = next.scale();
+            let center = [
+                (min[0] + max[0]) / 2. - offset[0] / scale,
+                (min[1] + max[1]) / 2. - offset[1] / scale,
+            ];
+            next.center = to_screen(center);
             self.follow.set(false);
             self.camera.set(next);
             self.anchored.set(true);
@@ -943,7 +990,7 @@ impl UiState {
         self.refresh(true);
         // Area percentage follows selection.
         if self.area_stats.with_untracked(Option::is_some) {
-            self.compute_area(false);
+            self.compute_area();
         }
     }
 

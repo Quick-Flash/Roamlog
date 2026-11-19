@@ -345,6 +345,7 @@ fn main() -> Result<(), String> {
     store.commit(Event::SaveArea {
         name: "Downtown".into(),
         points: area,
+        circle: None,
     })?;
     let total: f64 = store.state.trips.iter().map(|t| t.distance_m).sum();
     eprintln!(

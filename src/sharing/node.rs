@@ -155,19 +155,22 @@ async fn publish(manager: Manager, path: PathBuf) {
         if let Ok(notices) = super::places::observe(manager.friends(), &friends, now) {
             #[cfg(all(target_os = "android", feature = "ui"))]
             for (id, text) in notices {
-                let _ = zgui::app::android::notification::post(
+                let posted = zgui::app::android::notification::post(
                     &zgui::app::android::notification::Notification {
                         id,
                         title: "Alert area".into(),
-                        text,
+                        text: text.clone(),
                         ..Default::default()
                     },
                 );
+                super::places::log(&match posted {
+                    Ok(_) => format!("alert notification posted: {text}"),
+                    Err(error) => format!("alert notification failed: {text}: {error:?}"),
+                });
             }
             #[cfg(not(all(target_os = "android", feature = "ui")))]
             let _ = notices;
         }
-        let _ = super::places::confirmation_requests(manager.friends(), now);
         if friends == previous.friends && now - previous.updated_ms < HEARTBEAT_MS {
             continue;
         }

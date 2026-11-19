@@ -9,11 +9,10 @@ fn area_classes(s: UiState) -> Vec<area::ClassStats> {
         .with(|st| st.as_ref().map(|st| st.classes.clone()).unwrap_or_default())
 }
 
-/// Area result details and save.
+/// Shown saved area: road classes and traveled share.
 #[component]
 pub fn AreaDialog() -> impl IntoView {
     let s = UiState::current();
-    let naming = s.area_naming;
     let summary = move || {
         s.area_stats.with(|st| {
             st.as_ref().map_or_else(String::new, |st| {
@@ -33,9 +32,9 @@ pub fn AreaDialog() -> impl IntoView {
     view! {
         Dialog(open=s.area_open) {
             DialogContent(class="sheet") {
-                DialogHeader {DialogTitle {"Area roads"} DialogDescription {{summary}}}
+                DialogHeader {DialogTitle {{move ||s.data.with(|d|d.areas.iter().find(|a|Some(a.id)==s.area_id.get()).map_or_else(||"Area roads".into(),|a|a.name.clone()))}} DialogDescription {{summary}}}
                 text(class="muted") {{move ||s.area_stats.with(|st|st.as_ref().map(|st|format!("Named streets: {} done, {} started, {} total",st.streets_done,st.streets_started,st.streets)).unwrap_or_default())}}
-                scroll(class="area-scroll",class:map-hidden=move ||naming.get()) {
+                scroll(class="area-scroll") {
                     column(class="history-content") {
                         for class in move ||area_classes(s),key=|c|c.class.clone() {
                             row(class="history-row") {
@@ -50,18 +49,16 @@ pub fn AreaDialog() -> impl IntoView {
                 if move ||s.area_stats.with(|st|st.as_ref().is_some_and(|st|st.large)) {
                     text(class="muted") {"Large area: totals only. Draw area under about 20 km across to see untraveled roads in red."}
                 }
-                if move ||s.area_id.get().is_some() {
-                    Button(class="update-area",on:click=move |_|s.update_area()) {{move ||s.data.with(|d|d.areas.iter().find(|a|Some(a.id)==s.area_id.get()).map_or_else(||"Update saved area".into(),|a|format!("Update “{}”",a.name)))}}
-                }
-                // Name field appears on request: focusing it first would cover results with keyboard.
-                if move ||naming.get() {
-                    row(class="category-row") {
-                        Input(value=s.area_name,label="Area name",placeholder="Neighborhood, town…",class="category-select")
-                        Button(class="save-area",disabled=Signal::derive_local(move ||s.area_name.with(|n|n.trim().is_empty())),on:click=move |_|{naming.set(false);s.save_area()}) {"Save"}
+                Button(variant=ButtonVariant::Outline,class="danger-text wide delete-area",on:click=move |_|{
+                    let Some(id)=s.area_id.get_untracked() else {return;};
+                    if s.confirm_area_delete.get_untracked()==Some(id) {
+                        s.confirm_area_delete.set(None);
+                        s.delete_area(id);
+                        s.cancel_area();
+                    } else {
+                        s.confirm_area_delete.set(Some(id));
                     }
-                } else {
-                    Button(variant=ButtonVariant::Outline,class="name-area",on:click=move |_|naming.set(true)) {{move ||if s.area_id.get().is_some(){"Save as new area…"}else{"Save area…"}}}
-                }
+                }) {{move ||if s.confirm_area_delete.get().is_some()&&s.confirm_area_delete.get()==s.area_id.get() {"Tap again to delete area"} else {"Delete area"}}}
             }
         }
     }

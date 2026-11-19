@@ -183,7 +183,8 @@ fn zgui_controls_follow_trip_state() {
 #[test]
 fn area_tool_collects_corners_and_inspects_roads() {
     use super::tools::{
-        AreaBarProps, AreaDialogProps, AreasSheetProps, StatsTabProps, TripEditorDialogProps,
+        AreaBarProps, AreaDialogProps, AreaSetupProps, AreasSheetProps, StatsTabProps,
+        TripEditorDialogProps,
     };
     let directory = tempfile::tempdir().unwrap();
     let window = Window::open();
@@ -195,7 +196,7 @@ fn area_tool_collects_corners_and_inspects_roads() {
     let mut mounted = window.scope.with(|| {
         view! {
             ThemeProvider(scheme=Signal::derive_local(move ||ColorScheme::Dark)) {
-                column {AreaBar() AreaDialog() AreasSheet() StatsTab() TripEditorDialog()}
+                column {AreaBar() AreaSetup() AreaDialog() AreasSheet() StatsTab() TripEditorDialog()}
             }
         }
         .into_view()
@@ -204,9 +205,26 @@ fn area_tool_collects_corners_and_inspects_roads() {
     mounted.mount(&window.dom_handle, window.root, None);
     window.frame();
     let p = |lat, lon| crate::geo::Point { lat, lon };
-    s.start_area();
+    // New area starts as a circle at map center; name is required.
+    s.new_area();
     window.frame();
-    let done = find(&window, "finish-area");
+    assert!(s.editing_circle.with_untracked(Option::is_some));
+    let done = find(&window, "setup-done");
+    let disabled = || {
+        window
+            .dom
+            .tree()
+            .ui_state(done)
+            .contains(zgui::vocab::UiState::DISABLED)
+    };
+    assert!(disabled());
+    s.area_name.set("Home".into());
+    window.frame();
+    assert!(!disabled());
+    // Drawn shape needs 3 corners; switching back restores the circle.
+    let circle = s.editing_circle.get_untracked();
+    s.setup_use_drawing();
+    window.frame();
     for (lat, lon) in [(0.0, 0.0), (0.0, 0.01), (0.01, 0.01)] {
         assert!(
             window
@@ -237,7 +255,11 @@ fn area_tool_collects_corners_and_inspects_roads() {
     assert_eq!(s.area_points.with_untracked(Vec::len), 3);
     s.undo_area();
     assert_eq!(s.area_points.with_untracked(Vec::len), 2);
-    s.cancel_area();
+    s.setup_use_circle();
+    assert_eq!(s.editing_circle.get_untracked(), circle);
+    assert_eq!(s.setup_shape(), (circle, Vec::new()));
+    s.close_setup();
+    assert!(s.setup.with_untracked(Option::is_none));
     // Not drawing: tap describes nearest traveled road.
     s.sections.set(vec![crate::coverage::Section {
         road_id: "residential:Elm Street".into(),
@@ -485,5 +507,31 @@ fn update_install_stays_disabled_until_recording_or_paused_trip_finishes() {
         s.data.set(store.state.clone());
         window.frame();
         assert_eq!(disabled(), store.state.active().is_some());
+    }
+}
+
+#[test]
+fn fit_keeps_points_clear_of_top_bar_bottom_bars_and_buttons() {
+    use crate::mapping::camera::project;
+    let directory = tempfile::tempdir().unwrap();
+    let window = Window::open();
+    let s = window
+        .scope
+        .with(|| UiState::new(directory.path().to_path_buf()));
+    let [w, h] = [400.0, 800.0];
+    s.map_size.set_value([w, h]);
+    s.bearing.set(0.4);
+    let p = |lat, lon| crate::geo::Point { lat, lon };
+    let points = [p(0.0, 0.0), p(0.02, 0.03), p(-0.01, 0.01)];
+    s.fit(points);
+    let camera = s.camera.get_untracked();
+    let (sin, cos) = 0.4_f64.sin_cos();
+    for point in points {
+        let xy = project(point.lon, point.lat).unwrap();
+        let dx = (xy[0] - camera.center[0]) * camera.scale();
+        let dy = (camera.center[1] - xy[1]) * camera.scale();
+        let (x, y) = (w / 2. + dx * cos - dy * sin, h / 2. + dx * sin + dy * cos);
+        assert!(x > 16. && x < w - 70., "x {x} under side buttons");
+        assert!(y > 86. && y < h - 170., "y {y} under top or bottom bars");
     }
 }

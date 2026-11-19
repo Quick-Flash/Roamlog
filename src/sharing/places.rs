@@ -51,12 +51,13 @@ pub enum Trigger {
     #[default]
     Both,
 }
+/// Last known side of the boundary, and when this rule last alerted.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 struct State {
     inside: Option<bool>,
-    candidate: Option<bool>,
-    since_ms: i64,
     last_ms: i64,
+    alerted_ms: Option<i64>,
 }
 #[derive(Default, Serialize, Deserialize)]
 struct Saved {
@@ -91,8 +92,7 @@ fn save(friends: &Friends, saved: &Saved) -> Result<()> {
     }
     atomic_json(&friends.directory().join("places.json"), &bytes)
 }
-pub const MIN_RADIUS: f64 = 10.;
-pub const MAX_RADIUS: f64 = 10_000.;
+pub use crate::geo::{MAX_RADIUS, MIN_RADIUS, circle_outline};
 fn validate(name: &str, center: Point, radius: f64) -> Result<()> {
     if name.trim().is_empty()
         || name.chars().count() > 64
@@ -139,6 +139,16 @@ impl Place {
         }
     }
 
+    /// Last side seen for `peer` (true: inside) and that fix's time.
+    pub fn side(&self, peer: EndpointId) -> Option<(bool, i64)> {
+        let state = match self.group {
+            None if self.peer == peer => &self.state,
+            None => return None,
+            Some(_) => &self.members.iter().find(|(m, _)| *m == peer)?.1,
+        };
+        state.inside.map(|inside| (inside, state.last_ms))
+    }
+
     /// Whether this rule alerts about `friend`.
     pub fn watches(&self, friend: &Friend) -> bool {
         !self.no_rule
@@ -155,25 +165,6 @@ impl Place {
         }
         circle_outline(self.center, self.radius_m)
     }
-}
-
-pub fn circle_outline(center: Point, radius: f64) -> Vec<Point> {
-    let lat = center.lat.to_radians();
-    let lon = center.lon.to_radians();
-    let angle = radius / 6_371_008.8;
-    (0..64)
-        .map(|i| {
-            let bearing = f64::from(i) * std::f64::consts::TAU / 64.;
-            let next = (lat.sin() * angle.cos() + lat.cos() * angle.sin() * bearing.cos()).asin();
-            let east = lon
-                + (bearing.sin() * angle.sin() * lat.cos())
-                    .atan2(angle.cos() - lat.sin() * next.sin());
-            Point {
-                lat: next.to_degrees(),
-                lon: (east.to_degrees() + 180.).rem_euclid(360.) - 180.,
-            }
-        })
-        .collect()
 }
 
 pub fn set_rule(
@@ -335,7 +326,9 @@ pub fn edit_area(
                 place.state = State::default();
                 place.members.clear();
             }
-        } else if place.polygon.is_empty() && (place.center != center || place.radius_m != radius) {
+        } else if !place.polygon.is_empty() || place.center != center || place.radius_m != radius {
+            // Drawn shape switched to circle, or circle moved.
+            place.polygon.clear();
             place.center = center;
             place.radius_m = radius;
             place.state = State::default();
@@ -355,18 +348,55 @@ pub fn remove_area(friends: &Friends, area: u32) -> Result<()> {
     save(friends, &saved)
 }
 
+/// One line to Android's log (tag "roamlog"). The sharing service runs in its own
+/// process whose stderr is not forwarded, so `eprintln!` would be lost there.
+pub(super) fn log(message: &str) {
+    #[cfg(target_os = "android")]
+    {
+        #[link(name = "log")]
+        unsafe extern "C" {
+            fn __android_log_write(
+                priority: std::ffi::c_int,
+                tag: *const std::ffi::c_char,
+                text: *const std::ffi::c_char,
+            ) -> std::ffi::c_int;
+        }
+        if let Ok(text) = std::ffi::CString::new(message) {
+            // SAFETY: both strings are NUL-terminated and outlive the call; 4 = INFO.
+            unsafe { __android_log_write(4, c"roamlog".as_ptr(), text.as_ptr()) };
+        }
+    }
+    #[cfg(not(target_os = "android"))]
+    eprintln!("{message}");
+}
+
+/// At most one alert per rule and person in this window; quick back-and-forth only
+/// updates the remembered side.
+const ALERT_COOLDOWN_MS: i64 = 300_000;
+
 impl Place {
-    /// First observation establishes baseline. Two confident, distinct fixes at least
-    /// 15 s apart confirm transition. Gaps > 5 min reset baseline without an alert.
+    /// Alerts when a fix lands on the other side from the last known one. Inside: the
+    /// reported point is in the area (indoor fixes are often ±100 m, wider than a home
+    /// circle). Outside: the whole accuracy circle (+25 m) is out, so a wandering
+    /// indoor fix cannot fake a departure. In between keeps the last side. First fix
+    /// only sets the side.
+    /// Any new fix counts, however it arrived and whether or not still connected; only
+    /// age (stale map cutoff) and the sender's clock skew limit it, so a late fix can
+    /// delay an alert but not invent one.
     fn observe(&self, state: &mut State, friend: &FriendState, now: i64) -> Option<String> {
         let fix = friend.location?;
-        if !friend.connected
-            || !friend.sharing_active
-            || friend.via.is_some()
-            || now.saturating_sub(fix.timestamp_ms) > 120_000
-            || fix.timestamp_ms > now
-            || fix.timestamp_ms <= state.last_ms
+        if fix.timestamp_ms <= state.last_ms {
+            return None;
+        }
+        if now.saturating_sub(fix.timestamp_ms) > super::location::MAX_FIX_AGE_MS
+            || fix.timestamp_ms > now + super::protocol::FUTURE_SKEW_MS
         {
+            log(&format!(
+                "alert area {}: {} fix ignored, {} s old",
+                self.name,
+                friend.name,
+                now.saturating_sub(fix.timestamp_ms) / 1000
+            ));
             return None;
         }
         let point = Point {
@@ -399,51 +429,47 @@ impl Place {
                     inside = !inside;
                 }
             }
-            if edge_distance <= accuracy + 25. {
-                None
+            if inside {
+                Some(true)
+            } else if edge_distance > accuracy + 25. {
+                Some(false)
             } else {
-                Some(inside)
+                None
             }
-        } else if distance + accuracy < self.radius_m {
+        } else if distance < self.radius_m {
             Some(true)
         } else if distance - accuracy > self.radius_m + 25. {
             Some(false)
         } else {
             None
         };
-        let gap = fix.timestamp_ms.saturating_sub(state.last_ms) > 300_000;
         state.last_ms = fix.timestamp_ms;
-        if gap {
-            state.inside = None;
-        }
-        let Some(inside) = inside else {
-            state.candidate = None;
-            return None;
-        };
-        if gap || state.inside.is_none() {
-            state.inside = Some(inside);
-            state.candidate = None;
-            return None;
-        }
-        if state.inside == Some(inside) {
-            state.candidate = None;
-            return None;
-        }
-        if state.candidate != Some(inside) {
-            state.candidate = Some(inside);
-            state.since_ms = fix.timestamp_ms;
-            return None;
-        }
-        if fix.timestamp_ms.saturating_sub(state.since_ms) < 15_000 {
-            return None;
-        }
-        state.inside = Some(inside);
-        state.candidate = None;
-        if (inside && self.trigger == Trigger::Exiting)
+        log(&format!(
+            "alert area {}: {} {} (±{accuracy:.0} m), was {}",
+            self.name,
+            friend.name,
+            match inside {
+                Some(true) => "inside",
+                Some(false) => "outside",
+                None => "near edge, keeping last side",
+            },
+            match state.inside {
+                Some(true) => "inside",
+                Some(false) => "outside",
+                None => "unknown",
+            }
+        ));
+        let inside = inside?;
+        if state.inside.replace(inside) != Some(!inside)
+            || (inside && self.trigger == Trigger::Exiting)
             || (!inside && self.trigger == Trigger::Entering)
+            || state
+                .alerted_ms
+                .is_some_and(|at| fix.timestamp_ms.saturating_sub(at) < ALERT_COOLDOWN_MS)
         {
             return None;
         }
+        state.alerted_ms = Some(fix.timestamp_ms);
         Some(format!(
             "{} {} {}",
             friend.name,
@@ -517,36 +543,6 @@ pub(super) fn observe(
         save(friends, &saved)?;
     }
     Ok(notices)
-}
-
-/// Stationary senders normally send rarely. Ask for confirmation rather than wait
-/// ten minutes after an arrival; existing request cooldown bounds GPS work.
-pub(super) fn confirmation_requests(friends: &Friends, now: i64) -> Result<()> {
-    let peers: std::collections::BTreeSet<_> = {
-        let _lock = friends.lock()?;
-        let pending = |s: &State| {
-            s.candidate.is_some()
-                && now.saturating_sub(s.since_ms) >= 15_000
-                && now.saturating_sub(s.last_ms) <= 120_000
-        };
-        load(friends)?
-            .places
-            .into_iter()
-            .filter(|p| !p.no_rule)
-            .flat_map(|p| {
-                let single = (p.group.is_none() && pending(&p.state)).then_some(p.peer);
-                p.members
-                    .into_iter()
-                    .filter(|(_, s)| pending(s))
-                    .map(|(m, _)| m)
-                    .chain(single)
-            })
-            .collect()
-    };
-    for peer in peers {
-        let _ = super::requests::queue(friends, peer, now);
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -624,9 +620,8 @@ mod tests {
         .unwrap();
         assert_eq!(list(&friends).unwrap()[0].outline(), polygon);
         observe(&friends, &[observation(peer, 100_000, 0.01)], 100_000).unwrap();
-        observe(&friends, &[observation(peer, 130_000, 0.)], 130_000).unwrap();
         assert_eq!(
-            observe(&friends, &[observation(peer, 145_000, 0.)], 145_000).unwrap()[0].1,
+            observe(&friends, &[observation(peer, 130_000, 0.)], 130_000).unwrap()[0].1,
             "Sam arrived at Park"
         );
         let moved = polygon
@@ -681,8 +676,7 @@ mod tests {
             })
         };
         observe(&friends, &at(100_000, 0.01), 100_000).unwrap();
-        observe(&friends, &at(130_000, 0.), 130_000).unwrap();
-        let notices = observe(&friends, &at(145_000, 0.), 145_000).unwrap();
+        let notices = observe(&friends, &at(130_000, 0.), 130_000).unwrap();
         assert_eq!(notices.len(), 2, "Cal opted out");
         assert_ne!(notices[0].0, notices[1].0);
         let mut seen: Vec<_> = notices.iter().map(|n| n.1.as_str()).collect();
@@ -716,64 +710,80 @@ mod tests {
     }
 
     #[test]
-    fn places_confirm_transitions_persist_and_ignore_stale_relay_uncertain_fixes() {
+    fn side_changes_alert_with_cooldown_and_ignore_stale_or_uncertain_fixes() {
         let dir = tempfile::tempdir().unwrap();
         let key = iroh::SecretKey::generate();
         let peer = iroh::SecretKey::generate().public();
         let friends = Friends::open(dir.path(), key.public()).unwrap();
         friends.add_confirmed(peer, "Sam".into()).unwrap();
         add(&friends, "Home", Point { lat: 0., lon: 0. }, 250., peer).unwrap();
-        assert!(
-            observe(&friends, &[observation(peer, 100_000, 0.01)], 100_000)
+        let seen = |friends: &Friends, fix: FriendState, now: i64| {
+            observe(friends, &[fix], now)
                 .unwrap()
-                .is_empty()
+                .into_iter()
+                .map(|n| n.1)
+                .collect::<Vec<_>>()
+        };
+        // First fix only sets the side.
+        assert!(seen(&friends, observation(peer, 100_000, 0.01), 100_000).is_empty());
+        assert_eq!(
+            seen(&friends, observation(peer, 130_000, 0.), 130_000),
+            ["Sam arrived at Home"]
         );
-        assert!(
-            observe(&friends, &[observation(peer, 130_000, 0.)], 130_000)
-                .unwrap()
-                .is_empty()
-        );
-        let notices = observe(&friends, &[observation(peer, 145_000, 0.)], 145_000).unwrap();
-        assert_eq!(notices.len(), 1);
-        assert_eq!(notices[0].1, "Sam arrived at Home");
-        assert!(
-            observe(&friends, &[observation(peer, 145_000, 0.)], 146_000)
-                .unwrap()
-                .is_empty()
-        );
+        // Same fix again is not news.
+        assert!(seen(&friends, observation(peer, 130_000, 0.), 131_000).is_empty());
+        // Side survives restart; leaving within 5 min of last alert is silent.
         let friends = Friends::open(dir.path(), key.public()).unwrap();
-        assert!(
-            observe(&friends, &[observation(peer, 175_000, 0.01)], 175_000)
-                .unwrap()
-                .is_empty()
+        assert!(seen(&friends, observation(peer, 175_000, 0.01), 175_000).is_empty());
+        // Ten silent minutes outside, then back: alerts, no matter the gap.
+        assert!(seen(&friends, observation(peer, 300_000, 0.01), 300_000).is_empty());
+        assert_eq!(
+            seen(&friends, observation(peer, 900_000, 0.), 900_000),
+            ["Sam arrived at Home"]
         );
-        let notices = observe(&friends, &[observation(peer, 190_000, 0.01)], 190_000).unwrap();
-        assert_eq!(notices[0].1, "Sam left Home");
-        let mut relayed = observation(peer, 220_000, 0.);
-        relayed.via = Some(key.public());
-        assert!(observe(&friends, &[relayed], 220_000).unwrap().is_empty());
-        assert!(
-            observe(&friends, &[observation(peer, 220_000, 0.)], 500_000)
-                .unwrap()
-                .is_empty()
-        );
-        // Reconnect after long gap establishes new baseline; no invented arrival.
-        assert!(
-            observe(&friends, &[observation(peer, 600_000, 0.)], 600_000)
-                .unwrap()
-                .is_empty()
-        );
-        let mut uncertain = observation(peer, 630_000, 0.002);
+        // Stale (over 15 min) and edge-uncertain fixes change nothing.
+        assert!(seen(&friends, observation(peer, 1_300_000, 0.01), 2_300_000).is_empty());
+        let mut uncertain = observation(peer, 1_310_000, 0.002);
         uncertain.location.as_mut().unwrap().accuracy_cm = 20_000;
-        assert!(observe(&friends, &[uncertain], 630_000).unwrap().is_empty());
+        assert!(seen(&friends, uncertain, 1_310_000).is_empty());
+        // Relayed fix that arrived while disconnected still counts, as does a sender
+        // clock a minute fast.
+        let mut relayed = observation(peer, 1_380_000, 0.01);
+        relayed.via = Some(key.public());
+        relayed.connected = false;
+        relayed.sharing_active = false;
+        assert_eq!(seen(&friends, relayed, 1_320_000), ["Sam left Home"]);
         friends.block(peer).unwrap();
-        assert!(
-            observe(&friends, &[observation(peer, 660_000, 0.01)], 660_000)
-                .unwrap()
-                .is_empty()
-        );
+        assert!(seen(&friends, observation(peer, 1_400_000, 0.), 1_400_000).is_empty());
         assert_eq!(list(&friends).unwrap()[0].state, State::default());
     }
+
+    #[test]
+    fn coarse_indoor_fixes_still_detect_small_home_circle() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = iroh::SecretKey::generate();
+        let peer = iroh::SecretKey::generate().public();
+        let friends = Friends::open(dir.path(), key.public()).unwrap();
+        friends.add_confirmed(peer, "Mum".into()).unwrap();
+        add(&friends, "Home", Point { lat: 0., lon: 0. }, 50., peer).unwrap();
+        // ±100 m, wider than the circle. Degrees of longitude at the equator: 0.0009 ≈ 100 m.
+        let at = |t: i64, lon: f64| {
+            let mut fix = observation(peer, t, lon);
+            fix.name = "Mum".into();
+            fix.location.as_mut().unwrap().accuracy_cm = 10_000;
+            observe(&friends, &[fix], t)
+                .unwrap()
+                .into_iter()
+                .map(|n| n.1)
+                .collect::<Vec<_>>()
+        };
+        assert!(at(100_000, 0.01).is_empty());
+        assert_eq!(at(130_000, 0.0002), ["Mum arrived at Home"]);
+        // Indoor fix wanders 80 m out: still home, no false departure.
+        assert!(at(800_000, 0.0007).is_empty());
+        assert_eq!(at(1_500_000, 0.004), ["Mum left Home"]);
+    }
+
     #[test]
     fn invalid_places_fail_and_remove_clears_subscription() {
         let dir = tempfile::tempdir().unwrap();
@@ -790,22 +800,5 @@ mod tests {
         assert!(place.no_rule);
         remove_area(&friends, place.area()).unwrap();
         assert!(list(&friends).unwrap().is_empty());
-    }
-
-    #[test]
-    fn pending_transition_requests_fresh_confirmation_fix() {
-        let dir = tempfile::tempdir().unwrap();
-        let key = iroh::SecretKey::generate();
-        let peer = iroh::SecretKey::generate().public();
-        let friends = Friends::open(dir.path(), key.public()).unwrap();
-        friends.add_confirmed(peer, "Sam".into()).unwrap();
-        add(&friends, "Home", Point { lat: 0., lon: 0. }, 250., peer).unwrap();
-        observe(&friends, &[observation(peer, 100_000, 0.)], 100_000).unwrap();
-        observe(&friends, &[observation(peer, 130_000, 0.01)], 130_000).unwrap();
-
-        confirmation_requests(&friends, 145_000).unwrap();
-        let request = super::super::requests::read(&friends, peer).unwrap();
-        assert_eq!(request.at_ms, 145_000);
-        assert_eq!(request.status, "Locating…");
     }
 }

@@ -1,9 +1,9 @@
 use super::{date, road_name};
-use crate::ui::state::UiState;
+use crate::ui::state::{Mark, Setup, UiState};
 use crate::{
     area::Stats,
     coverage::Section,
-    geo::{Point, local, segment_distance},
+    geo::{Point, circle_outline, local, segment_distance},
     model::TripFilter,
 };
 use serde_json::{Value, json};
@@ -43,39 +43,165 @@ impl UiState {
         })
     }
 
-    pub fn start_area(self) {
-        self.area_points.set(Vec::new());
-        self.area_id.set(None);
-        self.begin_editing();
-    }
-
-    /// Edits corners of shown area; stats return after Done.
-    pub fn edit_area(self) {
-        self.begin_editing();
-    }
-
-    fn begin_editing(self) {
-        self.area_history.set_value(Vec::new());
-        self.area_stats.set(None);
-        self.area_open.set(false);
-        self.target.set(None);
-        self.area_drawing.set(true);
-        self.follow.set(false);
-        // Hint lives in the drawing bar; a map message would cover that bar.
-        self.message.set(String::new());
-    }
-
     pub fn cancel_area(self) {
         self.area_drawing.set(false);
         self.area_points.set(Vec::new());
         self.area_id.set(None);
         self.area_stats.set(None);
         self.area_open.set(false);
+    }
+
+    fn map_center(self) -> Point {
+        let [lon, lat] = crate::mapping::camera::geographic(self.camera.get_untracked().center);
+        Point { lat, lon }
+    }
+
+    /// Map setup screen, shared by saved and alert areas: circle (given, or 200 m at map
+    /// center) or, given corners and no circle, a drawn shape.
+    pub fn open_setup(
+        self,
+        setup: Setup,
+        name: String,
+        circle: Option<(Point, f64)>,
+        points: Vec<Point>,
+    ) {
+        self.cancel_area();
+        self.marks_friend.set_value(None);
+        self.area_marks.set(Vec::new());
+        self.map_friend_selected.set(None);
+        self.areas_open.set(false);
+        self.places_open.set(false);
+        self.friends_open.set(false);
+        self.trips_open.set(false);
+        self.settings_open.set(false);
+        self.target.set(None);
+        self.follow.set(false);
         self.message.set(String::new());
-        if self.drawing_alert.get_untracked() {
-            self.drawing_alert.set(false);
-            self.places_open.set(true);
+        self.area_name.set(name);
+        self.area_history.set_value(Vec::new());
+        self.setup_circle.set_value(None);
+        if circle.is_none() && points.len() >= 3 {
+            self.fit(points.iter().copied());
+            self.area_points.set(points);
+            self.area_drawing.set(true);
+        } else {
+            self.place_circle(circle.unwrap_or_else(|| (self.map_center(), 200.)));
         }
+        self.setup.set(Some(setup));
+    }
+
+    fn place_circle(self, (center, radius): (Point, f64)) {
+        self.area_drawing.set(false);
+        self.editing_circle.set(Some((center, radius)));
+        self.fit(circle_outline(center, radius));
+        // Room around the circle for its edge handle.
+        self.camera.update(|c| c.zoom = (c.zoom - 0.65).max(0.));
+    }
+
+    pub fn setup_use_circle(self) {
+        if self.editing_circle.with_untracked(Option::is_none) {
+            let circle = self.setup_circle.get_value();
+            self.place_circle(circle.unwrap_or_else(|| (self.map_center(), 200.)));
+        }
+    }
+
+    /// Corners drawn earlier in this setup stay.
+    pub fn setup_use_drawing(self) {
+        let Some(circle) = self.editing_circle.get_untracked() else {
+            return;
+        };
+        self.setup_circle.set_value(Some(circle));
+        self.editing_circle.set(None);
+        self.area_history.set_value(Vec::new());
+        self.area_drawing.set(true);
+    }
+
+    /// Setup's shape: circle, else drawn corners.
+    pub fn setup_shape(self) -> (Option<(Point, f64)>, Vec<Point>) {
+        match self.editing_circle.get_untracked() {
+            Some(circle) => (Some(circle), Vec::new()),
+            None => (None, self.area_points.get_untracked()),
+        }
+    }
+
+    pub fn close_setup(self) {
+        self.setup.set(None);
+        self.editing_circle.set(None);
+        self.area_drawing.set(false);
+        self.area_points.set(Vec::new());
+        self.area_history.set_value(Vec::new());
+        self.message.set(String::new());
+    }
+
+    pub fn new_area(self) {
+        self.open_setup(
+            Setup {
+                title: "New area",
+                done: "Save area",
+                finish: std::rc::Rc::new(move || self.save_setup_area(None)),
+                cancel: std::rc::Rc::new(move || {
+                    self.close_setup();
+                    self.areas_open.set(true);
+                }),
+            },
+            String::new(),
+            None,
+            Vec::new(),
+        );
+    }
+
+    pub fn edit_area(self, id: u64) {
+        let Some(area) = self
+            .data
+            .with_untracked(|d| d.areas.iter().find(|a| a.id == id).cloned())
+        else {
+            return;
+        };
+        self.open_setup(
+            Setup {
+                title: "Edit area",
+                done: "Save area",
+                finish: std::rc::Rc::new(move || self.save_setup_area(Some(id))),
+                cancel: std::rc::Rc::new(move || {
+                    self.close_setup();
+                    self.show_area(id);
+                }),
+            },
+            area.name,
+            area.circle,
+            area.points,
+        );
+    }
+
+    /// Saves setup's shape as saved area `id` (new when none), then measures it.
+    fn save_setup_area(self, id: Option<u64>) {
+        let (circle, points) = self.setup_shape();
+        let points = circle.map_or(points, |(center, radius)| circle_outline(center, radius));
+        let name = self.area_name.get_untracked().trim().to_owned();
+        let command = match id {
+            Some(id) => {
+                json!({"op":"update_area","area_id":id,"name":name,"points":points,"circle":circle})
+            }
+            None => json!({"op":"save_area","name":name,"points":points,"circle":circle}),
+        };
+        zgui::reactive::spawn_detached(async move {
+            match self.request(command).await {
+                Ok(_) => {
+                    // New area takes next id, as journal assigns it.
+                    let id = id.unwrap_or_else(|| {
+                        self.data
+                            .with_untracked(|d| d.areas.iter().map(|a| a.id).max().unwrap_or(0) + 1)
+                    });
+                    self.close_setup();
+                    self.refresh(true);
+                    self.area_id.set(Some(id));
+                    self.fit(points.iter().copied());
+                    self.area_points.set(points);
+                    self.compute_area();
+                }
+                Err(error) => self.message.set(error),
+            }
+        });
     }
 
     /// Remembers corners before a change.
@@ -128,26 +254,8 @@ impl UiState {
         });
     }
 
-    pub fn finish_area(self) {
-        if self.area_points.with_untracked(Vec::len) < 3 {
-            self.message.set("Area needs at least 3 corners.".into());
-            return;
-        }
-        if self.drawing_alert.get_untracked() {
-            self.alert_polygon.set(self.area_points.get_untracked());
-            self.drawing_alert.set(false);
-            self.cancel_area();
-            self.places_open.set(true);
-            return;
-        }
-        self.area_drawing.set(false);
-        self.area_name.set(String::new());
-        self.message.set(String::new());
-        self.compute_area(true);
-    }
-
     /// Loads all roads inside area and measures traveled share for current selection.
-    pub fn compute_area(self, open: bool) {
+    pub fn compute_area(self) {
         let points = self.area_points.get_untracked();
         let filter = self.history_filter.get_untracked();
         self.area_busy.set(true);
@@ -174,36 +282,12 @@ impl UiState {
                         });
                     }
                     self.area_stats.set(Some(stats));
-                    if open {
-                        self.area_open.set(true);
-                    }
                     // Area may have loaded new road tiles.
                     self.refresh(true);
                 }
                 Err(error) => self.message.set(error),
             }
         });
-    }
-
-    pub fn save_area(self) {
-        let name = self.area_name.get_untracked();
-        let points = self.area_points.get_untracked();
-        self.area_id.set(None);
-        self.send(
-            json!({"op":"save_area","name":name,"points":points}),
-            "Area saved.",
-        );
-    }
-
-    pub fn update_area(self) {
-        let Some(id) = self.area_id.get_untracked() else {
-            return;
-        };
-        let points = self.area_points.get_untracked();
-        self.send(
-            json!({"op":"update_area","area_id":id,"points":points}),
-            "Area updated.",
-        );
     }
 
     pub fn show_area(self, id: u64) {
@@ -216,11 +300,48 @@ impl UiState {
             return;
         };
         self.areas_open.set(false);
+        self.marks_friend.set_value(None);
+        self.area_marks.set(Vec::new());
         self.area_drawing.set(false);
         self.area_id.set(Some(id));
         self.area_points.set(points.clone());
         self.fit(points);
-        self.compute_area(true);
+        self.compute_area();
+    }
+
+    /// Every saved area outlined with its name; none yet opens the Areas list instead.
+    pub fn show_areas(self) {
+        let marks: Vec<Mark> = self.data.with_untracked(|d| {
+            d.areas
+                .iter()
+                .map(|a| Mark {
+                    alert: false,
+                    id: a.id,
+                    name: a.name.clone(),
+                    outline: a.points.clone(),
+                })
+                .collect()
+        });
+        if marks.is_empty() {
+            self.areas_open.set(true);
+            return;
+        }
+        self.show_marks(marks);
+    }
+
+    /// View-only map of `marks`: other area tools, friend card and pages closed.
+    pub fn show_marks(self, marks: Vec<Mark>) {
+        self.cancel_area();
+        self.fit(marks.iter().flat_map(|m| m.outline.iter().copied()));
+        self.marks_friend.set_value(None);
+        self.area_marks.set(marks);
+        self.map_friend_selected.set(None);
+        self.message.set(String::new());
+        self.areas_open.set(false);
+        self.places_open.set(false);
+        self.friends_open.set(false);
+        self.trips_open.set(false);
+        self.settings_open.set(false);
     }
 
     pub fn delete_area(self, id: u64) {

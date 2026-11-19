@@ -23,21 +23,25 @@ Open **Friends** on map.
   limited to once per minute per person and never override Hidden, Block, timer expiry,
   or inactive Trips. A short GPS watch runs for up to 20 seconds when needed.
   This cannot wake a force-stopped or offline phone.
-- **Alert areas**: open Friends → Alert areas → **+ New**. Name the area and
-  adjust the circle (10 m–10 km) on the map or with the radius slider. Choose
-  **Draw shape** to use the same corner tools as regular areas. **Next: add
-  alerts** saves the boundary and lets you choose a friend or a group and Arrive,
+- **Alert areas**: open Friends → Alert areas → **+ New**. The same map setup
+  screen as regular areas (Layers → Areas → **+ New area**) opens: name the area,
+  then switch between **Circle** (10 m–10 km, pan to place, drag or slide to
+  resize) and **Draw shape** (tap corners). **Next: add alerts** saves the boundary and lets you choose a friend or a group and Arrive,
   Leave, or Both. A group alert covers every member, including ones who join
   later, except members you mark Skipped. Tap a friend on the map to outline the
-  areas that alert about them; tap empty map to hide them. Layers → **Show alert
-  areas**, a friend's page and the Alert areas list draw areas with their names;
+  areas that alert about them; tap empty map to hide them. Layers → Alert areas →
+  **Show on map**, a friend's page and the Alert areas list draw areas with their names;
   the bar under them filters by group or friend. Tap a name on the map to open
   that area for editing.
-  Definitions stay on this phone. First observation sets a
-  baseline; two distinct, accurate updates at least 15 seconds apart confirm changes.
-  Boundary uncertainty, stale/relayed fixes and gaps over five minutes cannot invent
-  an arrival. A pending change requests one fresh GPS fix after 15 seconds, subject
-  to Try to locate cooldown. Keep connections enabled and grant notification
+  Definitions stay on this phone. The first update only records which side of
+  the boundary a friend is on; an update on the other side alerts, however long
+  since the last one. At most one alert per alert and person every 5 minutes;
+  quicker in-and-out only updates the remembered side. Any new update counts,
+  relayed or received just before a disconnect, if under 15 minutes old. Inside
+  means the reported point is in the area (indoor fixes are often ±100 m); outside
+  needs the whole accuracy circle out, so a wandering indoor fix cannot fake a
+  departure. Anything in between keeps the last side. Each alert shows what it last
+  saw ("Ben inside · 3 min ago"). Keep connections enabled and grant notification
   permission. GPS/update cadence can delay alerts; this is not a guaranteed safety
   notification service.
 - **You** card (top of Friends): tap your picture to choose one; ⋯ changes name,

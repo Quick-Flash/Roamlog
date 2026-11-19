@@ -1,6 +1,9 @@
 use serde::{Deserialize, Serialize};
 
 pub const EARTH_RADIUS_M: f64 = 6_371_008.8;
+/// Circle area radius limits, metres.
+pub const MIN_RADIUS: f64 = 10.;
+pub const MAX_RADIUS: f64 = 10_000.;
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq)]
 pub struct Point {
@@ -51,4 +54,24 @@ pub fn segment_distance(p: [f64; 2], a: [f64; 2], b: [f64; 2]) -> f64 {
         (((p[0] - a[0]) * v[0] + (p[1] - a[1]) * v[1]) / length2).clamp(0.0, 1.0)
     };
     (p[0] - a[0] - t * v[0]).hypot(p[1] - a[1] - t * v[1])
+}
+
+/// 64-corner ring approximating circle on sphere.
+pub fn circle_outline(center: Point, radius: f64) -> Vec<Point> {
+    let lat = center.lat.to_radians();
+    let lon = center.lon.to_radians();
+    let angle = radius / EARTH_RADIUS_M;
+    (0..64)
+        .map(|i| {
+            let bearing = f64::from(i) * std::f64::consts::TAU / 64.;
+            let next = (lat.sin() * angle.cos() + lat.cos() * angle.sin() * bearing.cos()).asin();
+            let east = lon
+                + (bearing.sin() * angle.sin() * lat.cos())
+                    .atan2(angle.cos() - lat.sin() * next.sin());
+            Point {
+                lat: next.to_degrees(),
+                lon: (east.to_degrees() + 180.).rem_euclid(360.) - 180.,
+            }
+        })
+        .collect()
 }

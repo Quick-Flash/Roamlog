@@ -13,6 +13,9 @@ pub struct Area {
     pub id: u64,
     pub name: String,
     pub points: Vec<Point>,
+    /// Center and radius when drawn as circle; `points` then hold its outline.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub circle: Option<(Point, f64)>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq)]
@@ -200,26 +203,37 @@ impl State {
                     return Err("Only finished trips can be deleted".into());
                 }
             }
-            Event::SaveArea { name, points } => {
+            Event::SaveArea {
+                name,
+                points,
+                circle,
+            } => {
                 if name.trim().is_empty() || name.len() > 80 {
                     return Err("Area name needs 1–80 bytes".into());
                 }
-                if points.len() < 3 || points.len() > 200 || !points.iter().all(|p| p.valid()) {
-                    return Err("Area needs 3–200 valid corners".into());
-                }
+                valid_shape(points, *circle)?;
             }
             Event::DeleteArea { area_id } => {
                 if !self.areas.iter().any(|a| a.id == *area_id) {
                     return Err("Unknown area".into());
                 }
             }
-            Event::UpdateArea { area_id, points } => {
+            Event::UpdateArea {
+                area_id,
+                points,
+                name,
+                circle,
+            } => {
                 if !self.areas.iter().any(|a| a.id == *area_id) {
                     return Err("Unknown area".into());
                 }
-                if points.len() < 3 || points.len() > 200 || !points.iter().all(|p| p.valid()) {
-                    return Err("Area needs 3–200 valid corners".into());
+                if name
+                    .as_ref()
+                    .is_some_and(|n| n.trim().is_empty() || n.len() > 80)
+                {
+                    return Err("Area name needs 1–80 bytes".into());
                 }
+                valid_shape(points, *circle)?;
             }
             Event::RenameTrip { trip_id, name } => {
                 if !self.trips.iter().any(|t| t.id == *trip_id) {
@@ -337,15 +351,29 @@ impl State {
             }
             Event::Fix { fix } => self.trips.last_mut().unwrap().record(fix),
             Event::DeleteTrip { trip_id } => self.trips.retain(|t| t.id != trip_id),
-            Event::SaveArea { name, points } => self.areas.push(Area {
+            Event::SaveArea {
+                name,
+                points,
+                circle,
+            } => self.areas.push(Area {
                 id: self.areas.iter().map(|a| a.id).max().unwrap_or(0) + 1,
                 name: name.trim().into(),
                 points,
+                circle,
             }),
             Event::DeleteArea { area_id } => self.areas.retain(|a| a.id != area_id),
-            Event::UpdateArea { area_id, points } => {
+            Event::UpdateArea {
+                area_id,
+                points,
+                name,
+                circle,
+            } => {
                 if let Some(area) = self.areas.iter_mut().find(|a| a.id == area_id) {
                     area.points = points;
+                    area.circle = circle;
+                    if let Some(name) = name {
+                        area.name = name.trim().into();
+                    }
                 }
             }
             Event::RenameTrip { trip_id, name } => {
@@ -512,6 +540,8 @@ pub enum Event {
     SaveArea {
         name: String,
         points: Vec<Point>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        circle: Option<(Point, f64)>,
     },
     DeleteArea {
         area_id: u64,
@@ -519,6 +549,10 @@ pub enum Event {
     UpdateArea {
         area_id: u64,
         points: Vec<Point>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        circle: Option<(Point, f64)>,
     },
     RenameTrip {
         trip_id: u64,
@@ -539,4 +573,16 @@ pub enum Event {
         trip_id: u64,
         at_ms: u64,
     },
+}
+
+fn valid_shape(points: &[Point], circle: Option<(Point, f64)>) -> Result<(), String> {
+    if points.len() < 3 || points.len() > 200 || !points.iter().all(|p| p.valid()) {
+        return Err("Area needs 3–200 valid corners".into());
+    }
+    if circle.is_some_and(|(center, radius)| {
+        !center.valid() || !(crate::geo::MIN_RADIUS..=crate::geo::MAX_RADIUS).contains(&radius)
+    }) {
+        return Err("Circle radius needs 10–10000 m".into());
+    }
+    Ok(())
 }

@@ -1,97 +1,16 @@
 //! User-selected arrival/departure subscriptions, stored only on this phone.
-use super::state::UiState;
-use crate::{
-    geo::Point,
-    sharing::{
-        android_app,
-        peers::{Friend, Group},
-        places::{self, Place, Who},
-    },
+use super::{
+    state::{Mark, Setup, UiState},
+    tools::shape_preview,
+};
+use crate::sharing::{
+    android_app,
+    peers::{Friend, Group},
+    places::{self, Place, Who},
 };
 use std::collections::BTreeSet;
 use zgui::prelude::*;
 use zgui_ui::prelude::*;
-
-fn boundary_preview(place: &Place, [width, height]: [f64; 2]) -> impl IntoView {
-    use crate::mapping::{
-        basemap::Kind,
-        camera::{Camera, project},
-    };
-    let s = UiState::current();
-    let origin = project(place.center.lon, place.center.lat).unwrap_or_default();
-    let raw: Vec<_> = place
-        .outline()
-        .into_iter()
-        .filter_map(|p| project(p.lon, p.lat))
-        .map(|mut p| {
-            let world = 2. * std::f64::consts::PI * 6_378_137.;
-            p[0] = origin[0] + (p[0] - origin[0] + world / 2.).rem_euclid(world) - world / 2.;
-            p
-        })
-        .collect();
-    let (lo, hi) = raw.iter().fold(
-        ([f64::INFINITY; 2], [f64::NEG_INFINITY; 2]),
-        |(mut lo, mut hi), p| {
-            for axis in 0..2 {
-                lo[axis] = lo[axis].min(p[axis]);
-                hi[axis] = hi[axis].max(p[axis]);
-            }
-            (lo, hi)
-        },
-    );
-    let pad = (hi[0] - lo[0]).max(hi[1] - lo[1]).max(1.) * 0.18;
-    let camera = Camera::from_ranges(
-        plot::Ranges::new((lo[0] - pad, hi[0] + pad), (lo[1] - pad, hi[1] + pad)),
-        [width, height],
-    );
-    let points: Vec<_> = camera
-        .map(|camera| {
-            raw.into_iter()
-                .map(|[x, y]| {
-                    [
-                        width / 2. + (x - camera.center[0]) * camera.scale(),
-                        height / 2. - (y - camera.center[1]) * camera.scale(),
-                    ]
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-    let lines: Vec<_> = points
-        .iter()
-        .zip(points.iter().cycle().skip(1))
-        .enumerate()
-        .map(|(id, (a, b))| {
-            let dx = b[0] - a[0];
-            let dy = b[1] - a[1];
-            (
-                id,
-                format!("{}px", dx.hypot(dy)),
-                format!(
-                    "translate({}px, {}px) rotate({}rad)",
-                    a[0],
-                    a[1],
-                    dy.atan2(dx)
-                ),
-            )
-        })
-        .collect();
-    view! {
-        box(class="alert-shape",style:width=format!("{width}px"),style:height=format!("{height}px")) {
-            for tile in move ||camera.map_or_else(Vec::new,|camera|
-                s.basemap.visible(camera,[width,height],s.dark.get(),Kind::Map,1.,!s.map_offline.get())),key=|tile|tile.clone() {
-                {{
-                    let [x,y,scale]=camera.expect("tile requires camera").place(tile.0,[width,height]);
-                    zgui::elements::image().class("map-vector-tile map-vector-image")
-                        .style_property("transform",format!("translate({x}px, {y}px) scale({})",scale/2.))
-                        .src(Some(tile.1.clone())).into_view()
-                }}
-            }
-            for line in move ||lines.clone(),key=|line|line.0 {
-                box(class="alert-shape-edge",style:width=line.1.clone(),style:transform=line.2.clone()) {}
-            }
-        }
-    }
-}
 
 /// Friends (not blocked) and current groups, for choosing and filtering alert rules.
 type People = (Vec<Friend>, Vec<Group>);
@@ -153,16 +72,25 @@ fn filter_options((friends, groups): &People) -> Vec<(String, String)> {
         .collect()
 }
 
-fn marks(
-    list: Vec<Place>,
-    filter: Option<&str>,
-    friends: &[Friend],
-) -> Vec<(u32, String, Vec<Point>)> {
+fn marks(list: &[Place], filter: Option<&str>, friends: &[Friend]) -> Vec<Mark> {
     let mut seen = BTreeSet::new();
-    list.into_iter()
+    list.iter()
         .filter(|p| shown(p, filter, friends))
         .filter(|p| seen.insert(p.area()))
-        .map(|p| (p.area(), p.name.clone(), p.outline()))
+        .map(|p| Mark {
+            alert: true,
+            id: p.area().into(),
+            name: p.name.clone(),
+            outline: p.outline(),
+        })
+        .collect()
+}
+
+/// Filter choices that have at least one alert area.
+fn used_options(list: &[Place], people: &People) -> Vec<(String, String)> {
+    filter_options(people)
+        .into_iter()
+        .filter(|(key, _)| !marks(list, Some(key), &people.0).is_empty())
         .collect()
 }
 
@@ -172,24 +100,20 @@ pub fn show_on_map(s: UiState, filter: Option<String>) {
     let directory = s.directory.get_value();
     zgui::reactive::spawn_detached(async move {
         match blocking(move || load(directory)).await {
+            // None yet: the Alert areas page explains how to add one.
+            Ok((list, _)) if list.is_empty() => {
+                s.place_peer.set(None);
+                s.places_open.set(true);
+            }
             Ok((list, people)) => {
-                let marks = marks(list, filter.as_deref(), &people.0);
-                s.area_filters.set(filter_options(&people));
+                let shown = marks(&list, filter.as_deref(), &people.0);
+                s.area_filters.set(used_options(&list, &people));
                 s.place_peer.set(filter);
-                if marks.is_empty() {
-                    s.message.set("No alert areas to show yet".into());
+                if shown.is_empty() {
+                    s.message.set("No alert areas for them yet".into());
                     return;
                 }
-                s.fit(marks.iter().flat_map(|mark| mark.2.iter().copied()));
-                s.place_outline.set(Vec::new());
-                s.marks_friend.set_value(None);
-                s.area_marks.set(marks);
-                s.map_friend_selected.set(None);
-                s.message.set(String::new());
-                s.places_open.set(false);
-                s.friends_open.set(false);
-                s.trips_open.set(false);
-                s.settings_open.set(false);
+                s.show_marks(shown);
             }
             Err(error) => s.message.set(error),
         }
@@ -218,7 +142,7 @@ pub fn follow_selected_friend(s: UiState) {
                 return;
             }
             s.marks_friend.set_value(Some(peer.clone()));
-            s.area_marks.set(marks(list, Some(&peer), &people.0));
+            s.area_marks.set(marks(&list, Some(&peer), &people.0));
         });
     });
     on_cleanup_local(move || drop(effect));
@@ -232,104 +156,64 @@ fn trigger_key(rule: places::Trigger) -> &'static str {
     }
 }
 
-/// Radius slider on a log scale, so 10 m and 10 km are both easy to reach.
-fn radius_slider_view(radius: RwSignal<f64, LocalStorage>) -> impl IntoView {
-    let span = (places::MAX_RADIUS / places::MIN_RADIUS).ln();
-    let to_position = move |r: f64| (r / places::MIN_RADIUS).ln() / span * 1000.;
-    let to_radius = move |p: f64| {
-        let r = places::MIN_RADIUS * (p / 1000. * span).exp();
-        let step = if r < 100. {
-            5.
-        } else if r < 1000. {
-            10.
-        } else {
-            50.
-        };
-        ((r / step).round() * step).clamp(places::MIN_RADIUS, places::MAX_RADIUS)
-    };
-    view! {
-        Slider(value=Binding::controlled(Signal::derive_local(move ||to_position(radius.get())),move |p|radius.set(to_radius(p))),
-            min=0.0,max=1000.0,step=1.0,label="Radius in meters")
-    }
-}
-
 #[component]
 pub fn PlaceAlerts(open: RwSignal<bool, LocalStorage>) -> impl IntoView {
     let s = UiState::current();
     let saved = RwSignal::new_local(Vec::<Place>::new());
-    let people = RwSignal::new_local(Vec::<(String, String)>::new());
     let records = RwSignal::new_local((Vec::<Friend>::new(), Vec::<Group>::new()));
     // Group members the chosen group rule skips.
     let opt_out = RwSignal::new_local(Vec::<String>::new());
-    let name = RwSignal::new_local(String::new());
     let peer = RwSignal::new_local("none".to_owned());
     let trigger = RwSignal::new_local("both".to_owned());
     let status = RwSignal::new_local(String::new());
     let area = RwSignal::new_local(None::<u32>);
-    let creating = RwSignal::new_local(false);
     let rule_id = RwSignal::new_local(None::<u32>);
     let existing_rule = RwSignal::new_local(false);
     let editing_rule = RwSignal::new_local(false);
     let confirm_delete = RwSignal::new_local(false);
-    let editing = RwSignal::new_local(false);
-    let radius_slider = RwSignal::new_local(250.0);
-    let edit_center = RwSignal::new_local(None::<crate::geo::Point>);
-    let choosing_center = RwSignal::new_local(false);
+    // Area just created: its page opens with the alert sheet once loaded.
+    let ask_rule = StoredValue::new_local(false);
+    let has_rule = move |key: &str| {
+        saved.with_untracked(|list| {
+            list.iter()
+                .any(|p| Some(p.area()) == area.get_untracked() && !p.no_rule && rule_key(p) == key)
+        })
+    };
+    // New alert for page filter's friend or group, else first without an alert here.
+    let new_rule = move || {
+        let keys: Vec<String> = records
+            .with_untracked(filter_options)
+            .into_iter()
+            .map(|o| o.0)
+            .collect();
+        let wanted = s
+            .place_peer
+            .get_untracked()
+            .filter(|k| keys.contains(k) && !has_rule(k));
+        if let Some(key) = wanted
+            .or_else(|| keys.iter().find(|k| !has_rule(k)).cloned())
+            .or_else(|| keys.first().cloned())
+        {
+            peer.set(key);
+        }
+        existing_rule.set(false);
+        opt_out.set(Vec::new());
+        trigger.set("both".into());
+        editing_rule.set(true);
+    };
     let reload = move || {
         let directory = s.directory.get_value();
         zgui::reactive::spawn_detached(async move {
             match blocking(move || load(directory)).await {
                 Ok((list, loaded)) => {
-                    let friends: Vec<_> = loaded
-                        .0
-                        .iter()
-                        .map(|f| (f.peer_id.to_string(), f.display_name.clone()))
-                        .collect();
-                    if peer.get_untracked() != "none"
-                        && !friends.iter().any(|(id, _)| *id == peer.get_untracked())
-                        && let Some((id, _)) = friends.first()
-                    {
-                        peer.set(id.clone());
-                    }
                     saved.set(list);
-                    people.set(friends);
                     records.set(loaded);
+                    if ask_rule.get_value() {
+                        ask_rule.set_value(false);
+                        new_rule();
+                    }
                 }
                 Err(e) => status.set(e),
-            }
-        });
-    };
-    let save_area = move || {
-        let (Some(id), Some(center)) = (area.get_untracked(), edit_center.get_untracked()) else {
-            return;
-        };
-        let directory = s.directory.get_value();
-        let area_name = name.get_untracked();
-        let radius = radius_slider.get_untracked();
-        let polygon = s.alert_polygon.get_untracked();
-        let center = polygon.first().copied().unwrap_or(center);
-        spawn_local(async move {
-            let result = blocking(move || {
-                let manager = android_app::manager(&directory)?;
-                places::edit_area(
-                    manager.friends(),
-                    id,
-                    &area_name,
-                    center,
-                    radius,
-                    (!polygon.is_empty()).then_some(polygon),
-                )
-            })
-            .await;
-            match result {
-                Ok(()) => {
-                    editing.set(false);
-                    name.set(String::new());
-                    status.set("Alert area saved".into());
-                    s.place_outline.set(Vec::new());
-                    reload();
-                }
-                Err(error) => status.set(error.to_string()),
             }
         });
     };
@@ -343,111 +227,159 @@ pub fn PlaceAlerts(open: RwSignal<bool, LocalStorage>) -> impl IntoView {
     let effect = zgui::reactive::RenderEffect::new(move |_| {
         if open.get() {
             status.set(String::new());
-            if choosing_center.get_untracked() {
-                choosing_center.set(false);
-                if creating.get_untracked() && s.alert_polygon.with_untracked(Vec::is_empty) {
-                    creating.set(false);
-                }
-                if let Some((center, radius)) = s.editing_circle.get_untracked() {
-                    edit_center.set(Some(center));
-                    radius_slider.set(radius);
-                }
-                s.editing_circle.set(None);
-                s.place_outline.set(Vec::new());
-            } else {
-                creating.set(false);
-                editing.set(false);
-                editing_rule.set(false);
-                confirm_delete.set(false);
-                area.set(None);
-            }
-            if let Some(id) = s.open_area.get_untracked() {
-                s.open_area.set(None);
-                area.set(Some(id));
-            }
-            if let Some(id) = s.place_peer.get_untracked() {
-                peer.set(id);
-            }
+            editing_rule.set(false);
+            confirm_delete.set(false);
+            area.set(s.open_area.get_untracked());
+            s.open_area.set(None);
             reload();
         }
     });
     on_cleanup_local(move || drop(effect));
+    // Open area page keeps its "last seen" lines current.
+    let refresh = set_interval(std::time::Duration::from_secs(10), move || {
+        if open.get_untracked() && area.with_untracked(Option::is_some) {
+            reload();
+        }
+    });
+    on_cleanup_local(move || drop(refresh));
+    // Setup's circle, or drawn shape (its first corner as nominal center).
+    let setup_place = move || {
+        let (circle, polygon) = s.setup_shape();
+        let (center, radius) = circle.or_else(|| polygon.first().map(|p| (*p, 200.)))?;
+        Some((s.area_name.get_untracked(), center, radius, polygon))
+    };
+    let reopen = move |id: u32| {
+        s.close_setup();
+        s.open_area.set(Some(id));
+        open.set(true);
+    };
+    let create = move || {
+        let Some((name, center, radius, polygon)) = setup_place() else {
+            return;
+        };
+        let directory = s.directory.get_value();
+        zgui::reactive::spawn_detached(async move {
+            let result = blocking(move || -> crate::sharing::Result<u32> {
+                let manager = android_app::manager(&directory)?;
+                places::set_rule(
+                    manager.friends(),
+                    None,
+                    &name,
+                    center,
+                    radius,
+                    None,
+                    places::Trigger::Both,
+                    polygon,
+                )
+            })
+            .await;
+            match result {
+                Ok(id) => {
+                    ask_rule.set_value(true);
+                    reopen(id);
+                }
+                Err(e) => s.message.set(e.to_string()),
+            }
+        });
+    };
+    let save_edit = move |id: u32| {
+        let Some((name, center, radius, polygon)) = setup_place() else {
+            return;
+        };
+        let directory = s.directory.get_value();
+        zgui::reactive::spawn_detached(async move {
+            let result = blocking(move || {
+                let manager = android_app::manager(&directory)?;
+                places::edit_area(
+                    manager.friends(),
+                    id,
+                    &name,
+                    center,
+                    radius,
+                    (!polygon.is_empty()).then_some(polygon),
+                )
+            })
+            .await;
+            match result {
+                Ok(()) => reopen(id),
+                Err(e) => s.message.set(e.to_string()),
+            }
+        });
+    };
+    let new_area = move || {
+        s.open_setup(
+            Setup {
+                title: "New alert area",
+                done: "Next: add alerts",
+                finish: std::rc::Rc::new(create),
+                cancel: std::rc::Rc::new(move || {
+                    s.close_setup();
+                    open.set(true);
+                }),
+            },
+            String::new(),
+            None,
+            Vec::new(),
+        );
+    };
+    let edit_area = move |place: Place| {
+        let id = place.area();
+        s.open_setup(
+            Setup {
+                title: "Edit alert area",
+                done: "Save area",
+                finish: std::rc::Rc::new(move || save_edit(id)),
+                cancel: std::rc::Rc::new(move || reopen(id)),
+            },
+            place.name.clone(),
+            place
+                .polygon
+                .is_empty()
+                .then_some((place.center, place.radius_m)),
+            place.polygon,
+        );
+    };
     let add = move || {
         let selected = area.get_untracked();
-        let radius = radius_slider.get_untracked();
         let trigger_value = match trigger.get_untracked().as_str() {
             "entering" => places::Trigger::Entering,
             "exiting" => places::Trigger::Exiting,
             _ => places::Trigger::Both,
         };
         let directory = s.directory.get_value();
-        let name_value = name.get_untracked();
         let peer_value = peer.get_untracked();
         let skip = opt_out.get_untracked();
-        let [lon, lat] = crate::mapping::camera::geographic(s.camera.get_untracked().center);
-        let circle = s.editing_circle.get_untracked();
-        let polygon = s.alert_polygon.get_untracked();
-        let center = polygon
-            .first()
-            .copied()
-            .or_else(|| circle.map(|(center, _)| center))
-            .unwrap_or(crate::geo::Point { lat, lon });
-        let radius = circle.map_or(radius, |(_, radius)| radius);
+        let Some(place) =
+            saved.with_untracked(|list| list.iter().find(|p| Some(p.area()) == selected).cloned())
+        else {
+            return;
+        };
         zgui::reactive::spawn_detached(async move {
             let result = blocking(move || -> crate::sharing::Result<u32> {
                 let manager = android_app::manager(&directory)?;
                 places::set_rule(
                     manager.friends(),
                     selected,
-                    &name_value,
-                    center,
-                    radius,
-                    if selected.is_none() || peer_value == "none" {
-                        None
-                    } else if let Some(group) = peer_value.strip_prefix("g:") {
-                        Some(Who::Group(
+                    &place.name,
+                    place.center,
+                    place.radius_m,
+                    Some(if let Some(group) = peer_value.strip_prefix("g:") {
+                        Who::Group(
                             group.into(),
                             skip.iter().filter_map(|p| p.parse().ok()).collect(),
-                        ))
+                        )
                     } else {
-                        Some(Who::Friend(peer_value.parse()?))
-                    },
+                        Who::Friend(peer_value.parse()?)
+                    }),
                     trigger_value,
-                    if selected.is_none() {
-                        polygon
-                    } else {
-                        Vec::new()
-                    },
+                    Vec::new(),
                 )
             })
             .await;
             match result {
-                Ok(id) => {
-                    if selected.is_none() {
-                        choosing_center.set(true);
-                        s.editing_circle.set(None);
-                        s.picking_place_center.set(false);
-                        s.place_outline.set(Vec::new());
-                        area.set(Some(id));
-                        open.set(true);
-                        if let Some((id, _)) =
-                            records.with_untracked(filter_options).into_iter().next()
-                        {
-                            peer.set(id);
-                            opt_out.set(Vec::new());
-                            existing_rule.set(false);
-                            editing_rule.set(true);
-                        }
-                    } else {
-                        editing_rule.set(false);
-                    }
-                    status.set(if selected.is_some() {
-                        "Alert saved".into()
-                    } else {
-                        "Alert area saved".into()
-                    });
-                    name.set(String::new());
-                    creating.set(false);
+                Ok(_) => {
+                    editing_rule.set(false);
+                    status.set("Alert saved".into());
                     reload();
                 }
                 Err(e) => status.set(e.to_string()),
@@ -488,6 +420,36 @@ pub fn PlaceAlerts(open: RwSignal<bool, LocalStorage>) -> impl IntoView {
                 })
             })
     };
+    // What the alert last saw for each watched person, so it is clear it is working.
+    let last_seen = move |place: &Place| {
+        let now = crate::sharing::manager::now_ms();
+        let ago = |at: i64| match (now - at).max(0) / 60_000 {
+            0 => "just now".to_string(),
+            m @ 1..=59 => format!("{m} min ago"),
+            m => format!("{} h ago", m / 60),
+        };
+        let lines = records.with(|(friends, _)| {
+            friends
+                .iter()
+                .filter(|f| place.watches(f))
+                .map(|f| match place.side(f.peer_id) {
+                    Some((inside, at)) => format!(
+                        "{} {} · {}",
+                        f.display_name,
+                        if inside { "inside" } else { "outside" },
+                        ago(at)
+                    ),
+                    None => format!("{}: no location yet", f.display_name),
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        });
+        if lines.is_empty() {
+            "Nobody to watch: all members skipped".into()
+        } else {
+            lines
+        }
+    };
     let group_members = move |key: &str| {
         let Some(id) = key.strip_prefix("g:") else {
             return Vec::new();
@@ -500,106 +462,13 @@ pub fn PlaceAlerts(open: RwSignal<bool, LocalStorage>) -> impl IntoView {
                 .collect::<Vec<_>>()
         })
     };
-    let view_boundary = move |place: Place| {
-        let boundary = place.outline();
-        s.fit(boundary.iter().copied());
-        s.place_outline.set(boundary);
-        open.set(false);
-        s.friends_open.set(false);
-    };
-    let sync_radius = zgui::reactive::RenderEffect::new(move |_| {
-        let radius = radius_slider.get();
-        if creating.get_untracked() && !open.get_untracked() {
-            s.editing_circle.update(|circle| {
-                if let Some((_, current)) = circle {
-                    *current = radius;
-                }
-            });
-        }
-    });
-    on_cleanup_local(move || drop(sync_radius));
-    let sync_drag = zgui::reactive::RenderEffect::new(move |_| {
-        if let Some((_, radius)) = s.editing_circle.get()
-            && creating.get_untracked()
-            && radius_slider.get_untracked() != radius
-        {
-            radius_slider.set(radius);
-        }
-    });
-    on_cleanup_local(move || drop(sync_drag));
-    let use_circle = move || {
-        if s.drawing_alert.get_untracked() {
-            s.drawing_alert.set(false);
-            s.cancel_area();
-        }
-        choosing_center.set(false);
-        s.alert_draw_back_to_circle.set(false);
-        let [lon, lat] = crate::mapping::camera::geographic(s.camera.get_untracked().center);
-        let center = edit_center
-            .get_untracked()
-            .unwrap_or(crate::geo::Point { lat, lon });
-        let radius = radius_slider.get_untracked();
-        s.alert_polygon.set(Vec::new());
-        s.editing_circle.set(Some((center, radius)));
-        s.fit(places::circle_outline(center, radius));
-        s.camera
-            .update(|camera| camera.zoom = (camera.zoom - 0.65).max(0.));
-        s.picking_place_center.set(true);
-        creating.set(true);
-        open.set(false);
-        s.friends_open.set(false);
-        s.follow.set(false);
-    };
-    s.alert_use_circle
-        .set_value(Some(zgui::reactive::UnsyncCallback::new(move |()| {
-            use_circle()
-        })));
-    on_cleanup_local(move || s.alert_use_circle.set_value(None));
-    let new_area = move || {
-        name.set(String::new());
-        status.set(String::new());
-        area.set(None);
-        edit_center.set(None);
-        radius_slider.set(200.);
-        use_circle();
-    };
-    let draw = move || {
-        if let Some((center, radius)) = s.editing_circle.get_untracked() {
-            edit_center.set(Some(center));
-            radius_slider.set(radius);
-        }
-        s.alert_draw_back_to_circle.set(creating.get_untracked());
-        choosing_center.set(true);
-        s.picking_place_center.set(false);
-        open.set(false);
-        s.friends_open.set(false);
-        s.editing_circle.set(None);
-        s.place_outline.set(Vec::new());
-        let points = s.alert_polygon.get_untracked();
-        if points.is_empty() {
-            s.start_area();
-        } else {
-            s.area_points.set(points);
-            s.edit_area();
-        }
-        s.drawing_alert.set(true);
-    };
-    let move_boundary = move |place: Place| {
-        name.set(place.name);
-        edit_center.set(Some(place.center));
-        radius_slider.set(place.radius_m);
-        s.alert_polygon.set(place.polygon);
-        editing.set(true);
-        if s.alert_polygon.with_untracked(Vec::is_empty) {
-            s.fit(places::circle_outline(place.center, place.radius_m));
-            s.editing_circle.set(Some((place.center, place.radius_m)));
-            choosing_center.set(true);
-            open.set(false);
-            s.friends_open.set(false);
-            s.follow.set(false);
-        } else {
-            draw();
-        }
+    let view_on_map = move |place: Place| {
+        s.show_marks(vec![Mark {
+            alert: true,
+            id: place.area().into(),
+            name: place.name.clone(),
+            outline: place.outline(),
+        }]);
     };
     let remove_alert = move || {
         let Some(id) = rule_id.get_untracked() else {
@@ -622,16 +491,8 @@ pub fn PlaceAlerts(open: RwSignal<bool, LocalStorage>) -> impl IntoView {
         });
     };
     let back = move || {
-        if editing.get_untracked() {
-            editing.set(false);
-        } else if editing_rule.get_untracked() {
+        if editing_rule.get_untracked() {
             editing_rule.set(false);
-        } else if creating.get_untracked() {
-            creating.set(false);
-            s.editing_circle.set(None);
-            s.picking_place_center.set(false);
-            s.place_outline.set(Vec::new());
-            open.set(true);
         } else if area.get_untracked().is_some() {
             area.set(None);
             confirm_delete.set(false);
@@ -642,125 +503,64 @@ pub fn PlaceAlerts(open: RwSignal<bool, LocalStorage>) -> impl IntoView {
     s.alert_areas_back
         .set_value(Some(zgui::reactive::UnsyncCallback::new(move |()| back())));
     on_cleanup_local(move || s.alert_areas_back.set_value(None));
+    let filters = move || saved.with(|list| records.with(|people| used_options(list, people)));
     view! {
         if move ||open.get() {
             column(class="tab-page alert-page") {
                 row(class="page-heading") {
                     Button(variant=ButtonVariant::Ghost,class="alert-back page-back",a11y:label="Back",on:click=move |_|back()) {"‹"}
-                    text(class="page-title grow") {{move ||selected.with(|p|p.as_ref().map(|p|p.name.clone()))
-                        .unwrap_or_else(||if creating.get() {"New alert area".into()}else{"Alert areas".into()})}}
-                    if move ||area.with(Option::is_none)&&!creating.get() {
-                        Button(on:click=move |_|new_area()) {"+ New"}
+                    text(class="page-title grow") {{move ||selected.with(|p|p.as_ref().map(|p|p.name.clone())).unwrap_or_else(||"Alert areas".into())}}
+                    if move ||area.with(Option::is_none) {
+                        Button(class="new-alert-area",on:click=move |_|new_area()) {"+ New"}
                     }
                 }
                 scroll(class="page-scroll") {
                     column(class="list-body") {
-                        if move ||editing.get() {
-                            Input(value=name,label="Area name",placeholder="Name")
-                            if move ||saved.with(|list|list.iter().any(|p|Some(p.area())==area.get()&&p.polygon.is_empty())) {
-                                text {{move ||format!("{:.0} m radius",radius_slider.get())}}
-                                {radius_slider_view(radius_slider)}
-                                Button(variant=ButtonVariant::Outline,on:click=move |_|{
-                                    let Some(center) = edit_center.get_untracked() else {return;};
-                                    let radius = radius_slider.get_untracked();
-                                    let outline = places::circle_outline(center, radius);
-                                    s.fit(outline.iter().copied());
-                                    s.place_outline.set(outline);
-                                    s.editing_circle.set(Some((center, radius)));
-                                    choosing_center.set(true);
-                                    open.set(false);
-                                    s.friends_open.set(false);
-                                    s.follow.set(false);
-                                }) {"Move or resize on map"}
+                        if move ||selected.with(Option::is_some) {
+                            column(class="alert-card") {
+                                row(class="alert-preview") {
+                                    for place in move ||selected.get().into_iter().collect::<Vec<_>>(),key=|p|(p.id,p.center.lat.to_bits(),p.center.lon.to_bits(),p.radius_m.to_bits(),p.polygon.iter().map(|p|(p.lat.to_bits(),p.lon.to_bits())).collect::<Vec<_>>()) {
+                                        {shape_preview(place.center,place.outline(),[320.,150.])}
+                                    }
+                                }
+                                text(class="muted") {{move ||selected.with(|place|place.as_ref().map(|p|if p.polygon.is_empty(){format!("Circle · {:.0} m radius",p.radius_m)}else{format!("Drawn shape · {} corners",p.polygon.len())}).unwrap_or_default())}}
+                                row(class="actions") {
+                                    Button(variant=ButtonVariant::Outline,class="edit-alert-area",on:click=move |_|if let Some(place)=selected.get_untracked() {edit_area(place)}) {"Edit area"}
+                                    Button(variant=ButtonVariant::Outline,on:click=move |_|if let Some(place)=selected.get_untracked() {view_on_map(place)}) {"View on map"}
+                                }
                             }
-                            if move ||!s.alert_polygon.with(Vec::is_empty) {
-                                Button(variant=ButtonVariant::Outline,on:click=move |_|draw()) {"Edit area"}
+                            row(class="page-heading") {
+                                text(class="list-title grow") {"Alerts"}
+                                Button(variant=ButtonVariant::Outline,disabled=Signal::derive_local(move ||records.with(|r|r.0.is_empty()&&r.1.is_empty())),on:click=move |_|new_rule()) {"+ Add alert"}
                             }
-                            row(class="actions") {
-                                Button(variant=ButtonVariant::Outline,on:click=move |_|{editing.set(false);name.set(String::new());}) {"Cancel"}
-                                Button(on:click=move |_|save_area()) {"Save area"}
+                            if move || !saved.with(|list|list.iter().any(|p|Some(p.area())==area.get()&&!p.no_rule)) {
+                                text(class="muted") {"No alerts yet."}
                             }
                         } else {
-                            if move ||selected.with(Option::is_some) {
+                            text(class="muted") {"Get notified when friends arrive at or leave an area."}
+                            if move ||saved.with(Vec::is_empty) {
                                 column(class="alert-card") {
-                                        row(class="alert-preview") {
-                                        for place in move ||selected.get().into_iter().collect::<Vec<_>>(),key=|p|(p.id,p.center.lat.to_bits(),p.center.lon.to_bits(),p.radius_m.to_bits(),p.polygon.iter().map(|p|(p.lat.to_bits(),p.lon.to_bits())).collect::<Vec<_>>()) {
-                                            {boundary_preview(&place,[320.,150.])}
-                                        }
-                                    }
-                                    text(class="muted") {{move ||selected.with(|place|place.as_ref().map(|p|if p.polygon.is_empty(){format!("Circle · {:.0} m radius",p.radius_m)}else{"Drawn boundary".into()}).unwrap_or_default())}}
-                                    row(class="actions") {
-                                        Button(variant=ButtonVariant::Outline,on:click=move |_|{
-                                            if let Some(place)=selected.get_untracked(){move_boundary(place);}
-                                        }) {"Edit area"}
-                                        Button(variant=ButtonVariant::Outline,on:click=move |_|{
-                                            if let Some(place)=selected.get_untracked(){
-                                                name.set(place.name);
-                                                s.alert_polygon.set(place.polygon);
-                                                edit_center.set(Some(place.center));
-                                                radius_slider.set(place.radius_m);
-                                                editing.set(true);
-                                            }
-                                        }) {"Edit name"}
-                                    }
-                                    Button(variant=ButtonVariant::Ghost,on:click=move |_|{
-                                        if let Some(place)=selected.get_untracked(){view_boundary(place);}
-                                    }) {"View on map"}
-                                }
-                                row(class="page-heading") {
-                                    text(class="list-title grow") {"Alerts"}
-                                    Button(variant=ButtonVariant::Outline,disabled=Signal::derive_local(move ||records.with(|r|r.0.is_empty()&&r.1.is_empty())),on:click=move |_|{
-                                        // First friend or group without an alert here, so this is a new alert.
-                                        let keys:Vec<String>=records.with_untracked(filter_options).into_iter().map(|o|o.0).collect();
-                                        let free=keys.iter().find(|k|!saved.with_untracked(|list|list.iter().any(|p|Some(p.area())==area.get_untracked()&&!p.no_rule&&rule_key(p)==**k)));
-                                        if let Some(key)=free.or(keys.first()){peer.set(key.clone());}
-                                        existing_rule.set(false);
-                                        opt_out.set(Vec::new());
-                                        trigger.set("both".into());
-                                        editing_rule.set(true);
-                                    }) {"+ Add alert"}
-                                }
-                                if move || !saved.with(|list|list.iter().any(|p|Some(p.area())==area.get()&&!p.no_rule)) {
-                                    text(class="muted") {"No alerts yet."}
+                                    text(class="list-title") {"No alert areas yet"}
+                                    text(class="muted") {"Tap + New, place a circle or draw a shape on the map, then choose which friends to watch."}
                                 }
                             } else {
-                                if move ||!creating.get() {
-                                    text(class="muted") {"Get notified when friends arrive at or leave an area."}
-                                    if move ||!saved.with(Vec::is_empty) {
-                                        Button(variant=ButtonVariant::Outline,class="wide show-areas",on:click=move |_|show_on_map(s,s.place_peer.get_untracked())) {
-                                            {move ||if s.place_peer.with(Option::is_some) {"Show these areas on map"} else {"Show all areas on map"}}
-                                        }
-                                    }
-                                    if move ||saved.with(Vec::is_empty) {
-                                        column(class="alert-card") {
-                                            text(class="list-title") {"No alert areas yet"}
-                                            text(class="muted") {"Tap + New, place a circle or draw a shape on the map, then choose which friends to watch."}
-                                        }
-                                    }
-                                    if move ||records.with(|r|!r.0.is_empty()||!r.1.is_empty())&&!saved.with(Vec::is_empty) {
-                                    scroll(class="alert-filter") {
-                                        row(class="friend-strip-row") {
-                                            Button(variant=ButtonVariant::Outline,class:seg-on=move ||s.place_peer.with(Option::is_none),on:click=move |_|s.place_peer.set(None)) {"All"}
-                                            for person in move ||records.with(filter_options),key=|p|p.clone() {
-                                                {{
-                                                    let id=person.0.clone();
-                                                    let selected_id=id.clone();
-                                                    view! {
-                                                        Button(variant=ButtonVariant::Outline,class:seg-on=move ||s.place_peer.with(|filter|filter.as_ref()==Some(&selected_id)),on:click=move |_|s.place_peer.set(Some(id.clone()))) {{person.1.clone()}}
-                                                    }
-                                                }}
-                                            }
-                                        }
-                                    }
-                                    }
+                                Button(variant=ButtonVariant::Outline,class="wide show-areas",on:click=move |_|show_on_map(s,s.place_peer.get_untracked())) {
+                                    {move ||if s.place_peer.with(Option::is_some) {"Show these areas on map"} else {"Show all areas on map"}}
                                 }
-                                if move ||creating.get() {
-                                    Input(value=name,label="Area name",placeholder="Home, school, campsite…")
-                                    text(class="muted") {{move ||format!("Drawn shape · {} corners",s.alert_polygon.with(Vec::len))}}
-                                    row(class="friends-timer-presets") {
-                                        Button(variant=ButtonVariant::Outline,on:click=move |_|use_circle()) {"Use circle"}
-                                        Button(variant=ButtonVariant::Outline,on:click=move |_|draw()) {"Edit area"}
-                                        Button(disabled=Signal::derive_local(move ||name.with(|n|n.trim().is_empty())||s.alert_polygon.with(Vec::is_empty)),on:click=move |_|add()) {"Next: add alerts"}
+                            }
+                            if move ||!filters().is_empty() {
+                                scroll(class="alert-filter") {
+                                    row(class="friend-strip-row") {
+                                        Button(variant=ButtonVariant::Outline,class:seg-on=move ||s.place_peer.with(Option::is_none),on:click=move |_|s.place_peer.set(None)) {"All"}
+                                        for person in move ||saved.with(|list|records.with(|people|used_options(list,people))),key=|p|p.clone() {
+                                            {{
+                                                let id=person.0.clone();
+                                                let selected_id=id.clone();
+                                                view! {
+                                                    Button(variant=ButtonVariant::Outline,class:seg-on=move ||s.place_peer.with(|filter|filter.as_ref()==Some(&selected_id)),on:click=move |_|s.place_peer.set(Some(id.clone()))) {{person.1.clone()}}
+                                                }
+                                            }}
+                                        }
                                     }
                                 }
                             }
@@ -834,7 +634,6 @@ pub fn PlaceAlerts(open: RwSignal<bool, LocalStorage>) -> impl IntoView {
                                 }
                             }
                         }
-                        if move ||!editing.get() {
                         for entry in move || {
                             let filter = s.place_peer.get();
                             let selected = area.get();
@@ -843,9 +642,9 @@ pub fn PlaceAlerts(open: RwSignal<bool, LocalStorage>) -> impl IntoView {
                                 if let Some(id) = selected { return p.area() == id && !p.no_rule; }
                                 records.with(|r| shown(p, filter.as_deref(), &r.0)) && seen.insert(p.area())
                             }).map(|p|(selected.is_some(),p)).collect::<Vec<_>>()
-                        },key=|entry|{
+                        },key=move |entry|{
                             let (details,p)=entry;
-                            (*details,p.id,p.peer,p.trigger as u8,p.name.clone(),p.center.lat.to_bits(),p.center.lon.to_bits(),p.radius_m.to_bits(),p.polygon.iter().map(|p|(p.lat.to_bits(),p.lon.to_bits())).collect::<Vec<_>>())
+                            (*details,last_seen(p),p.id,p.peer,p.trigger as u8,p.name.clone(),p.center.lat.to_bits(),p.center.lon.to_bits(),p.radius_m.to_bits(),p.polygon.iter().map(|p|(p.lat.to_bits(),p.lon.to_bits())).collect::<Vec<_>>())
                         } {
                             {{
                                 let (details,place)=entry;
@@ -854,6 +653,7 @@ pub fn PlaceAlerts(open: RwSignal<bool, LocalStorage>) -> impl IntoView {
                                 let rule_peer = rule_key(&place);
                                 let rule_skip: Vec<String> = place.opt_out.iter().map(ToString::to_string).collect();
                                 let rule_who = who_name(&place);
+                                let rule_seen = last_seen(&place);
                                 let rule_trigger = place.trigger;
                                 if details {
                                     AnyView::new(view! {
@@ -861,6 +661,7 @@ pub fn PlaceAlerts(open: RwSignal<bool, LocalStorage>) -> impl IntoView {
                                             column(class="grow") {
                                                 text(class="list-title") {{rule_who.clone()}}
                                                 text(class="muted") {{caption(rule_trigger)}}
+                                                text(class="muted small rule-seen") {{rule_seen.clone()}}
                                             }
                                             Button(variant=ButtonVariant::Ghost,on:click=move |_|{
                                                 rule_id.set(Some(rule_id_saved));
@@ -877,21 +678,23 @@ pub fn PlaceAlerts(open: RwSignal<bool, LocalStorage>) -> impl IntoView {
                                     AnyView::new(view! {
                                         // Whole card opens the area, not just a small chevron.
                                         Button(variant=ButtonVariant::Ghost,class="alert-card alert-card-button",on:click=move |_|{
-                                            creating.set(false);
                                             confirm_delete.set(false);
                                             area.set(Some(area_id));
                                         },a11y:label=format!("Open {}",place.name)) {
-                                            row(class="page-heading") {
-                                                {boundary_preview(&place,[52.,52.])}
-                                                column(class="grow") {
-                                                    text(class="list-title") {{place.name.clone()}}
-                                                    text(class="muted") {{if place.polygon.is_empty() {format!("Circle · {:.0} m radius",place.radius_m)} else {"Drawn boundary".into()}}}
+                                            // One column: tags under the heading, not beside it.
+                                            column(class="alert-card-body") {
+                                                row(class="page-heading") {
+                                                    {shape_preview(place.center,place.outline(),[52.,52.])}
+                                                    column(class="grow") {
+                                                        text(class="list-title") {{place.name.clone()}}
+                                                        text(class="muted") {{if place.polygon.is_empty() {format!("Circle · {:.0} m radius",place.radius_m)} else {format!("Drawn shape · {} corners",place.polygon.len())}}}
+                                                    }
+                                                    text(class="chevron") {"›"}
                                                 }
-                                                text(class="chevron") {"›"}
-                                            }
-                                            for tag in move ||saved.with(|list|list.iter().filter(|p|p.area()==area_id&&!p.no_rule)
-                                                .map(|p|(who_name(p),caption(p.trigger))).collect::<Vec<_>>()),key=|tag|tag.clone() {
-                                                text(class="alert-tag") {{format!("{} · {}",tag.0,tag.1)}}
+                                                for tag in move ||saved.with(|list|list.iter().filter(|p|p.area()==area_id&&!p.no_rule)
+                                                    .map(|p|(who_name(p),caption(p.trigger))).collect::<Vec<_>>()),key=|tag|tag.clone() {
+                                                    text(class="alert-tag") {{format!("{} · {}",tag.0,tag.1)}}
+                                                }
                                             }
                                         }
                                     })
@@ -912,59 +715,15 @@ pub fn PlaceAlerts(open: RwSignal<bool, LocalStorage>) -> impl IntoView {
                                         places::remove_area(manager.friends(),id)
                                     }).await;
                                     match result {
-                                        Ok(())=>{area.set(None);editing_rule.set(false);confirm_delete.set(false);s.place_outline.set(Vec::new());reload();}
+                                        Ok(())=>{area.set(None);editing_rule.set(false);confirm_delete.set(false);s.area_marks.set(Vec::new());reload();}
                                         Err(error)=>status.set(error.to_string()),
                                     }
                                 });
                             }) {{move ||if confirm_delete.get() {"Tap again to delete area and its alerts"} else {"Delete alert area"}}}
                         }
-                        }
                     }
                 }
             }
-        }
-        if move ||creating.get()&&!open.get()&&!s.drawing_alert.get()&&s.editing_circle.with(Option::is_some) {
-            column(class="alert-create-header") {
-                row(class="alert-create-title") {
-                    text(class="list-title grow") {"New alert area"}
-                    Button(variant=ButtonVariant::Secondary,on:click=move |_|{
-                        creating.set(false);
-                        s.picking_place_center.set(false);
-                        s.editing_circle.set(None);
-                        s.place_outline.set(Vec::new());
-                        open.set(true);
-                    }) {"Cancel"}
-                }
-                row(class="alert-create-hint") {
-                    text(class="muted grow") {"Pan the map to place the center"}
-                    Button(variant=ButtonVariant::Ghost,on:click=move |_|draw()) {"Draw shape"}
-                }
-            }
-            column(class="alert-create-panel") {
-                box(class="alert-create-grip") {}
-                column(class="alert-create-field") {
-                    text(class="section-title") {"Name"}
-                    Input(value=name,label="Alert area name",placeholder="Home, school, campsite…")
-                }
-                column(class="alert-create-field alert-radius") {
-                    row(class="page-heading") {
-                        text(class="section-title grow") {"Radius"}
-                        text(class="list-title") {{move ||format!("{:.0} m",radius_slider.get())}}
-                    }
-                    {radius_slider_view(radius_slider)}
-                }
-                if move ||!status.with(String::is_empty) {text(class="muted") {{move ||status.get()}}}
-                row(class="alert-create-actions") {
-                    Button(variant=ButtonVariant::Outline,disabled=Signal::derive_local(move ||s.position.with(Option::is_none)),on:click=move |_|{
-                        if let Some((point,_))=s.position.get_untracked(){
-                            s.center_on(point);
-                            s.editing_circle.update(|circle|if let Some((center,_))=circle{*center=point});
-                        }
-                    }) {"Use my location"}
-                    Button(class="alert-create-next",disabled=Signal::derive_local(move ||name.with(|n|n.trim().is_empty())),on:click=move |_|add()) {"Next: add alerts"}
-                }
-            }
-
         }
     }
 }

@@ -533,12 +533,14 @@ fn trip_edits_and_saved_areas_replay_from_journal() {
     s.commit(Event::SaveArea {
         name: "Home".into(),
         points: square.clone(),
+        circle: None,
     })
     .unwrap();
     assert!(
         s.commit(Event::SaveArea {
             name: "Line".into(),
             points: square[..2].to_vec(),
+            circle: None,
         })
         .is_err()
     );
@@ -546,14 +548,40 @@ fn trip_edits_and_saved_areas_replay_from_journal() {
     moved[2].lat = 0.02;
     s.commit(Event::UpdateArea {
         area_id: 1,
+        points: moved.clone(),
+        name: None,
+        circle: None,
+    })
+    .unwrap();
+    // Switching to circle keeps outline as points, plus center and radius.
+    let center = Point { lat: 0.0, lon: 0.0 };
+    s.commit(Event::UpdateArea {
+        area_id: 1,
+        points: roamlog::geo::circle_outline(center, 5.),
+        name: Some("Yard".into()),
+        circle: Some((center, 5.)),
+    })
+    .unwrap_err();
+    s.commit(Event::UpdateArea {
+        area_id: 1,
+        points: roamlog::geo::circle_outline(center, 50.),
+        name: Some("Yard".into()),
+        circle: Some((center, 50.)),
+    })
+    .unwrap();
+    s.commit(Event::UpdateArea {
+        area_id: 1,
         points: moved,
+        name: None,
+        circle: None,
     })
     .unwrap();
     drop(s);
     let replay = Store::open(dir.path().join("trips.jsonl")).unwrap();
     assert_eq!(replay.state.areas[0].points[2].lat, 0.02);
     assert_eq!(replay.state.trips.len(), 2);
-    assert_eq!(replay.state.areas[0].name, "Home");
+    assert_eq!(replay.state.areas[0].name, "Yard");
+    assert_eq!(replay.state.areas[0].circle, None);
     assert_eq!(replay.state.trips[1].points.len(), 5);
 }
 

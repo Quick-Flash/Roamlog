@@ -68,15 +68,16 @@ pub fn ViewOptions() -> impl IntoView {
                         }
                         Switch(class="show-friends",labelled_by=friends_label,checked=Binding::controlled(s.show_friends,move |value|s.set_show_friends(value)))
                     }
+                    text(class="section-title") {"Alert areas"}
                     row(class="actions") {
-                        Button(variant=ButtonVariant::Outline,on:click=move |_|{open.set(false);s.places_open.set(true)}) {"Edit alert areas"}
-                        Button(variant=ButtonVariant::Outline,on:click=move |_|show_alert_areas()) {"Show alert areas"}
+                        Button(variant=ButtonVariant::Outline,on:click=move |_|{open.set(false);s.place_peer.set(None);s.places_open.set(true)}) {"Alert areas"}
+                        Button(variant=ButtonVariant::Outline,on:click=move |_|show_alert_areas()) {"Show on map"}
                     }
                 }
                 text(class="section-title") {"Areas"}
                 row(class="actions") {
-                    Button(variant=ButtonVariant::Outline,on:click=move |_|{open.set(false);s.areas_open.set(true)}) {"Saved areas"}
-                    Button(on:click=move |_|{open.set(false);s.start_area()}) {"Draw new area"}
+                    Button(variant=ButtonVariant::Outline,on:click=move |_|{open.set(false);s.areas_open.set(true)}) {"Areas"}
+                    Button(variant=ButtonVariant::Outline,on:click=move |_|{open.set(false);s.show_areas()}) {"Show on map"}
                 }
             }
         }
