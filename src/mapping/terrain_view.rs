@@ -39,6 +39,7 @@ pub fn TerrainView(
     let retry = RwSignal::new_local(0u64);
     let reset = RenderEffect::new(move |_| {
         map_style.track();
+        s.imagery.track();
         offline.track();
         s.basemap.archive.track();
         tiles.reset();
@@ -48,6 +49,7 @@ pub fn TerrainView(
     let throttle = super::throttle::Throttle::new(std::time::Duration::from_millis(50));
     let update = move || {
         let style = map_style.get_untracked();
+        let source = s.imagery.get_untracked();
         let camera = camera.get_untracked();
         let orbit = orbit.get_untracked();
         let size = size.get_untracked();
@@ -75,7 +77,7 @@ pub fn TerrainView(
         for &id in &ids {
             cached.extend(
                 service
-                    .cached_raster_children(id, Provider::EsriImagery)
+                    .cached_raster_children(id, source)
                     .into_iter()
                     .filter(|child| child.z <= id.z.saturating_add(3)),
             );
@@ -93,7 +95,7 @@ pub fn TerrainView(
             2,
             if style.satellite { &rasters } else { &[] },
             &wanted,
-            Provider::EsriImagery,
+            source,
             !offline.get_untracked(),
         );
         let mut imagery = std::collections::BTreeMap::new();
@@ -107,7 +109,7 @@ pub fn TerrainView(
                         y: id.y >> shift,
                     };
                     if let Some(payload) =
-                        service.payload_untracked(Key::raster_from(parent, Provider::EsriImagery))
+                        service.payload_untracked(Key::raster_from(parent, source))
                     {
                         imagery.insert(id, (parent, payload));
                         break;
@@ -184,6 +186,7 @@ pub fn TerrainView(
         orbit.track();
         size.track();
         map_style.track();
+        s.imagery.track();
         offline.track();
         s.basemap.archive.track();
         retry.track();

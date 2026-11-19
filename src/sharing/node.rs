@@ -124,51 +124,36 @@ async fn publish(manager: Manager, path: PathBuf) {
             _ = tick.tick() => {},
             _ = changes.changed() => {},
         }
-        #[cfg(all(target_os = "android", feature = "ui"))]
+        #[cfg(all(any(target_os = "android", target_os = "ios"), feature = "ui"))]
         if let Ok(notices) = manager.friends().membership_notices() {
             for (id, text) in notices {
-                let _ = zgui::app::android::notification::post(
-                    &zgui::app::android::notification::Notification {
-                        id,
-                        title: "Group membership".into(),
-                        text,
-                        ..Default::default()
-                    },
-                );
+                let _ = crate::platform::notify(id, "Group membership", &text);
             }
         }
         let now = now_ms();
         if manager.expire_timer(now).unwrap_or(false) {
             manager.flush_group_fixes();
-            #[cfg(all(target_os = "android", feature = "ui"))]
-            crate::android::sharing_timer_expired();
+            #[cfg(all(any(target_os = "android", target_os = "ios"), feature = "ui"))]
+            crate::platform::sharing_timer_expired();
         }
         let _ = manager.poll_requests(now);
-        #[cfg(all(target_os = "android", feature = "ui"))]
+        #[cfg(all(any(target_os = "android", target_os = "ios"), feature = "ui"))]
         if manager.shares_battery().unwrap_or(false) {
-            let _ =
-                manager.update_battery(super::android_app::battery_percent().ok().flatten(), now);
+            let _ = manager.update_battery(crate::platform::battery_percent(), now);
         }
         let Ok(friends) = merge(&manager, &previous.friends, now) else {
             continue;
         };
         if let Ok(notices) = super::places::observe(manager.friends(), &friends, now) {
-            #[cfg(all(target_os = "android", feature = "ui"))]
+            #[cfg(all(any(target_os = "android", target_os = "ios"), feature = "ui"))]
             for (id, text) in notices {
-                let posted = zgui::app::android::notification::post(
-                    &zgui::app::android::notification::Notification {
-                        id,
-                        title: "Alert area".into(),
-                        text: text.clone(),
-                        ..Default::default()
-                    },
-                );
+                let posted = crate::platform::notify(id, "Alert area", &text);
                 super::places::log(&match posted {
                     Ok(_) => format!("alert notification posted: {text}"),
                     Err(error) => format!("alert notification failed: {text}: {error:?}"),
                 });
             }
-            #[cfg(not(all(target_os = "android", feature = "ui")))]
+            #[cfg(not(all(any(target_os = "android", target_os = "ios"), feature = "ui")))]
             let _ = notices;
         }
         if friends == previous.friends && now - previous.updated_ms < HEARTBEAT_MS {

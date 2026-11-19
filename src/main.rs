@@ -7,6 +7,11 @@ use std::{
 fn main() {
     #[cfg(feature = "ui")]
     if std::env::args_os().len() == 1 {
+        // iOS sandbox HOME is the app container; Application Support is private app data.
+        #[cfg(target_os = "ios")]
+        let directory = PathBuf::from(std::env::var_os("HOME").unwrap_or_default())
+            .join("Library/Application Support/roamlog");
+        #[cfg(not(target_os = "ios"))]
         let directory = std::env::var_os("XDG_DATA_HOME")
             .map(PathBuf::from)
             .unwrap_or_else(|| {

@@ -30,7 +30,7 @@ dependencies = [
 [[package]]
 name = "accesskit_android"
 version = "0.7.5"
-source = "git+https://github.com/Quick-Flash/zgui?rev=8b27698b2288ec3a78fbfd659d87ce3a99b86a09#8b27698b2288ec3a78fbfd659d87ce3a99b86a09"
+source = "git+https://github.com/Quick-Flash/zgui?rev=c4c32eb13db5decc02b45bba089395e8ecec31ec#c4c32eb13db5decc02b45bba089395e8ecec31ec"
 dependencies = [
  "accesskit",
  "accesskit_consumer",
@@ -73,7 +73,7 @@ dependencies = [
  "hashbrown 0.16.1",
  "objc2 0.5.3",
  "objc2-foundation 0.2.2",
- "objc2-ui-kit",
+ "objc2-ui-kit 0.2.2",
 ]
 
 [[package]]
@@ -1608,7 +1608,7 @@ dependencies = [
 [[package]]
 name = "fontique"
 version = "0.11.1"
-source = "git+https://github.com/Quick-Flash/zgui?rev=8b27698b2288ec3a78fbfd659d87ce3a99b86a09#8b27698b2288ec3a78fbfd659d87ce3a99b86a09"
+source = "git+https://github.com/Quick-Flash/zgui?rev=c4c32eb13db5decc02b45bba089395e8ecec31ec#c4c32eb13db5decc02b45bba089395e8ecec31ec"
 dependencies = [
  "hashbrown 0.17.1",
  "linebender_resource_handle",
@@ -3141,8 +3141,6 @@ dependencies = [
 [[package]]
 name = "netdev"
 version = "0.46.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c3c52c2584961c68f5a6e3356797344061f818c93b8acc9cd6d7e284795e563e"
 dependencies = [
  "block2 0.6.2",
  "dispatch2",
@@ -3244,8 +3242,6 @@ dependencies = [
 [[package]]
 name = "netwatch"
 version = "0.19.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "39da9cad5f23aa43401f09497d3b280e51b5feba115d9ffbf38ca35d6ff95e96"
 dependencies = [
  "atomic-waker",
  "bytes",
@@ -3459,8 +3455,8 @@ dependencies = [
  "block2 0.5.1",
  "libc",
  "objc2 0.5.3",
- "objc2-core-data",
- "objc2-core-image",
+ "objc2-core-data 0.2.2",
+ "objc2-core-image 0.2.2",
  "objc2-foundation 0.2.2",
  "objc2-quartz-core 0.2.2",
 ]
@@ -3488,8 +3484,19 @@ dependencies = [
  "bitflags 2.13.2",
  "block2 0.5.1",
  "objc2 0.5.3",
- "objc2-core-location",
+ "objc2-core-location 0.2.2",
  "objc2-foundation 0.2.2",
+]
+
+[[package]]
+name = "objc2-cloud-kit"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "73ad74d880bb43877038da939b7427bba67e9dd42004a18b809ba7d87cee241c"
+dependencies = [
+ "bitflags 2.13.2",
+ "objc2 0.6.5",
+ "objc2-foundation 0.3.2",
 ]
 
 [[package]]
@@ -3504,6 +3511,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "objc2-contacts"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b034b578389f89a85c055eacc8d8b368be5f04a6c1b07f672bf3aec21d0ef621"
+dependencies = [
+ "objc2 0.6.5",
+ "objc2-foundation 0.3.2",
+]
+
+[[package]]
 name = "objc2-core-data"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3513,6 +3530,16 @@ dependencies = [
  "block2 0.5.1",
  "objc2 0.5.3",
  "objc2-foundation 0.2.2",
+]
+
+[[package]]
+name = "objc2-core-data"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0b402a653efbb5e82ce4df10683b6b28027616a2715e90009947d50b8dd298fa"
+dependencies = [
+ "objc2 0.6.5",
+ "objc2-foundation 0.3.2",
 ]
 
 [[package]]
@@ -3554,6 +3581,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "objc2-core-image"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e5d563b38d2b97209f8e861173de434bd0214cf020e3423a52624cd1d989f006"
+dependencies = [
+ "objc2 0.6.5",
+ "objc2-foundation 0.3.2",
+]
+
+[[package]]
 name = "objc2-core-location"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3561,8 +3598,21 @@ checksum = "000cfee34e683244f284252ee206a27953279d370e309649dc3ee317b37e5781"
 dependencies = [
  "block2 0.5.1",
  "objc2 0.5.3",
- "objc2-contacts",
+ "objc2-contacts 0.2.2",
  "objc2-foundation 0.2.2",
+]
+
+[[package]]
+name = "objc2-core-location"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ca347214e24bc973fc025fd0d36ebb179ff30536ed1f80252706db19ee452009"
+dependencies = [
+ "block2 0.6.2",
+ "dispatch2",
+ "objc2 0.6.5",
+ "objc2-contacts 0.3.2",
+ "objc2-foundation 0.3.2",
 ]
 
 [[package]]
@@ -3572,7 +3622,9 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0cde0dfb48d25d2b4862161a4d5fcc0e3c24367869ad306b0c9ec0073bfed92d"
 dependencies = [
  "bitflags 2.13.2",
+ "objc2 0.6.5",
  "objc2-core-foundation",
+ "objc2-core-graphics",
 ]
 
 [[package]]
@@ -3748,16 +3800,38 @@ dependencies = [
  "bitflags 2.13.2",
  "block2 0.5.1",
  "objc2 0.5.3",
- "objc2-cloud-kit",
- "objc2-core-data",
- "objc2-core-image",
- "objc2-core-location",
+ "objc2-cloud-kit 0.2.2",
+ "objc2-core-data 0.2.2",
+ "objc2-core-image 0.2.2",
+ "objc2-core-location 0.2.2",
  "objc2-foundation 0.2.2",
  "objc2-link-presentation",
  "objc2-quartz-core 0.2.2",
  "objc2-symbols",
- "objc2-uniform-type-identifiers",
- "objc2-user-notifications",
+ "objc2-uniform-type-identifiers 0.2.2",
+ "objc2-user-notifications 0.2.2",
+]
+
+[[package]]
+name = "objc2-ui-kit"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d87d638e33c06f577498cbcc50491496a3ed4246998a7fbba7ccb98b1e7eab22"
+dependencies = [
+ "bitflags 2.13.2",
+ "block2 0.6.2",
+ "objc2 0.6.5",
+ "objc2-cloud-kit 0.3.2",
+ "objc2-core-data 0.3.2",
+ "objc2-core-foundation",
+ "objc2-core-graphics",
+ "objc2-core-image 0.3.2",
+ "objc2-core-location 0.3.2",
+ "objc2-core-text",
+ "objc2-foundation 0.3.2",
+ "objc2-quartz-core 0.3.2",
+ "objc2-uniform-type-identifiers 0.3.2",
+ "objc2-user-notifications 0.3.2",
 ]
 
 [[package]]
@@ -3772,6 +3846,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "objc2-uniform-type-identifiers"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7902ac02859fc1f7045f8b598c63f1ae0cc7efeaa06a9bc9f3d9a3c955974fa4"
+dependencies = [
+ "block2 0.6.2",
+ "objc2 0.6.5",
+ "objc2-foundation 0.3.2",
+]
+
+[[package]]
 name = "objc2-user-notifications"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3780,8 +3865,21 @@ dependencies = [
  "bitflags 2.13.2",
  "block2 0.5.1",
  "objc2 0.5.3",
- "objc2-core-location",
+ "objc2-core-location 0.2.2",
  "objc2-foundation 0.2.2",
+]
+
+[[package]]
+name = "objc2-user-notifications"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9df9128cbbfef73cda168416ccf7f837b62737d748333bfe9ab71c245d76613e"
+dependencies = [
+ "bitflags 2.13.2",
+ "block2 0.6.2",
+ "objc2 0.6.5",
+ "objc2-core-location 0.3.2",
+ "objc2-foundation 0.3.2",
 ]
 
 [[package]]
@@ -4567,16 +4665,25 @@ dependencies = [
  "async-channel",
  "base64 0.22.1",
  "blake3",
+ "block2 0.6.2",
+ "dispatch2",
  "flate2",
  "image",
  "iroh",
  "jni 0.22.4",
  "kurbo",
  "libc",
+ "objc2 0.6.5",
+ "objc2-core-location 0.3.2",
+ "objc2-foundation 0.3.2",
+ "objc2-ui-kit 0.3.2",
+ "objc2-uniform-type-identifiers 0.3.2",
+ "objc2-user-notifications 0.3.2",
  "png 0.17.16",
  "postcard",
  "qrcodegen",
  "quircs",
+ "security-framework",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -7053,7 +7160,7 @@ dependencies = [
  "objc2 0.5.3",
  "objc2-app-kit 0.2.2",
  "objc2-foundation 0.2.2",
- "objc2-ui-kit",
+ "objc2-ui-kit 0.2.2",
  "orbclient",
  "percent-encoding",
  "pin-project",
@@ -7472,7 +7579,7 @@ dependencies = [
 [[package]]
 name = "zgui"
 version = "0.1.0"
-source = "git+https://github.com/Quick-Flash/zgui?rev=8b27698b2288ec3a78fbfd659d87ce3a99b86a09#8b27698b2288ec3a78fbfd659d87ce3a99b86a09"
+source = "git+https://github.com/Quick-Flash/zgui?rev=c4c32eb13db5decc02b45bba089395e8ecec31ec#c4c32eb13db5decc02b45bba089395e8ecec31ec"
 dependencies = [
  "zgui-atlas",
  "zgui-bits",
@@ -7502,7 +7609,7 @@ dependencies = [
 [[package]]
 name = "zgui-a11y"
 version = "0.1.0"
-source = "git+https://github.com/Quick-Flash/zgui?rev=8b27698b2288ec3a78fbfd659d87ce3a99b86a09#8b27698b2288ec3a78fbfd659d87ce3a99b86a09"
+source = "git+https://github.com/Quick-Flash/zgui?rev=c4c32eb13db5decc02b45bba089395e8ecec31ec#c4c32eb13db5decc02b45bba089395e8ecec31ec"
 dependencies = [
  "accesskit",
  "zgui-bits",
@@ -7518,7 +7625,7 @@ dependencies = [
 [[package]]
 name = "zgui-anim"
 version = "0.1.0"
-source = "git+https://github.com/Quick-Flash/zgui?rev=8b27698b2288ec3a78fbfd659d87ce3a99b86a09#8b27698b2288ec3a78fbfd659d87ce3a99b86a09"
+source = "git+https://github.com/Quick-Flash/zgui?rev=c4c32eb13db5decc02b45bba089395e8ecec31ec#c4c32eb13db5decc02b45bba089395e8ecec31ec"
 dependencies = [
  "zgui-bits",
  "zgui-dom",
@@ -7531,12 +7638,12 @@ dependencies = [
 [[package]]
 name = "zgui-arena"
 version = "0.1.0"
-source = "git+https://github.com/Quick-Flash/zgui?rev=8b27698b2288ec3a78fbfd659d87ce3a99b86a09#8b27698b2288ec3a78fbfd659d87ce3a99b86a09"
+source = "git+https://github.com/Quick-Flash/zgui?rev=c4c32eb13db5decc02b45bba089395e8ecec31ec#c4c32eb13db5decc02b45bba089395e8ecec31ec"
 
 [[package]]
 name = "zgui-atlas"
 version = "0.1.0"
-source = "git+https://github.com/Quick-Flash/zgui?rev=8b27698b2288ec3a78fbfd659d87ce3a99b86a09#8b27698b2288ec3a78fbfd659d87ce3a99b86a09"
+source = "git+https://github.com/Quick-Flash/zgui?rev=c4c32eb13db5decc02b45bba089395e8ecec31ec#c4c32eb13db5decc02b45bba089395e8ecec31ec"
 dependencies = [
  "etagere",
  "rustc-hash 2.1.3",
@@ -7548,7 +7655,7 @@ dependencies = [
 [[package]]
 name = "zgui-bits"
 version = "0.1.0"
-source = "git+https://github.com/Quick-Flash/zgui?rev=8b27698b2288ec3a78fbfd659d87ce3a99b86a09#8b27698b2288ec3a78fbfd659d87ce3a99b86a09"
+source = "git+https://github.com/Quick-Flash/zgui?rev=c4c32eb13db5decc02b45bba089395e8ecec31ec#c4c32eb13db5decc02b45bba089395e8ecec31ec"
 dependencies = [
  "bitflags 2.13.2",
  "zgui-geom",
@@ -7557,7 +7664,7 @@ dependencies = [
 [[package]]
 name = "zgui-canvas"
 version = "0.1.0"
-source = "git+https://github.com/Quick-Flash/zgui?rev=8b27698b2288ec3a78fbfd659d87ce3a99b86a09#8b27698b2288ec3a78fbfd659d87ce3a99b86a09"
+source = "git+https://github.com/Quick-Flash/zgui?rev=c4c32eb13db5decc02b45bba089395e8ecec31ec#c4c32eb13db5decc02b45bba089395e8ecec31ec"
 dependencies = [
  "kurbo",
  "peniko",
@@ -7570,12 +7677,12 @@ dependencies = [
 [[package]]
 name = "zgui-color"
 version = "0.1.0"
-source = "git+https://github.com/Quick-Flash/zgui?rev=8b27698b2288ec3a78fbfd659d87ce3a99b86a09#8b27698b2288ec3a78fbfd659d87ce3a99b86a09"
+source = "git+https://github.com/Quick-Flash/zgui?rev=c4c32eb13db5decc02b45bba089395e8ecec31ec#c4c32eb13db5decc02b45bba089395e8ecec31ec"
 
 [[package]]
 name = "zgui-css"
 version = "0.1.0"
-source = "git+https://github.com/Quick-Flash/zgui?rev=8b27698b2288ec3a78fbfd659d87ce3a99b86a09#8b27698b2288ec3a78fbfd659d87ce3a99b86a09"
+source = "git+https://github.com/Quick-Flash/zgui?rev=c4c32eb13db5decc02b45bba089395e8ecec31ec#c4c32eb13db5decc02b45bba089395e8ecec31ec"
 dependencies = [
  "app_units",
  "cssparser",
@@ -7592,7 +7699,7 @@ dependencies = [
 [[package]]
 name = "zgui-custom"
 version = "0.1.0"
-source = "git+https://github.com/Quick-Flash/zgui?rev=8b27698b2288ec3a78fbfd659d87ce3a99b86a09#8b27698b2288ec3a78fbfd659d87ce3a99b86a09"
+source = "git+https://github.com/Quick-Flash/zgui?rev=c4c32eb13db5decc02b45bba089395e8ecec31ec#c4c32eb13db5decc02b45bba089395e8ecec31ec"
 dependencies = [
  "rustc-hash 2.1.3",
  "zgui-elements",
@@ -7607,7 +7714,7 @@ dependencies = [
 [[package]]
 name = "zgui-dom"
 version = "0.1.0"
-source = "git+https://github.com/Quick-Flash/zgui?rev=8b27698b2288ec3a78fbfd659d87ce3a99b86a09#8b27698b2288ec3a78fbfd659d87ce3a99b86a09"
+source = "git+https://github.com/Quick-Flash/zgui?rev=c4c32eb13db5decc02b45bba089395e8ecec31ec#c4c32eb13db5decc02b45bba089395e8ecec31ec"
 dependencies = [
  "app_units",
  "bitflags 2.13.2",
@@ -7632,7 +7739,7 @@ dependencies = [
 [[package]]
 name = "zgui-edit"
 version = "0.1.0"
-source = "git+https://github.com/Quick-Flash/zgui?rev=8b27698b2288ec3a78fbfd659d87ce3a99b86a09#8b27698b2288ec3a78fbfd659d87ce3a99b86a09"
+source = "git+https://github.com/Quick-Flash/zgui?rev=c4c32eb13db5decc02b45bba089395e8ecec31ec#c4c32eb13db5decc02b45bba089395e8ecec31ec"
 dependencies = [
  "zgui-dom",
  "zgui-geom",
@@ -7643,7 +7750,7 @@ dependencies = [
 [[package]]
 name = "zgui-elements"
 version = "0.1.0"
-source = "git+https://github.com/Quick-Flash/zgui?rev=8b27698b2288ec3a78fbfd659d87ce3a99b86a09#8b27698b2288ec3a78fbfd659d87ce3a99b86a09"
+source = "git+https://github.com/Quick-Flash/zgui?rev=c4c32eb13db5decc02b45bba089395e8ecec31ec#c4c32eb13db5decc02b45bba089395e8ecec31ec"
 dependencies = [
  "kurbo",
  "zgui-canvas",
@@ -7657,7 +7764,7 @@ dependencies = [
 [[package]]
 name = "zgui-geom"
 version = "0.1.0"
-source = "git+https://github.com/Quick-Flash/zgui?rev=8b27698b2288ec3a78fbfd659d87ce3a99b86a09#8b27698b2288ec3a78fbfd659d87ce3a99b86a09"
+source = "git+https://github.com/Quick-Flash/zgui?rev=c4c32eb13db5decc02b45bba089395e8ecec31ec#c4c32eb13db5decc02b45bba089395e8ecec31ec"
 dependencies = [
  "bytemuck",
 ]
@@ -7665,7 +7772,7 @@ dependencies = [
 [[package]]
 name = "zgui-image"
 version = "0.1.0"
-source = "git+https://github.com/Quick-Flash/zgui?rev=8b27698b2288ec3a78fbfd659d87ce3a99b86a09#8b27698b2288ec3a78fbfd659d87ce3a99b86a09"
+source = "git+https://github.com/Quick-Flash/zgui?rev=c4c32eb13db5decc02b45bba089395e8ecec31ec#c4c32eb13db5decc02b45bba089395e8ecec31ec"
 dependencies = [
  "image",
  "thiserror 2.0.21",
@@ -7675,7 +7782,7 @@ dependencies = [
 [[package]]
 name = "zgui-input"
 version = "0.1.0"
-source = "git+https://github.com/Quick-Flash/zgui?rev=8b27698b2288ec3a78fbfd659d87ce3a99b86a09#8b27698b2288ec3a78fbfd659d87ce3a99b86a09"
+source = "git+https://github.com/Quick-Flash/zgui?rev=c4c32eb13db5decc02b45bba089395e8ecec31ec#c4c32eb13db5decc02b45bba089395e8ecec31ec"
 dependencies = [
  "rustc-hash 2.1.3",
  "smallvec",
@@ -7692,7 +7799,7 @@ dependencies = [
 [[package]]
 name = "zgui-interned"
 version = "0.1.0"
-source = "git+https://github.com/Quick-Flash/zgui?rev=8b27698b2288ec3a78fbfd659d87ce3a99b86a09#8b27698b2288ec3a78fbfd659d87ce3a99b86a09"
+source = "git+https://github.com/Quick-Flash/zgui?rev=c4c32eb13db5decc02b45bba089395e8ecec31ec#c4c32eb13db5decc02b45bba089395e8ecec31ec"
 dependencies = [
  "rustc-hash 2.1.3",
 ]
@@ -7700,7 +7807,7 @@ dependencies = [
 [[package]]
 name = "zgui-layout"
 version = "0.1.0"
-source = "git+https://github.com/Quick-Flash/zgui?rev=8b27698b2288ec3a78fbfd659d87ce3a99b86a09#8b27698b2288ec3a78fbfd659d87ce3a99b86a09"
+source = "git+https://github.com/Quick-Flash/zgui?rev=c4c32eb13db5decc02b45bba089395e8ecec31ec#c4c32eb13db5decc02b45bba089395e8ecec31ec"
 dependencies = [
  "cephal",
  "rayon",
@@ -7722,7 +7829,7 @@ dependencies = [
 [[package]]
 name = "zgui-paint"
 version = "0.1.0"
-source = "git+https://github.com/Quick-Flash/zgui?rev=8b27698b2288ec3a78fbfd659d87ce3a99b86a09#8b27698b2288ec3a78fbfd659d87ce3a99b86a09"
+source = "git+https://github.com/Quick-Flash/zgui?rev=c4c32eb13db5decc02b45bba089395e8ecec31ec#c4c32eb13db5decc02b45bba089395e8ecec31ec"
 dependencies = [
  "rustc-hash 2.1.3",
  "smallvec",
@@ -7749,7 +7856,7 @@ dependencies = [
 [[package]]
 name = "zgui-platform"
 version = "0.1.0"
-source = "git+https://github.com/Quick-Flash/zgui?rev=8b27698b2288ec3a78fbfd659d87ce3a99b86a09#8b27698b2288ec3a78fbfd659d87ce3a99b86a09"
+source = "git+https://github.com/Quick-Flash/zgui?rev=c4c32eb13db5decc02b45bba089395e8ecec31ec#c4c32eb13db5decc02b45bba089395e8ecec31ec"
 dependencies = [
  "accesskit",
  "raw-window-handle",
@@ -7761,7 +7868,7 @@ dependencies = [
 [[package]]
 name = "zgui-platform-wayland"
 version = "0.1.0"
-source = "git+https://github.com/Quick-Flash/zgui?rev=8b27698b2288ec3a78fbfd659d87ce3a99b86a09#8b27698b2288ec3a78fbfd659d87ce3a99b86a09"
+source = "git+https://github.com/Quick-Flash/zgui?rev=c4c32eb13db5decc02b45bba089395e8ecec31ec#c4c32eb13db5decc02b45bba089395e8ecec31ec"
 dependencies = [
  "accesskit",
  "accesskit_unix",
@@ -7784,7 +7891,7 @@ dependencies = [
 [[package]]
 name = "zgui-platform-winit"
 version = "0.1.0"
-source = "git+https://github.com/Quick-Flash/zgui?rev=8b27698b2288ec3a78fbfd659d87ce3a99b86a09#8b27698b2288ec3a78fbfd659d87ce3a99b86a09"
+source = "git+https://github.com/Quick-Flash/zgui?rev=c4c32eb13db5decc02b45bba089395e8ecec31ec#c4c32eb13db5decc02b45bba089395e8ecec31ec"
 dependencies = [
  "accesskit",
  "accesskit_android",
@@ -7795,7 +7902,9 @@ dependencies = [
  "muda",
  "objc2 0.6.5",
  "objc2-app-kit 0.3.2",
+ "objc2-core-foundation",
  "objc2-foundation 0.3.2",
+ "objc2-ui-kit 0.3.2",
  "raw-window-handle",
  "smithay-clipboard",
  "tracing",
@@ -7817,7 +7926,7 @@ dependencies = [
 [[package]]
 name = "zgui-profile"
 version = "0.1.0"
-source = "git+https://github.com/Quick-Flash/zgui?rev=8b27698b2288ec3a78fbfd659d87ce3a99b86a09#8b27698b2288ec3a78fbfd659d87ce3a99b86a09"
+source = "git+https://github.com/Quick-Flash/zgui?rev=c4c32eb13db5decc02b45bba089395e8ecec31ec#c4c32eb13db5decc02b45bba089395e8ecec31ec"
 dependencies = [
  "tracing",
 ]
@@ -7825,7 +7934,7 @@ dependencies = [
 [[package]]
 name = "zgui-reactive"
 version = "0.1.0"
-source = "git+https://github.com/Quick-Flash/zgui?rev=8b27698b2288ec3a78fbfd659d87ce3a99b86a09#8b27698b2288ec3a78fbfd659d87ce3a99b86a09"
+source = "git+https://github.com/Quick-Flash/zgui?rev=c4c32eb13db5decc02b45bba089395e8ecec31ec#c4c32eb13db5decc02b45bba089395e8ecec31ec"
 dependencies = [
  "any_spawner",
  "futures",
@@ -7839,7 +7948,7 @@ dependencies = [
 [[package]]
 name = "zgui-render"
 version = "0.1.0"
-source = "git+https://github.com/Quick-Flash/zgui?rev=8b27698b2288ec3a78fbfd659d87ce3a99b86a09#8b27698b2288ec3a78fbfd659d87ce3a99b86a09"
+source = "git+https://github.com/Quick-Flash/zgui?rev=c4c32eb13db5decc02b45bba089395e8ecec31ec#c4c32eb13db5decc02b45bba089395e8ecec31ec"
 dependencies = [
  "thiserror 2.0.21",
  "zgui-atlas",
@@ -7851,7 +7960,7 @@ dependencies = [
 [[package]]
 name = "zgui-render-vector-coverage"
 version = "0.1.0"
-source = "git+https://github.com/Quick-Flash/zgui?rev=8b27698b2288ec3a78fbfd659d87ce3a99b86a09#8b27698b2288ec3a78fbfd659d87ce3a99b86a09"
+source = "git+https://github.com/Quick-Flash/zgui?rev=c4c32eb13db5decc02b45bba089395e8ecec31ec#c4c32eb13db5decc02b45bba089395e8ecec31ec"
 dependencies = [
  "bytemuck",
  "kurbo",
@@ -7869,7 +7978,7 @@ dependencies = [
 [[package]]
 name = "zgui-render-vector-vello"
 version = "0.1.0"
-source = "git+https://github.com/Quick-Flash/zgui?rev=8b27698b2288ec3a78fbfd659d87ce3a99b86a09#8b27698b2288ec3a78fbfd659d87ce3a99b86a09"
+source = "git+https://github.com/Quick-Flash/zgui?rev=c4c32eb13db5decc02b45bba089395e8ecec31ec#c4c32eb13db5decc02b45bba089395e8ecec31ec"
 dependencies = [
  "kurbo",
  "peniko",
@@ -7889,7 +7998,7 @@ dependencies = [
 [[package]]
 name = "zgui-render-wgpu"
 version = "0.1.0"
-source = "git+https://github.com/Quick-Flash/zgui?rev=8b27698b2288ec3a78fbfd659d87ce3a99b86a09#8b27698b2288ec3a78fbfd659d87ce3a99b86a09"
+source = "git+https://github.com/Quick-Flash/zgui?rev=c4c32eb13db5decc02b45bba089395e8ecec31ec#c4c32eb13db5decc02b45bba089395e8ecec31ec"
 dependencies = [
  "bincode",
  "bytemuck",
@@ -7911,7 +8020,7 @@ dependencies = [
 [[package]]
 name = "zgui-runtime"
 version = "0.1.0"
-source = "git+https://github.com/Quick-Flash/zgui?rev=8b27698b2288ec3a78fbfd659d87ce3a99b86a09#8b27698b2288ec3a78fbfd659d87ce3a99b86a09"
+source = "git+https://github.com/Quick-Flash/zgui?rev=c4c32eb13db5decc02b45bba089395e8ecec31ec#c4c32eb13db5decc02b45bba089395e8ecec31ec"
 dependencies = [
  "rustc-hash 2.1.3",
  "thiserror 2.0.21",
@@ -7947,7 +8056,7 @@ dependencies = [
 [[package]]
 name = "zgui-scene"
 version = "0.1.0"
-source = "git+https://github.com/Quick-Flash/zgui?rev=8b27698b2288ec3a78fbfd659d87ce3a99b86a09#8b27698b2288ec3a78fbfd659d87ce3a99b86a09"
+source = "git+https://github.com/Quick-Flash/zgui?rev=c4c32eb13db5decc02b45bba089395e8ecec31ec#c4c32eb13db5decc02b45bba089395e8ecec31ec"
 dependencies = [
  "bytemuck",
  "kurbo",
@@ -7965,7 +8074,7 @@ dependencies = [
 [[package]]
 name = "zgui-scroll"
 version = "0.1.0"
-source = "git+https://github.com/Quick-Flash/zgui?rev=8b27698b2288ec3a78fbfd659d87ce3a99b86a09#8b27698b2288ec3a78fbfd659d87ce3a99b86a09"
+source = "git+https://github.com/Quick-Flash/zgui?rev=c4c32eb13db5decc02b45bba089395e8ecec31ec#c4c32eb13db5decc02b45bba089395e8ecec31ec"
 dependencies = [
  "rustc-hash 2.1.3",
  "smallvec",
@@ -7979,7 +8088,7 @@ dependencies = [
 [[package]]
 name = "zgui-shader"
 version = "0.1.0"
-source = "git+https://github.com/Quick-Flash/zgui?rev=8b27698b2288ec3a78fbfd659d87ce3a99b86a09#8b27698b2288ec3a78fbfd659d87ce3a99b86a09"
+source = "git+https://github.com/Quick-Flash/zgui?rev=c4c32eb13db5decc02b45bba089395e8ecec31ec#c4c32eb13db5decc02b45bba089395e8ecec31ec"
 dependencies = [
  "zgui-geom",
  "zgui-paint",
@@ -7993,7 +8102,7 @@ dependencies = [
 [[package]]
 name = "zgui-shader-macro"
 version = "0.1.0"
-source = "git+https://github.com/Quick-Flash/zgui?rev=8b27698b2288ec3a78fbfd659d87ce3a99b86a09#8b27698b2288ec3a78fbfd659d87ce3a99b86a09"
+source = "git+https://github.com/Quick-Flash/zgui?rev=c4c32eb13db5decc02b45bba089395e8ecec31ec#c4c32eb13db5decc02b45bba089395e8ecec31ec"
 dependencies = [
  "bincode",
  "naga",
@@ -8006,7 +8115,7 @@ dependencies = [
 [[package]]
 name = "zgui-style"
 version = "0.1.0"
-source = "git+https://github.com/Quick-Flash/zgui?rev=8b27698b2288ec3a78fbfd659d87ce3a99b86a09#8b27698b2288ec3a78fbfd659d87ce3a99b86a09"
+source = "git+https://github.com/Quick-Flash/zgui?rev=c4c32eb13db5decc02b45bba089395e8ecec31ec#c4c32eb13db5decc02b45bba089395e8ecec31ec"
 dependencies = [
  "app_units",
  "bitflags 2.13.2",
@@ -8034,7 +8143,7 @@ dependencies = [
 [[package]]
 name = "zgui-svg"
 version = "0.1.0"
-source = "git+https://github.com/Quick-Flash/zgui?rev=8b27698b2288ec3a78fbfd659d87ce3a99b86a09#8b27698b2288ec3a78fbfd659d87ce3a99b86a09"
+source = "git+https://github.com/Quick-Flash/zgui?rev=c4c32eb13db5decc02b45bba089395e8ecec31ec#c4c32eb13db5decc02b45bba089395e8ecec31ec"
 dependencies = [
  "kurbo",
  "peniko",
@@ -8047,7 +8156,7 @@ dependencies = [
 [[package]]
 name = "zgui-testkit-scene"
 version = "0.1.0"
-source = "git+https://github.com/Quick-Flash/zgui?rev=8b27698b2288ec3a78fbfd659d87ce3a99b86a09#8b27698b2288ec3a78fbfd659d87ce3a99b86a09"
+source = "git+https://github.com/Quick-Flash/zgui?rev=c4c32eb13db5decc02b45bba089395e8ecec31ec#c4c32eb13db5decc02b45bba089395e8ecec31ec"
 dependencies = [
  "smallvec",
  "zgui-atlas",
@@ -8065,7 +8174,7 @@ dependencies = [
 [[package]]
 name = "zgui-testkit-view"
 version = "0.1.0"
-source = "git+https://github.com/Quick-Flash/zgui?rev=8b27698b2288ec3a78fbfd659d87ce3a99b86a09#8b27698b2288ec3a78fbfd659d87ce3a99b86a09"
+source = "git+https://github.com/Quick-Flash/zgui?rev=c4c32eb13db5decc02b45bba089395e8ecec31ec#c4c32eb13db5decc02b45bba089395e8ecec31ec"
 dependencies = [
  "zgui-edit",
  "zgui-geom",
@@ -8079,7 +8188,7 @@ dependencies = [
 [[package]]
 name = "zgui-text"
 version = "0.1.0"
-source = "git+https://github.com/Quick-Flash/zgui?rev=8b27698b2288ec3a78fbfd659d87ce3a99b86a09#8b27698b2288ec3a78fbfd659d87ce3a99b86a09"
+source = "git+https://github.com/Quick-Flash/zgui?rev=c4c32eb13db5decc02b45bba089395e8ecec31ec#c4c32eb13db5decc02b45bba089395e8ecec31ec"
 dependencies = [
  "accesskit",
  "kurbo",
@@ -8096,7 +8205,7 @@ dependencies = [
 [[package]]
 name = "zgui-text-parley"
 version = "0.1.0"
-source = "git+https://github.com/Quick-Flash/zgui?rev=8b27698b2288ec3a78fbfd659d87ce3a99b86a09#8b27698b2288ec3a78fbfd659d87ce3a99b86a09"
+source = "git+https://github.com/Quick-Flash/zgui?rev=c4c32eb13db5decc02b45bba089395e8ecec31ec#c4c32eb13db5decc02b45bba089395e8ecec31ec"
 dependencies = [
  "fontique",
  "kurbo",
@@ -8117,7 +8226,7 @@ dependencies = [
 [[package]]
 name = "zgui-text-style"
 version = "0.1.0"
-source = "git+https://github.com/Quick-Flash/zgui?rev=8b27698b2288ec3a78fbfd659d87ce3a99b86a09#8b27698b2288ec3a78fbfd659d87ce3a99b86a09"
+source = "git+https://github.com/Quick-Flash/zgui?rev=c4c32eb13db5decc02b45bba089395e8ecec31ec#c4c32eb13db5decc02b45bba089395e8ecec31ec"
 dependencies = [
  "rustc-hash 2.1.3",
  "smallvec",
@@ -8131,7 +8240,7 @@ dependencies = [
 [[package]]
 name = "zgui-ui"
 version = "0.1.0"
-source = "git+https://github.com/Quick-Flash/zgui?rev=8b27698b2288ec3a78fbfd659d87ce3a99b86a09#8b27698b2288ec3a78fbfd659d87ce3a99b86a09"
+source = "git+https://github.com/Quick-Flash/zgui?rev=c4c32eb13db5decc02b45bba089395e8ecec31ec#c4c32eb13db5decc02b45bba089395e8ecec31ec"
 dependencies = [
  "zgui",
  "zgui-ui-icons",
@@ -8142,7 +8251,7 @@ dependencies = [
 [[package]]
 name = "zgui-ui-icons"
 version = "0.1.0"
-source = "git+https://github.com/Quick-Flash/zgui?rev=8b27698b2288ec3a78fbfd659d87ce3a99b86a09#8b27698b2288ec3a78fbfd659d87ce3a99b86a09"
+source = "git+https://github.com/Quick-Flash/zgui?rev=c4c32eb13db5decc02b45bba089395e8ecec31ec#c4c32eb13db5decc02b45bba089395e8ecec31ec"
 dependencies = [
  "zgui",
 ]
@@ -8150,7 +8259,7 @@ dependencies = [
 [[package]]
 name = "zgui-ui-primitives"
 version = "0.1.0"
-source = "git+https://github.com/Quick-Flash/zgui?rev=8b27698b2288ec3a78fbfd659d87ce3a99b86a09#8b27698b2288ec3a78fbfd659d87ce3a99b86a09"
+source = "git+https://github.com/Quick-Flash/zgui?rev=c4c32eb13db5decc02b45bba089395e8ecec31ec#c4c32eb13db5decc02b45bba089395e8ecec31ec"
 dependencies = [
  "zgui",
 ]
@@ -8158,7 +8267,7 @@ dependencies = [
 [[package]]
 name = "zgui-ui-tokens"
 version = "0.1.0"
-source = "git+https://github.com/Quick-Flash/zgui?rev=8b27698b2288ec3a78fbfd659d87ce3a99b86a09#8b27698b2288ec3a78fbfd659d87ce3a99b86a09"
+source = "git+https://github.com/Quick-Flash/zgui?rev=c4c32eb13db5decc02b45bba089395e8ecec31ec#c4c32eb13db5decc02b45bba089395e8ecec31ec"
 dependencies = [
  "zgui",
 ]
@@ -8166,7 +8275,7 @@ dependencies = [
 [[package]]
 name = "zgui-view"
 version = "0.1.0"
-source = "git+https://github.com/Quick-Flash/zgui?rev=8b27698b2288ec3a78fbfd659d87ce3a99b86a09#8b27698b2288ec3a78fbfd659d87ce3a99b86a09"
+source = "git+https://github.com/Quick-Flash/zgui?rev=c4c32eb13db5decc02b45bba089395e8ecec31ec#c4c32eb13db5decc02b45bba089395e8ecec31ec"
 dependencies = [
  "zgui-geom",
  "zgui-interned",
@@ -8177,7 +8286,7 @@ dependencies = [
 [[package]]
 name = "zgui-view-dom"
 version = "0.1.0"
-source = "git+https://github.com/Quick-Flash/zgui?rev=8b27698b2288ec3a78fbfd659d87ce3a99b86a09#8b27698b2288ec3a78fbfd659d87ce3a99b86a09"
+source = "git+https://github.com/Quick-Flash/zgui?rev=c4c32eb13db5decc02b45bba089395e8ecec31ec#c4c32eb13db5decc02b45bba089395e8ecec31ec"
 dependencies = [
  "rustc-hash 2.1.3",
  "tracing",
@@ -8190,7 +8299,7 @@ dependencies = [
 [[package]]
 name = "zgui-view-macro"
 version = "0.1.0"
-source = "git+https://github.com/Quick-Flash/zgui?rev=8b27698b2288ec3a78fbfd659d87ce3a99b86a09#8b27698b2288ec3a78fbfd659d87ce3a99b86a09"
+source = "git+https://github.com/Quick-Flash/zgui?rev=c4c32eb13db5decc02b45bba089395e8ecec31ec#c4c32eb13db5decc02b45bba089395e8ecec31ec"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -8200,7 +8309,7 @@ dependencies = [
 [[package]]
 name = "zgui-vocab"
 version = "0.1.0"
-source = "git+https://github.com/Quick-Flash/zgui?rev=8b27698b2288ec3a78fbfd659d87ce3a99b86a09#8b27698b2288ec3a78fbfd659d87ce3a99b86a09"
+source = "git+https://github.com/Quick-Flash/zgui?rev=c4c32eb13db5decc02b45bba089395e8ecec31ec#c4c32eb13db5decc02b45bba089395e8ecec31ec"
 dependencies = [
  "accesskit",
  "zgui-geom",
@@ -8210,7 +8319,7 @@ dependencies = [
 [[package]]
 name = "zgui-wgpu"
 version = "0.1.0"
-source = "git+https://github.com/Quick-Flash/zgui?rev=8b27698b2288ec3a78fbfd659d87ce3a99b86a09#8b27698b2288ec3a78fbfd659d87ce3a99b86a09"
+source = "git+https://github.com/Quick-Flash/zgui?rev=c4c32eb13db5decc02b45bba089395e8ecec31ec#c4c32eb13db5decc02b45bba089395e8ecec31ec"
 dependencies = [
  "rustc-hash 2.1.3",
  "tracing",
@@ -8231,7 +8340,7 @@ dependencies = [
 [[package]]
 name = "zgui-wgsl"
 version = "0.1.0"
-source = "git+https://github.com/Quick-Flash/zgui?rev=8b27698b2288ec3a78fbfd659d87ce3a99b86a09#8b27698b2288ec3a78fbfd659d87ce3a99b86a09"
+source = "git+https://github.com/Quick-Flash/zgui?rev=c4c32eb13db5decc02b45bba089395e8ecec31ec#c4c32eb13db5decc02b45bba089395e8ecec31ec"
 dependencies = [
  "zgui-scene",
 ]

@@ -132,7 +132,7 @@ pub fn MapView() -> impl IntoView {
     let raster = Memo::new(move |_| !three_d.get() && (!vector.get() || s.satellite.get()));
     let provider = Memo::new(move |_| {
         if s.satellite.get() {
-            Provider::EsriImagery
+            s.imagery.get()
         } else {
             Provider::OpenStreetMap
         }
@@ -836,7 +836,7 @@ pub fn MapView() -> impl IntoView {
                 for friend in move ||friend_marks.get(),key=|f|(f.0.clone(),f.1.to_bits(),f.2.to_bits(),f.3.clone(),f.4,f.5.clone(),f.6.clone()) {
                     FriendPin(id=friend.6.clone(),name=friend.0.clone(),x=friend.1,y=friend.2,label=friend.3.clone(),live=friend.4,avatar=friend.5.clone())
                 }
-                text(class="attribution") {{move ||if three_d.get()&&s.satellite.get(){"Imagery: Esri, Vantor, Earthstar Geographics · Roads: © OpenStreetMap · Terrain: © Mapterhorn"}else if three_d.get(){"Protomaps © OpenStreetMap · Terrain: © Mapterhorn"}else if s.satellite.get(){"Imagery: Esri, Vantor, Earthstar Geographics, GIS User Community · Roads: © OpenStreetMap"}else if vector.get(){"Protomaps © OpenStreetMap"}else{"© OpenStreetMap contributors"}}}
+                text(class="attribution") {{move ||attribution(three_d.get(),s.satellite.get(),s.imagery.get(),vector.get())}}
             }
             Dialog(open=map_people_open) {
                 DialogContent(class="sheet") {
@@ -1169,5 +1169,22 @@ pub(super) fn FriendPin(
         {picture}
         {dot}
         text(class="friend-label friend-pin",class:friend-stale=!live,style:transform=format!("translate({x}px, {}px) translateX(-50%)",y+radius+3.0)) {{label}}
+    }
+}
+
+/// Credit line for what the map currently draws.
+fn attribution(three_d: bool, satellite: bool, imagery: Provider, vector: bool) -> String {
+    let imagery = match imagery {
+        Provider::EsriImagery => "Esri, Vantor, Earthstar Geographics, GIS User Community",
+        other => other.attribution(),
+    };
+    match (three_d, satellite, vector) {
+        (true, true, _) => {
+            format!("Imagery: {imagery} · Roads: © OpenStreetMap · Terrain: © Mapterhorn")
+        }
+        (true, false, _) => "Protomaps © OpenStreetMap · Terrain: © Mapterhorn".into(),
+        (false, true, _) => format!("Imagery: {imagery} · Roads: © OpenStreetMap"),
+        (false, false, true) => "Protomaps © OpenStreetMap".into(),
+        (false, false, false) => "© OpenStreetMap contributors".into(),
     }
 }

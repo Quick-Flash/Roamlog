@@ -1,10 +1,10 @@
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", target_os = "ios"))]
 mod friends;
 mod history;
 mod history_dates;
 mod history_trip;
 pub(crate) mod icons;
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", target_os = "ios"))]
 pub(crate) mod place_alerts;
 mod recorder;
 pub(crate) mod settings;
@@ -48,10 +48,10 @@ pub fn Roamlog() -> impl IntoView {
             s.auto_map();
         }
     });
-    #[cfg(target_os = "android")]
+    #[cfg(any(target_os = "android", target_os = "ios"))]
     {
-        crate::android::listen_invites();
-        crate::android::resume_sharing(s.directory.get_value());
+        crate::platform::listen_invites();
+        crate::platform::resume_sharing(s.directory.get_value());
         place_alerts::follow_selected_friend(s);
     }
     on_cleanup_local(move || drop(timer));
@@ -59,6 +59,13 @@ pub fn Roamlog() -> impl IntoView {
     {
         let bars = zgui::reactive::RenderEffect::new(move |_| {
             zgui::app::android::system_bar_theme(Some(s.dark.get()))
+        });
+        on_cleanup_local(move || drop(bars));
+    }
+    #[cfg(target_os = "ios")]
+    {
+        let bars = zgui::reactive::RenderEffect::new(move |_| {
+            zgui::app::ios::status_bar_dark(s.dark.get())
         });
         on_cleanup_local(move || drop(bars));
     }
@@ -96,7 +103,7 @@ pub fn Roamlog() -> impl IntoView {
                         }
                     }
                     Button(variant=ButtonVariant::Ghost,class:tab-selected=move ||s.trips_open.get(),a11y:label="History",on:click=move |_|navigate(1)) {Icon(icon=icons::HISTORY) text {"History"}}
-                    if move ||cfg!(target_os="android") {
+                    if move ||cfg!(any(target_os="android",target_os="ios")) {
                         Button(variant=ButtonVariant::Ghost,class:tab-selected=move ||s.friends_open.get()||s.places_open.get(),a11y:label="Friends",on:click=move |_|navigate(2)) {Icon(icon=icons::PEOPLE) text {"Friends"}}
                     }
                     Button(variant=ButtonVariant::Ghost,class:tab-selected=move ||s.settings_open.get(),a11y:label="Settings",on:click=move |_|navigate(3)) {Icon(icon=icons::SLIDERS) text {"Settings"}}
@@ -106,12 +113,12 @@ pub fn Roamlog() -> impl IntoView {
     }
 }
 
-/// Location sharing exists on Android only.
+/// Location sharing exists on Android and iOS only.
 #[component]
 fn FriendsSheet() -> impl IntoView {
-    #[cfg(target_os = "android")]
+    #[cfg(any(target_os = "android", target_os = "ios"))]
     return friends::sheet();
-    #[cfg(not(target_os = "android"))]
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
     view! {box {}}
 }
 
@@ -177,10 +184,11 @@ fn window_icon() -> WindowIcon {
 
 pub fn run(directory: PathBuf) -> Result<(), zgui::Error> {
     std::fs::create_dir_all(&directory).expect("Roamlog data directory is writable");
-    app()
-        .with_title("Roamlog")
-        .with_size(460.0, 900.0)
-        .with_icon(window_icon())
+    let app = app().with_title("Roamlog");
+    // winit on iOS makes the UIWindow exactly this size; leaving it unset fills the screen.
+    #[cfg(not(target_os = "ios"))]
+    let app = app.with_size(460.0, 900.0);
+    app.with_icon(window_icon())
         .with_stylesheet(include_str!("style.css"))
         .with_context(move || provide_local_context(UiState::new(directory.clone())))
         .run(|| view! {Roamlog()})

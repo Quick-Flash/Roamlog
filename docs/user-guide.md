@@ -10,6 +10,13 @@ Ongoing notification shows distance and offers Finish. Recorder uses Android's
 started from visible app. No background-location permission or Google Play
 Services dependency.
 
+On iOS (preview), recording runs inside the app: iOS keeps it running in the
+background while the trip records, shown by the location indicator in the
+status bar. If iOS ends Roamlog mid-trip, the trip is paused at its last fix
+when Roamlog opens again; tap **Resume** to continue. There is no ongoing
+notification on iOS, and no in-app update check (updates come through
+SideStore; see README).
+
 ## Offline map
 
 **Settings → Offline map** downloads 10, 30, or 80 km square around map center from latest

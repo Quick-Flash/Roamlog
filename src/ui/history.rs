@@ -85,9 +85,9 @@ fn TripsTab() -> impl IntoView {
     let sources = RwSignal::new_local(Vec::<(String, String, Vec<u64>)>::new());
     let directory = s.directory.get_value();
     spawn_local(async move {
-        #[cfg(target_os = "android")]
+        #[cfg(any(target_os = "android", target_os = "ios"))]
         let found = blocking(move || super::friends::history_sources(&directory)).await;
-        #[cfg(not(target_os = "android"))]
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
         let found = {
             let _ = directory;
             Vec::new()
@@ -246,7 +246,7 @@ pub(crate) fn PersonPicker() -> impl IntoView {
     let groups = RwSignal::new_local(Vec::<(String, People)>::new());
     let directory = s.directory.get_value();
     spawn_local(async move {
-        #[cfg(target_os = "android")]
+        #[cfg(any(target_os = "android", target_os = "ios"))]
         let found = blocking(move || {
             (
                 super::friends::people(&directory),
@@ -254,7 +254,7 @@ pub(crate) fn PersonPicker() -> impl IntoView {
             )
         })
         .await;
-        #[cfg(not(target_os = "android"))]
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
         let found = {
             let _ = directory;
             (People::new(), Vec::new())

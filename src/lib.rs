@@ -25,8 +25,20 @@ pub mod ui;
 
 #[cfg(all(target_os = "android", feature = "ui"))]
 mod android;
+#[cfg(all(target_os = "ios", feature = "ui"))]
+mod ios;
+/// Platform-neutral mobile integration; tests run on desktop.
+#[cfg(all(any(target_os = "android", target_os = "ios", test), feature = "ui"))]
+mod mobile;
+/// Platform requests from the UI: same function names on each mobile platform.
+#[cfg(all(target_os = "android", feature = "ui"))]
+use android as platform;
+#[cfg(all(target_os = "ios", feature = "ui"))]
+use ios as platform;
 #[cfg(all(target_os = "android", feature = "ui", not(feature = "sharing")))]
 compile_error!("Android app build needs --features sharing (android/package.sh passes it)");
+#[cfg(all(target_os = "ios", feature = "ui", not(feature = "sharing")))]
+compile_error!("iOS app build needs --features sharing (ios/package.sh passes it)");
 
 #[cfg(all(target_os = "android", feature = "ui"))]
 mod android_updates;

@@ -1,33 +1,58 @@
-//! Roamlog app glue. Recorder service process runs the sharing node; UI process manages
-//! friends and runs pairing. Both load the same Keystore identity.
+//! Roamlog app glue for sharing. On Android the recorder service process runs the node and the
+//! UI process manages friends and pairing; both load the same Keystore identity. On iOS one
+//! process does both, with the identity in the Keychain.
+#[cfg(target_os = "android")]
+use super::identity;
 use super::{
-    Result, identity,
+    Result,
     location::{Sample, UpdatePolicy},
     manager::{Manager, Mode, now_ms},
     node::Node,
     peers::Friends,
 };
 use iroh::SecretKey;
+#[cfg(target_os = "android")]
 use jni::{
     JavaVM, jni_sig, jni_str,
     objects::{Global, JObject, JString, JValue},
 };
-use std::{
-    path::Path,
-    sync::{Mutex, OnceLock},
-};
+use std::{path::Path, sync::Mutex};
+
+/// Invitation link from an opened `roamlog://pair/` link or a scanned image, for the UI.
+pub(crate) static PENDING_INVITE: Mutex<Option<String>> = Mutex::new(None);
+
+/// Photo picked for profile picture, for the UI's crop step.
+pub(crate) static PICKED_AVATAR: Mutex<
+    Option<std::result::Result<crate::mobile::PickedImage, String>>,
+> = Mutex::new(None);
+
+/// Saves square `[x, y, side]` of picked photo as 128 px PNG profile picture, sent to friends.
+pub(crate) fn save_avatar(
+    directory: &Path,
+    image: &image::DynamicImage,
+    square: [u32; 3],
+) -> std::result::Result<(), String> {
+    let png = crate::mobile::avatar_png(image, square)?;
+    let path = super::transport::own_avatar_path(&directory.join("sharing"));
+    let partial = path.with_extension("tmp");
+    std::fs::write(&partial, png)
+        .and_then(|()| std::fs::rename(&partial, &path))
+        .map_err(|e| format!("Could not save picture: {e}"))
+}
 
 static KEY: Mutex<Option<SecretKey>> = Mutex::new(None);
 static MANAGER: Mutex<Option<Manager>> = Mutex::new(None);
 static NODE: Mutex<Option<Node>> = Mutex::new(None);
 
 /// Call once with the VM from `android_main`; background events set it through zgui.
+#[cfg(target_os = "android")]
 pub fn install_vm(vm: *mut std::ffi::c_void) {
     // SAFETY: Android passes a valid process-lifetime VM pointer.
     unsafe { JavaVM::from_raw(vm.cast()) };
 }
 
 /// Runs `f` with the Application context on an attached thread.
+#[cfg(target_os = "android")]
 fn with_application<T>(
     f: impl FnOnce(&mut jni::Env<'_>, &JObject<'_>) -> jni::errors::Result<T>,
 ) -> Result<T> {
@@ -51,11 +76,31 @@ pub fn key() -> Result<SecretKey> {
     if let Some(key) = cached.as_ref() {
         return Ok(key.clone());
     }
-    let key = with_application(identity::load_context).map_err(|_| {
+    let key = load_key().map_err(|_| {
         "Sharing identity unavailable; stored identity preserved. Reset identity to start over."
     })?;
     *cached = Some(key.clone());
     Ok(key)
+}
+
+#[cfg(target_os = "android")]
+fn load_key() -> Result<SecretKey> {
+    with_application(identity::load_context)
+}
+
+#[cfg(target_os = "ios")]
+fn load_key() -> Result<SecretKey> {
+    super::keychain::load_or_create()
+}
+
+#[cfg(target_os = "android")]
+fn delete_key() -> Result<()> {
+    with_application(identity::reset_context)
+}
+
+#[cfg(target_os = "ios")]
+fn delete_key() -> Result<()> {
+    super::keychain::delete()
 }
 
 /// Drops cached identity and friend store, e.g. after another process reset them.
@@ -71,7 +116,7 @@ pub fn forget_identity() {
 /// New identity: deletes key, friends, groups, and received data. Caller turns sharing
 /// off first so no node uses the old key. Old friends must pair again.
 pub fn reset_identity(directory: &Path) -> Result<()> {
-    with_application(identity::reset_context).map_err(|_| "Could not reset sharing identity")?;
+    delete_key().map_err(|_| "Could not reset sharing identity")?;
     forget_identity();
     let sharing = directory.join("sharing");
     for name in [
@@ -130,8 +175,9 @@ pub fn mode(directory: &Path) -> Mode {
 }
 
 /// Service process has no android-activity glue; iroh reads DNS servers through this context.
+#[cfg(target_os = "android")]
 fn install_dns() -> Result<()> {
-    static DNS: OnceLock<Global<JObject<'static>>> = OnceLock::new();
+    static DNS: std::sync::OnceLock<Global<JObject<'static>>> = std::sync::OnceLock::new();
     if DNS.get().is_some() {
         return Ok(());
     }
@@ -158,11 +204,19 @@ pub fn sync_node(directory: &Path) -> Result<bool> {
         node.manager().notify();
         return Ok(true);
     }
+    #[cfg(target_os = "android")]
     install_dns()?;
     let manager = manager(directory)?;
     let journal = directory.to_owned();
+    // A friend asked for a fresh position: a short burst of precise fixes.
+    #[cfg(target_os = "android")]
     manager.set_refresh_source(std::sync::Arc::new(|| {
         zgui::app::android::background::send_service("locate", "").map_err(Into::into)
+    }));
+    #[cfg(target_os = "ios")]
+    manager.set_refresh_source(std::sync::Arc::new(|| {
+        crate::platform::locate();
+        Ok(())
     }));
     manager.set_trip_source(std::sync::Arc::new(move || {
         let trips =
@@ -439,6 +493,7 @@ pub fn qr_png(rows: &[String]) -> Result<Vec<u8>> {
 }
 
 /// BatteryManager reports percentage without a new Android permission.
+#[cfg(target_os = "android")]
 pub fn battery_percent() -> Result<Option<u8>> {
     with_application(|env, application| {
         let name = JString::from_str(env, "batterymanager")?;

@@ -133,7 +133,15 @@ Open **Friends** on map.
 
 ## Limits
 
-- **Platform and connectivity:** sharing is Android only. Each connection needs
+- **iOS (preview):** sharing also runs on iOS, in the app process. iOS keeps a
+  backgrounded app running only while it receives location updates, so
+  **Always** keeps a coarse background location watch (about 10 m, every 20 m
+  moved) with the system location indicator; **During trips** shares and
+  receives only while recording or while Roamlog is open. A suspended app
+  receives nothing until reopened. The identity lives in the Keychain. Friends
+  asking for a fresh position get the latest fix, and battery level is not
+  shared. Simulator-tested only; see [iOS plan](ios-plan.md).
+- **Platform and connectivity:** sharing runs on Android and iOS. Each connection needs
   both phones online at the same time. Direct connections are not always
   possible; public Iroh discovery and relays are external dependencies, and
   restrictive networks or outages can prevent sharing. Relays forward encrypted

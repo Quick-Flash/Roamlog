@@ -95,6 +95,8 @@ pub struct UiState {
     pub metric: RwSignal<bool, LocalStorage>,
     pub dark: RwSignal<bool, LocalStorage>,
     pub satellite: RwSignal<bool, LocalStorage>,
+    /// Online imagery behind satellite and 3D terrain views. Saved in `imagery` file.
+    pub imagery: RwSignal<crate::mapping::tiles::Provider, LocalStorage>,
     pub show_gps: RwSignal<bool, LocalStorage>,
     pub show_roads: RwSignal<bool, LocalStorage>,
     pub trips_open: RwSignal<bool, LocalStorage>,
@@ -138,7 +140,7 @@ pub struct UiState {
     /// Profile opened from map card: Back returns to map.
     pub profile_from_map: StoredValue<bool, LocalStorage>,
     /// Your profile page in Friends; kept here so it survives the photo picker.
-    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+    #[cfg_attr(not(any(target_os = "android", target_os = "ios")), allow(dead_code))]
     pub profile_open: RwSignal<bool, LocalStorage>,
     /// Map setup screen for a new or edited area (saved or alert), when open.
     pub setup: RwSignal<Option<Setup>, LocalStorage>,
@@ -146,17 +148,17 @@ pub struct UiState {
     pub setup_circle: StoredValue<Option<(Point, f64)>, LocalStorage>,
     /// Circle being placed in setup: center follows map pans, handles resize.
     pub editing_circle: RwSignal<Option<(Point, f64)>, LocalStorage>,
-    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+    #[cfg_attr(not(any(target_os = "android", target_os = "ios")), allow(dead_code))]
     pub place_peer: RwSignal<Option<String>, LocalStorage>,
     pub alert_areas_back: StoredValue<Option<zgui::reactive::UnsyncCallback<()>>, LocalStorage>,
     pub places_open: RwSignal<bool, LocalStorage>,
     /// Areas drawn together on map, each with a tappable name.
     pub area_marks: RwSignal<Vec<Mark>, LocalStorage>,
     /// Who the shown areas can be filtered by: (key, label); "g:<id>" keys are groups.
-    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+    #[cfg_attr(not(any(target_os = "android", target_os = "ios")), allow(dead_code))]
     pub area_filters: RwSignal<Vec<(String, String)>, LocalStorage>,
     /// Friend whose areas were drawn by selecting them on map; hidden again on deselect.
-    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+    #[cfg_attr(not(any(target_os = "android", target_os = "ios")), allow(dead_code))]
     pub marks_friend: StoredValue<Option<String>, LocalStorage>,
     /// Area the Alert areas page opens straight to (set from a map label).
     pub open_area: RwSignal<Option<u32>, LocalStorage>,
@@ -169,13 +171,13 @@ pub struct UiState {
     pub map_friends: RwSignal<Vec<(String, String)>, LocalStorage>,
     pub friend_markers: RwSignal<Vec<FriendMarker>, LocalStorage>,
     /// Invitation link opened from camera, link or image, awaiting user action.
-    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+    #[cfg_attr(not(any(target_os = "android", target_os = "ios")), allow(dead_code))]
     pub invite_link: RwSignal<String, LocalStorage>,
     /// Whose trips History and map show: empty is own only; else ("me" or peer ID, name),
     /// merged read-only.
     pub people: RwSignal<Vec<(String, String)>, LocalStorage>,
     /// Friend pictures by peer ID: file time and registered image.
-    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+    #[cfg_attr(not(any(target_os = "android", target_os = "ios")), allow(dead_code))]
     avatars: StoredValue<
         std::collections::HashMap<String, (std::time::SystemTime, zgui_image::ImageBytes)>,
         LocalStorage,
@@ -185,13 +187,13 @@ pub struct UiState {
     pub auto_map_mode: RwSignal<String, LocalStorage>,
     /// Own profile picture URL, shown on own map dot and in Friends.
     pub own_avatar: RwSignal<Option<String>, LocalStorage>,
-    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+    #[cfg_attr(not(any(target_os = "android", target_os = "ios")), allow(dead_code))]
     own_avatar_handle:
         StoredValue<Option<(std::time::SystemTime, zgui_image::ImageBytes)>, LocalStorage>,
     /// Map centers where an automatic map download was already tried (z10 tile).
     map_tried: StoredValue<std::collections::HashSet<(u32, u32)>, LocalStorage>,
     /// Friend (peer ID, name) whose trips are being viewed.
-    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+    #[cfg_attr(not(any(target_os = "android", target_os = "ios")), allow(dead_code))]
     pub friend_trips: RwSignal<Option<(String, String)>, LocalStorage>,
 }
 
@@ -202,6 +204,14 @@ pub fn now_ms() -> u64 {
         .as_millis() as u64
 }
 
+/// Imagery sources offered for satellite and 3D views. Hybrid styles draw their own labels
+/// under Roamlog's; Mapbox needs an access token.
+pub const IMAGERY: [crate::mapping::tiles::Provider; 3] = [
+    crate::mapping::tiles::Provider::EsriImagery,
+    crate::mapping::tiles::Provider::GoogleSatellite,
+    crate::mapping::tiles::Provider::BingSatellite,
+];
+
 impl UiState {
     pub fn new(directory: PathBuf) -> Self {
         let metric =
@@ -209,6 +219,11 @@ impl UiState {
         let dark = std::fs::read_to_string(directory.join("theme")).map_or(true, |v| v != "light");
         let satellite =
             std::fs::read_to_string(directory.join("map-layer")).is_ok_and(|v| v == "satellite");
+        let imagery = std::fs::read_to_string(directory.join("imagery"))
+            .ok()
+            .and_then(|key| crate::mapping::tiles::Provider::parse(key.trim()))
+            .filter(|provider| IMAGERY.contains(provider))
+            .unwrap_or(crate::mapping::tiles::Provider::EsriImagery);
         let show_gps =
             std::fs::read_to_string(directory.join("show-gps")).map_or(true, |v| v != "off");
         let show_roads =
@@ -249,6 +264,7 @@ impl UiState {
             metric: RwSignal::new_local(metric),
             dark: RwSignal::new_local(dark),
             satellite: RwSignal::new_local(satellite),
+            imagery: RwSignal::new_local(imagery),
             show_gps: RwSignal::new_local(show_gps),
             show_roads: RwSignal::new_local(show_roads),
             trips_open: RwSignal::new_local(false),
@@ -432,11 +448,11 @@ impl UiState {
 
     pub fn record(self, op: &str) {
         let category = self.selected.get_untracked().parse::<u64>().unwrap_or(0);
-        #[cfg(target_os = "android")]
-        if let Err(error) = crate::android::record(self.directory.get_value(), op, category) {
+        #[cfg(any(target_os = "android", target_os = "ios"))]
+        if let Err(error) = crate::platform::record(self.directory.get_value(), op, category) {
             self.message.set(error);
         }
-        #[cfg(not(target_os = "android"))]
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
         {
             let _ = (op, category);
             self.message.set("Trip recording needs Android GPS.".into());
@@ -445,8 +461,8 @@ impl UiState {
 
     /// Starts the live position feed once location permission exists.
     pub fn start_position(self) {
-        #[cfg(target_os = "android")]
-        if let Err(error) = crate::android::follow(self.directory.get_value(), false) {
+        #[cfg(any(target_os = "android", target_os = "ios"))]
+        if let Err(error) = crate::platform::follow(self.directory.get_value(), false) {
             self.message.set(error);
         }
     }
@@ -455,8 +471,8 @@ impl UiState {
     pub fn locate(self) {
         self.follow.set(true);
         self.center_on_position();
-        #[cfg(target_os = "android")]
-        if let Err(error) = crate::android::follow(self.directory.get_value(), true) {
+        #[cfg(any(target_os = "android", target_os = "ios"))]
+        if let Err(error) = crate::platform::follow(self.directory.get_value(), true) {
             self.message.set(error);
         }
     }
@@ -498,11 +514,11 @@ impl UiState {
     }
 
     pub fn import_basemap(self) {
-        #[cfg(target_os = "android")]
-        if let Err(error) = crate::android::import_basemap(self.directory.get_value()) {
+        #[cfg(any(target_os = "android", target_os = "ios"))]
+        if let Err(error) = crate::platform::import_basemap(self.directory.get_value()) {
             self.message.set(error);
         }
-        #[cfg(not(target_os = "android"))]
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
         self.message.set(format!(
             "Copy PMTiles file to {}",
             self.directory.get_value().join("basemap.pmtiles").display()
@@ -642,6 +658,11 @@ impl UiState {
         self.save_preference("map-layer", if satellite { "satellite" } else { "map" });
     }
 
+    pub fn set_imagery(self, provider: crate::mapping::tiles::Provider) {
+        self.imagery.set(provider);
+        self.save_preference("imagery", provider.key());
+    }
+
     pub fn set_show_gps(self, visible: bool) {
         self.show_gps.set(visible);
         self.save_preference("show-gps", if visible { "on" } else { "off" });
@@ -661,9 +682,9 @@ impl UiState {
 
     /// Reads friend positions the sharing service published, and opened invitations.
     pub fn refresh_friends(self) {
-        #[cfg(target_os = "android")]
+        #[cfg(any(target_os = "android", target_os = "ios"))]
         {
-            if let Some(link) = crate::android::PENDING_INVITE
+            if let Some(link) = crate::sharing::app::PENDING_INVITE
                 .lock()
                 .ok()
                 .and_then(|mut l| l.take())
@@ -679,7 +700,7 @@ impl UiState {
             zgui::reactive::spawn_detached(async move {
                 let (markers, pictures, roster) = blocking(move || {
                     let published = crate::sharing::node::read_published(&directory);
-                    let roster = crate::sharing::android_app::manager(&directory)
+                    let roster = crate::sharing::app::manager(&directory)
                         .and_then(|manager| manager.friends().list())
                         .ok()
                         .map(|friends| {
@@ -768,7 +789,7 @@ impl UiState {
 
     /// Re-registers own picture only when its file changed, so the image is not
     /// replaced (and reloaded) while it is showing.
-    #[cfg(target_os = "android")]
+    #[cfg(any(target_os = "android", target_os = "ios"))]
     pub fn reload_own_avatar(self) {
         let path =
             crate::sharing::transport::own_avatar_path(&self.directory.get_value().join("sharing"));
@@ -923,7 +944,11 @@ impl UiState {
         // trip bar (and room for the area bar) below, map buttons on the right. Setup
         // screen has a taller header and its panel already outside the map.
         let [w, h] = self.map_size.get_value();
-        let status_bar = if cfg!(target_os = "android") { 50. } else { 0. };
+        let status_bar = if cfg!(any(target_os = "android", target_os = "ios")) {
+            50.
+        } else {
+            0.
+        };
         let [top, right, bottom, left] = if self.setup.with_untracked(Option::is_some) {
             [150. + status_bar, 16., 16., 16.]
         } else {
@@ -1080,11 +1105,11 @@ impl UiState {
     }
 
     pub fn export_gpx(self) {
-        #[cfg(target_os = "android")]
-        if let Err(error) = crate::android::export_gpx(self.directory.get_value()) {
+        #[cfg(any(target_os = "android", target_os = "ios"))]
+        if let Err(error) = crate::platform::export_gpx(self.directory.get_value()) {
             self.message.set(error);
         }
-        #[cfg(not(target_os = "android"))]
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
         zgui::reactive::spawn_detached(async move {
             let path = self.directory.get_value().join("roamlog-trips.gpx");
             let result = match self.request(json!({"op":"gpx"})).await {
@@ -1105,8 +1130,8 @@ impl UiState {
     }
 
     pub fn open_settings(self) {
-        #[cfg(target_os = "android")]
-        if let Err(error) = crate::android::open_settings() {
+        #[cfg(any(target_os = "android", target_os = "ios"))]
+        if let Err(error) = crate::platform::open_settings() {
             self.message.set(error);
         }
     }

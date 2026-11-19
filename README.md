@@ -24,7 +24,8 @@ Screenshots show synthetic Portland, Oregon demo trips, captured on Android.
 - Select multiple trips, filter by category/date, rename trips, and compare totals.
 - Toggle GPS paths and traveled roads independently. Line widths and dashes
   distinguish overlays without relying only on color.
-- Download offline vector maps; optionally use online satellite imagery.
+- Download offline vector maps; optionally use online satellite imagery from Esri,
+  Google, or Bing.
 - Switch to optional 3D terrain with vector map, road coverage, and GPS paths.
 - Draw areas to measure road coverage and find nearby untraveled roads.
 - Switch light/dark appearance independently of system theme.
@@ -121,6 +122,20 @@ export ANDROID_HOME=/path/to/android-sdk
 export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/28.2.13676358"
 cargo xtask android --release
 adb install --no-incremental -r target/release/apk/roamlog.apk
+```
+
+iOS (preview, simulator-tested only; see [iOS plan](docs/ios-plan.md)): every
+nightly release also carries an unsigned `roamlog.ipa`. Install it with
+[SideStore](https://sidestore.io) and a free Apple ID: add the source
+`https://github.com/Quick-Flash/Roamlog/releases/download/sidestore/roamlog-source.json`
+in SideStore to get each nightly as an update. SideStore re-signs the app every
+7 days; a free Apple ID allows 3 sideloaded apps at once. Building the IPA needs
+macOS with Xcode (CI uses GitHub's macOS runners):
+
+```bash
+rustup target add aarch64-apple-ios aarch64-apple-ios-sim
+cargo xtask ios                      # simulator Roamlog.app
+cargo xtask ios --release --device   # target/aarch64-apple-ios/release/roamlog.ipa
 ```
 
 Dependencies use pinned public Git revisions. Enlumi map foundations are vendored;

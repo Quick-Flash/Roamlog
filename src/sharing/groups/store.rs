@@ -594,7 +594,10 @@ impl Friends {
     }
 
     /// Recorder checkpoints membership so cross-process admits also trigger notices.
-    #[cfg(any(test, all(target_os = "android", feature = "ui")))]
+    #[cfg(any(
+        test,
+        all(any(target_os = "android", target_os = "ios"), feature = "ui")
+    ))]
     pub(in crate::sharing) fn membership_notices(&self) -> Result<Vec<(i32, String)>> {
         let _lock = self.lock()?;
         let records = self.read()?;

@@ -25,3 +25,8 @@ with project owner’s authorization. Flight telemetry rendering omitted.
 Elevation tiles: © Mapterhorn, assembled from separately licensed open datasets.
 Source attribution and licenses: https://mapterhorn.com/attribution/
 Tile service: https://tiles.mapterhorn.com/{z}/{x}/{y}.webp
+
+vendor/netdev (netdev 0.46.3, MIT, https://github.com/shellrow/netdev) and
+vendor/netwatch (netwatch 0.19.3, MIT OR Apache-2.0, https://github.com/n0-computer/net-tools)
+are crates.io copies patched for iOS builds of iroh; each change is marked
+"Roamlog patch". netdev's MIT license is in vendor/netdev/LICENSE.

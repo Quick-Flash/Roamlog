@@ -4,7 +4,7 @@ use super::{
     tools::shape_preview,
 };
 use crate::sharing::{
-    android_app,
+    app,
     peers::{Friend, Group},
     places::{self, Place, Who},
 };
@@ -16,7 +16,7 @@ use zgui_ui::prelude::*;
 type People = (Vec<Friend>, Vec<Group>);
 
 fn load(directory: std::path::PathBuf) -> Result<(Vec<Place>, People), String> {
-    let manager = android_app::manager(&directory).map_err(|e| e.to_string())?;
+    let manager = app::manager(&directory).map_err(|e| e.to_string())?;
     let friends = manager.friends();
     let people = friends
         .list()
@@ -260,7 +260,7 @@ pub fn PlaceAlerts(open: RwSignal<bool, LocalStorage>) -> impl IntoView {
         let directory = s.directory.get_value();
         zgui::reactive::spawn_detached(async move {
             let result = blocking(move || -> crate::sharing::Result<u32> {
-                let manager = android_app::manager(&directory)?;
+                let manager = app::manager(&directory)?;
                 places::set_rule(
                     manager.friends(),
                     None,
@@ -289,7 +289,7 @@ pub fn PlaceAlerts(open: RwSignal<bool, LocalStorage>) -> impl IntoView {
         let directory = s.directory.get_value();
         zgui::reactive::spawn_detached(async move {
             let result = blocking(move || {
-                let manager = android_app::manager(&directory)?;
+                let manager = app::manager(&directory)?;
                 places::edit_area(
                     manager.friends(),
                     id,
@@ -356,7 +356,7 @@ pub fn PlaceAlerts(open: RwSignal<bool, LocalStorage>) -> impl IntoView {
         };
         zgui::reactive::spawn_detached(async move {
             let result = blocking(move || -> crate::sharing::Result<u32> {
-                let manager = android_app::manager(&directory)?;
+                let manager = app::manager(&directory)?;
                 places::set_rule(
                     manager.friends(),
                     selected,
@@ -477,7 +477,7 @@ pub fn PlaceAlerts(open: RwSignal<bool, LocalStorage>) -> impl IntoView {
         let directory = s.directory.get_value();
         spawn_local(async move {
             let result = blocking(move || {
-                let manager = android_app::manager(&directory)?;
+                let manager = app::manager(&directory)?;
                 places::remove(manager.friends(), id)
             })
             .await;
@@ -711,7 +711,7 @@ pub fn PlaceAlerts(open: RwSignal<bool, LocalStorage>) -> impl IntoView {
                                 let directory=s.directory.get_value();
                                 spawn_local(async move {
                                     let result=blocking(move ||{
-                                        let manager=android_app::manager(&directory)?;
+                                        let manager=app::manager(&directory)?;
                                         places::remove_area(manager.friends(),id)
                                     }).await;
                                     match result {

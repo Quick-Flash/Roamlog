@@ -17,7 +17,7 @@ pub fn ViewOptions() -> impl IntoView {
     let open = RwSignal::new_local(false);
     let show_alert_areas = move || {
         open.set(false);
-        #[cfg(target_os = "android")]
+        #[cfg(any(target_os = "android", target_os = "ios"))]
         super::place_alerts::show_on_map(s, None);
     };
     view! {
@@ -30,6 +30,14 @@ pub fn ViewOptions() -> impl IntoView {
                     Button(variant=ButtonVariant::Ghost,class="layer-map",class:seg-on=move ||!three_d.get()&&!s.satellite.get(),on:click=move |_|{three_d.set(false);s.set_satellite(false)}) {"Map"}
                     Button(variant=ButtonVariant::Ghost,class="layer-satellite",class:seg-on=move ||!three_d.get()&&s.satellite.get(),on:click=move |_|{three_d.set(false);s.set_satellite(true)}) {"Satellite"}
                     Button(variant=ButtonVariant::Ghost,class:seg-on=move ||three_d.get(),disabled=Signal::derive_local(move ||s.area_drawing.get()),on:click=move |_|three_d.set(true)) {"3D terrain"}
+                }
+                if move ||three_d.get()||s.satellite.get() {
+                    text(class="section-title") {"Imagery"}
+                    row(class="segmented") {
+                        for provider in move ||super::state::IMAGERY.to_vec(),key=|p|*p {
+                            Button(variant=ButtonVariant::Ghost,class="imagery-option",class:imagery-google=move ||provider==crate::mapping::tiles::Provider::GoogleSatellite,class:seg-on=move ||s.imagery.get()==provider,on:click=move |_|s.set_imagery(provider)) {{imagery_label(provider)}}
+                        }
+                    }
                 }
                 row(class="view-toggle") {
                     Label(node_ref=online_label) {"Load map tiles online"}
@@ -59,7 +67,7 @@ pub fn ViewOptions() -> impl IntoView {
                     }
                     Switch(class="show-gps",labelled_by=gps_label,checked=Binding::controlled(s.show_gps,move |value|s.set_show_gps(value)))
                 }
-                if move ||cfg!(target_os="android") {
+                if move ||cfg!(any(target_os="android",target_os="ios")) {
                     text(class="section-title") {"Friends"}
                     row(class="view-toggle") {
                         column(class="toggle-text") {
@@ -81,5 +89,15 @@ pub fn ViewOptions() -> impl IntoView {
                 }
             }
         }
+    }
+}
+
+/// Short name for the imagery picker.
+fn imagery_label(provider: crate::mapping::tiles::Provider) -> &'static str {
+    use crate::mapping::tiles::Provider;
+    match provider {
+        Provider::GoogleSatellite => "Google",
+        Provider::BingSatellite => "Bing",
+        _ => "Esri",
     }
 }

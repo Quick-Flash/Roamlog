@@ -2,8 +2,9 @@
 //! and the trip recorder, which runs in the `:recorder` service process so trips continue after
 //! the activity closes.
 use crate::backend::request;
-use crate::sharing::{android_app as sharing, manager::Mode};
-use serde_json::{Value, json};
+use crate::mobile::{self, Reading, now_ms, status};
+use crate::sharing::{app as sharing, manager::Mode};
+use serde_json::json;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
@@ -19,36 +20,11 @@ pub fn android_main(app: zgui::app::AndroidApp) {
     sharing::install_vm(app.vm_as_ptr());
     crate::android_updates::init(&app);
     let directory = app.internal_data_path().expect("Android internal storage");
-    default_units(&directory, app.config().country().as_deref());
+    mobile::default_units(&directory, app.config().country().as_deref());
     crate::ui::run_android(app, directory);
 }
 
 zgui::app::android_background!(recorder);
-
-/// First launch: miles where the region uses them, written before the UI reads units.
-fn default_units(directory: &Path, country: Option<&str>) {
-    let path = directory.join("units");
-    if path.exists() {
-        return;
-    }
-    let miles = matches!(country, Some("US" | "GB" | "LR" | "MM"));
-    let _ = std::fs::write(path, if miles { "imperial" } else { "metric" });
-}
-
-fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
-}
-
-/// Shows `message` in the UI on its next refresh; empty clears it. Works from any process.
-fn status(directory: &Path, message: &str) {
-    let _ = request(
-        directory.to_owned(),
-        json!({"op": "platform_status", "message": message}),
-    );
-}
 
 fn trip_notification(directory: &Path, text: &str) -> notification::Notification {
     let mut actions = vec![("finish".into(), "Finish trip".into())];
@@ -81,14 +57,6 @@ fn sharing_notification() -> notification::Notification {
 /// Real location watch, or simulated one in demo app. Dropping it stops updates.
 type Watch = Box<dyn Send>;
 
-/// Stops simulated feed thread when dropped.
-struct Simulated(std::sync::Arc<AtomicBool>);
-impl Drop for Simulated {
-    fn drop(&mut self) {
-        self.0.store(true, Ordering::Relaxed);
-    }
-}
-
 fn watch(
     directory: &Path,
     request: location::Request,
@@ -97,27 +65,31 @@ fn watch(
     let Some(route) = crate::demo::Route::load(directory) else {
         return Ok(Box::new(location::watch(request, callback)?));
     };
-    let stop = std::sync::Arc::new(AtomicBool::new(false));
-    let stopped = stop.clone();
-    std::thread::spawn(move || {
-        while !stopped.load(Ordering::Relaxed) {
-            let time_ms = now_ms();
-            let p = route.at(time_ms);
-            callback(location::Update::Fix(location::Location {
-                lat: p.lat,
-                lon: p.lon,
-                accuracy_m: Some(5.0),
-                altitude_m: None,
-                speed: None,
-                bearing: None,
-                time_ms,
-                age: Duration::ZERO,
-                provider: "gps".into(),
-            }));
-            std::thread::sleep(Duration::from_secs(1));
-        }
-    });
-    Ok(Box::new(Simulated(stop)))
+    Ok(Box::new(mobile::simulate(route, move |r| {
+        callback(location::Update::Fix(location::Location {
+            lat: r.lat,
+            lon: r.lon,
+            accuracy_m: r.accuracy_m,
+            altitude_m: None,
+            speed: r.speed,
+            bearing: r.bearing,
+            time_ms: r.time_ms,
+            age: r.age,
+            provider: "gps".into(),
+        }))
+    })))
+}
+
+fn reading(fix: &location::Location) -> Reading {
+    Reading {
+        lat: fix.lat,
+        lon: fix.lon,
+        accuracy_m: fix.accuracy_m,
+        speed: fix.speed,
+        bearing: fix.bearing,
+        time_ms: fix.time_ms,
+        age: fix.age,
+    }
 }
 
 fn demo(directory: &Path) -> bool {
@@ -207,11 +179,9 @@ fn start_follow(directory: PathBuf) -> Result<(), String> {
         let location::Update::Fix(fix) = update else {
             return;
         };
-        if fix.age > Duration::from_secs(120) {
+        let Some(command) = reading(&fix).position_command() else {
             return;
-        }
-        let command = json!({"op": "position", "lat": fix.lat, "lon": fix.lon,
-               "accuracy_m": fix.accuracy_m.unwrap_or(100.0)});
+        };
         // Android's main thread also delivers touch input; journal work runs elsewhere.
         let directory = directory.clone();
         std::thread::spawn(move || drop(request(directory, command)));
@@ -233,23 +203,14 @@ pub(crate) fn import_basemap(directory: PathBuf) -> Result<(), String> {
         status(&directory, "Importing offline map…");
         // Own thread: a large copy must not delay the main thread.
         std::thread::spawn(move || {
-            let target = directory.join("basemap.pmtiles");
-            let partial = directory.join("basemap.pmtiles.tmp");
-            let copied = (|| {
-                let mut input = doc.file;
-                let mut output = std::fs::File::create(&partial)?;
-                std::io::copy(&mut input, &mut output)?;
-                output.sync_all()?;
-                std::fs::rename(&partial, &target)
-            })();
-            if let Err(error) = copied {
-                let _ = std::fs::remove_file(&partial);
-                return status(&directory, &format!("Offline map import failed: {error}"));
-            }
-            match request(directory.clone(), json!({"op": "basemap_imported"})) {
-                Ok(_) => status(&directory, "Offline map imported."),
-                Err(error) => status(&directory, &error),
-            }
+            let imported = mobile::import_basemap(&directory, doc.file);
+            status(
+                &directory,
+                &imported.map_or_else(
+                    |e| format!("Offline map import failed: {e}"),
+                    |()| "Offline map imported.".into(),
+                ),
+            );
         });
     })
 }
@@ -257,16 +218,13 @@ pub(crate) fn import_basemap(directory: PathBuf) -> Result<(), String> {
 /// Writes trips as GPX to a document the user creates.
 pub(crate) fn export_gpx(directory: PathBuf) -> Result<(), String> {
     document::create("roamlog-trips.gpx", "application/gpx+xml", move |picked| {
-        let mut doc = match picked {
+        let doc = match picked {
             Ok(Some(doc)) => doc,
             Ok(None) => return,
             Err(error) => return status(&directory, &format!("Export failed: {error}")),
         };
         std::thread::spawn(move || {
-            let written = request(directory.clone(), json!({"op": "gpx"})).and_then(|value| {
-                let gpx = value["gpx"].as_str().unwrap_or_default();
-                std::io::Write::write_all(&mut doc.file, gpx.as_bytes()).map_err(|e| e.to_string())
-            });
+            let written = mobile::export_gpx(&directory, doc.file);
             status(
                 &directory,
                 &written.map_or_else(
@@ -290,13 +248,7 @@ pub(crate) fn backup(directory: PathBuf) -> Result<(), String> {
                 Err(error) => return status(&directory, &format!("Backup failed: {error}")),
             };
             std::thread::spawn(move || {
-                let written =
-                    request(directory.clone(), json!({"op": "backup"})).and_then(|value| {
-                        let journal = value["journal"].as_str().unwrap_or_default();
-                        std::io::Write::write_all(&mut doc.file, journal.as_bytes())
-                            .and_then(|()| doc.file.sync_all())
-                            .map_err(|e| e.to_string())
-                    });
+                let written = mobile::backup(&directory, &mut doc.file);
                 status(
                     &directory,
                     &written.map_or_else(
@@ -318,21 +270,11 @@ pub(crate) fn restore(directory: PathBuf) -> Result<(), String> {
             Err(error) => return status(&directory, &format!("Restore failed: {error}")),
         };
         std::thread::spawn(move || {
-            let partial = directory.join("trips.jsonl.restore");
-            let copied = (|| {
-                let mut input = doc.file;
-                let mut output = std::fs::File::create(&partial)?;
-                std::io::copy(&mut input, &mut output)?;
-                output.sync_all()
-            })();
-            let result = copied
-                .map_err(|e| e.to_string())
-                .and_then(|()| request(directory.clone(), json!({"op": "restore"})));
             status(
                 &directory,
-                &result.map_or_else(
+                &mobile::restore(&directory, doc.file).map_or_else(
                     |e| format!("Restore failed: {e}"),
-                    |v| format!("Restored {} trips.", v["trips"].as_u64().unwrap_or(0)),
+                    |trips| format!("Restored {trips} trips."),
                 ),
             );
         });
@@ -385,9 +327,6 @@ pub(crate) fn nudge_sharing(directory: &Path) {
     }
 }
 
-/// Invitation link from an opened `roamlog://pair/` link or a scanned image, for the UI.
-pub(crate) static PENDING_INVITE: Mutex<Option<String>> = Mutex::new(None);
-
 /// Camera apps open scanned invitation links with Roamlog through the manifest filter.
 pub(crate) fn listen_invites() {
     zgui::app::android::intent::on_intent(|intent| {
@@ -396,7 +335,7 @@ pub(crate) fn listen_invites() {
             .or(intent.text)
             .filter(|l| l.starts_with("roamlog://pair/"))
         {
-            *PENDING_INVITE.lock().expect("invite lock") = Some(link);
+            *sharing::PENDING_INVITE.lock().expect("invite lock") = Some(link);
         }
     });
 }
@@ -410,86 +349,45 @@ pub(crate) fn scan_invite(directory: PathBuf) -> Result<(), String> {
             Err(error) => return status(&directory, &format!("Could not open image: {error}")),
         };
         std::thread::spawn(move || {
-            let mut bytes = Vec::new();
-            let read = std::io::Read::read_to_end(
-                &mut std::io::Read::take(doc.file, 32 * 1024 * 1024),
-                &mut bytes,
-            );
-            match read
-                .map_err(|e| e.to_string())
-                .and_then(|_| sharing::decode_qr_image(&bytes).map_err(|e| e.to_string()))
+            match mobile::read_image(doc.file)
+                .and_then(|bytes| sharing::decode_qr_image(&bytes).map_err(|e| e.to_string()))
             {
-                Ok(link) => *PENDING_INVITE.lock().expect("invite lock") = Some(link),
+                Ok(link) => *sharing::PENDING_INVITE.lock().expect("invite lock") = Some(link),
                 Err(_) => status(&directory, "No Roamlog invitation found in image"),
             }
         });
     })
 }
 
-/// Picked photo for the crop step: shrunk so longer side is at most 1024 px.
-pub(crate) struct PickedImage {
-    pub image: image::DynamicImage,
-    /// PNG of `image`, for showing it while cropping.
-    pub png: Vec<u8>,
-}
-
-/// Photo picked for profile picture, for the UI's crop step.
-pub(crate) static PICKED_AVATAR: Mutex<Option<Result<PickedImage, String>>> = Mutex::new(None);
-
 /// Opens image picker; picked photo lands in `PICKED_AVATAR`.
 pub(crate) fn pick_avatar() -> Result<(), String> {
     document::open("image/*", move |picked| {
-        let done = |result| *PICKED_AVATAR.lock().expect("avatar lock") = Some(result);
+        let done = |result| *sharing::PICKED_AVATAR.lock().expect("avatar lock") = Some(result);
         let doc = match picked {
             Ok(Some(doc)) => doc,
             Ok(None) => return,
             Err(error) => return done(Err(format!("Could not open image: {error}"))),
         };
         std::thread::spawn(move || {
-            done((|| {
-                let mut bytes = Vec::new();
-                std::io::Read::read_to_end(
-                    &mut std::io::Read::take(doc.file, 32 * 1024 * 1024),
-                    &mut bytes,
-                )
-                .map_err(|e| e.to_string())?;
-                let image = image::load_from_memory(&bytes)
-                    .map_err(|e| format!("Could not use picture: {e}"))?;
-                let image = if image.width().max(image.height()) > 1024 {
-                    image.resize(1024, 1024, image::imageops::FilterType::Triangle)
-                } else {
-                    image
-                };
-                let mut png = Vec::new();
-                image
-                    .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
-                    .map_err(|e| e.to_string())?;
-                Ok(PickedImage { image, png })
-            })());
+            done(mobile::read_image(doc.file).and_then(|bytes| mobile::picked_image(&bytes)));
         });
     })
 }
 
-/// Saves square `[x, y, side]` of picked photo as 128 px PNG profile picture, sent to friends.
-pub(crate) fn save_avatar(
-    directory: &Path,
-    image: &image::DynamicImage,
-    [x, y, side]: [u32; 3],
-) -> Result<(), String> {
-    let small = image.crop_imm(x, y, side.max(1), side.max(1)).resize_exact(
-        128,
-        128,
-        image::imageops::FilterType::Lanczos3,
-    );
-    let mut png = Vec::new();
-    small
-        .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
-        .map_err(|e| e.to_string())?;
-    let path = crate::sharing::transport::own_avatar_path(&directory.join("sharing"));
-    let partial = path.with_extension("tmp");
-    std::fs::write(&partial, png)
-        .and_then(|()| std::fs::rename(&partial, &path))
-        .map_err(|e| format!("Could not save picture: {e}"))
+/// Battery percentage for friends who see it; `None` when unknown.
+pub(crate) fn battery_percent() -> Option<u8> {
+    sharing::battery_percent().ok().flatten()
+}
+
+/// One-off notification, e.g. a friend entering an alert area.
+pub(crate) fn notify(id: i32, title: &str, text: &str) -> Result<(), String> {
+    notification::post(&notification::Notification {
+        id,
+        title: title.into(),
+        text: text.into(),
+        ..Default::default()
+    })
+    .map(drop)
 }
 
 pub(crate) fn share_text(text: &str) {
@@ -663,20 +561,6 @@ fn settle(directory: &Path) {
     }
 }
 
-/// Adaptive interval: slow when stationary, user's update interval while moving.
-fn share_interval(directory: &Path, speed: Option<f32>) -> Duration {
-    let moving = Duration::from_millis(
-        sharing::policy(directory)
-            .minimum_interval_ms
-            .clamp(1000, 600_000) as u64,
-    );
-    match speed {
-        Some(speed) if speed >= 5.0 => moving,
-        Some(speed) if speed >= 0.5 => moving.max(Duration::from_secs(30)),
-        _ => Duration::from_secs(300),
-    }
-}
-
 fn share_gps(directory: PathBuf, interval: Duration) {
     {
         let mut current = SHARE_GPS.lock().expect("sharing lock");
@@ -711,29 +595,23 @@ fn share_fix(directory: &Path, update: location::Update) {
         }
         _ => return,
     };
-    let Some(accuracy) = fix.accuracy_m else {
+    let reading = reading(&fix);
+    let Some(shared) = reading.sharing_fix() else {
         return;
     };
-    if fix.age > Duration::from_secs(120) {
-        return;
-    }
     sharing::fix(
-        crate::model::Fix {
-            point: crate::geo::Point {
-                lat: fix.lat,
-                lon: fix.lon,
-            },
-            timestamp_ms: fix.time_ms,
-            accuracy_m: f64::from(accuracy),
-        },
-        fix.speed.map(f64::from),
-        fix.bearing.map(f64::from),
+        shared,
+        reading.speed.map(f64::from),
+        reading.bearing.map(f64::from),
         false,
     );
     let interval = if crate::sharing::manager::now_ms() < FRESH_UNTIL.load(Ordering::Relaxed) {
         Duration::from_secs(1)
     } else {
-        share_interval(directory, fix.speed)
+        mobile::share_interval(
+            sharing::policy(directory).minimum_interval_ms,
+            reading.speed,
+        )
     };
     let changed = SHARE_GPS
         .lock()
@@ -755,14 +633,7 @@ fn command(directory: PathBuf, op: &str, payload: &str) {
     // Any command replaces the previous GPS watch.
     GPS.lock().expect("recorder lock").take();
     GPS_WAITING.store(false, Ordering::Relaxed);
-    let mut event = json!({"op": op, "timestamp_ms": now_ms()});
-    if op == "start" {
-        let category = serde_json::from_str::<Value>(payload)
-            .ok()
-            .and_then(|p| p["category_id"].as_u64())
-            .filter(|c| *c != 0);
-        event["category_id"] = json!(category);
-    }
+    let event = mobile::command_event(op, payload, now_ms());
     if let Err(error) = request(directory.clone(), event) {
         return fail(&directory, &error);
     }
@@ -804,55 +675,22 @@ fn fix(directory: &Path, update: location::Update) {
         location::Update::Disabled(_) => return,
         location::Update::Failed(error) => return interrupt(directory, &error),
     };
-    // Reject cached fixes delivered after starting or resuming GPS updates.
-    let Some(accuracy) = fix.accuracy_m else {
+    let reading = reading(&fix);
+    let Some(recorded) = reading.recording_fix() else {
         return;
     };
-    if fix.age > Duration::from_secs(15) {
-        return;
-    }
-    if accuracy <= 30.0 && GPS_WAITING.swap(false, Ordering::Relaxed) {
+    if recorded.accuracy_m <= 30.0 && GPS_WAITING.swap(false, Ordering::Relaxed) {
         status(directory, "");
     }
     sharing::fix(
-        crate::model::Fix {
-            point: crate::geo::Point {
-                lat: fix.lat,
-                lon: fix.lon,
-            },
-            timestamp_ms: fix.time_ms,
-            accuracy_m: f64::from(accuracy),
-        },
-        fix.speed.map(f64::from),
-        fix.bearing.map(f64::from),
+        recorded,
+        reading.speed.map(f64::from),
+        reading.bearing.map(f64::from),
         true,
     );
-    let event = json!({"op": "fix", "fix": {"lat": fix.lat, "lon": fix.lon,
-        "accuracy_m": accuracy, "timestamp_ms": fix.time_ms}});
-    match request(directory.to_owned(), event) {
-        Ok(result) => {
-            let meters = result["distance_m"].as_f64().unwrap_or(0.0);
-            let miles = std::fs::read_to_string(directory.join("units"))
-                .is_ok_and(|u| u.trim() == "imperial");
-            let distance = if miles {
-                format!("{:.2} mi", meters / 1609.344)
-            } else {
-                format!("{:.2} km", meters / 1000.0)
-            };
-            let gps = if accuracy > 30.0 {
-                " · weak GPS".to_owned()
-            } else {
-                format!(" · GPS ±{} m", accuracy.round())
-            };
-            let estimated = if result["estimated_distance_m"].as_f64().unwrap_or(0.0) > 0.0 {
-                " · includes inferred gaps"
-            } else {
-                ""
-            };
-            let _ = notification::post(&trip_notification(
-                directory,
-                &format!("{distance}{gps}{estimated}"),
-            ));
+    match mobile::record_fix(directory, &recorded) {
+        Ok(text) => {
+            let _ = notification::post(&trip_notification(directory, &text));
         }
         Err(error) => fail(directory, &error),
     }

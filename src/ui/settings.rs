@@ -64,10 +64,10 @@ pub fn Settings() -> impl IntoView {
                             Button(variant=ButtonVariant::Outline,class="restore",disabled=Signal::derive_local(move ||s.status().is_some()),on:click=move |_|if s.confirm_restore.get_untracked(){s.restore()}else{s.confirm_restore.set(true)}) {{move ||if s.confirm_restore.get(){"Confirm"}else{"Restore"}}}
                             Button(variant=ButtonVariant::Outline,on:click=move |_|s.export_gpx()) {"GPX"}
                         }
-                        if move ||cfg!(target_os="android") {
+                        if move ||cfg!(any(target_os="android",target_os="ios")) {
                             text(class="section-title") {"About"}
-                            Button(variant=ButtonVariant::Outline,on:click=move |_|s.open_settings()) {"Android app permissions"}
-                            UpdateControls()
+                            Button(variant=ButtonVariant::Outline,on:click=move |_|s.open_settings()) {{move ||if cfg!(target_os="ios"){"iOS app permissions"}else{"Android app permissions"}}}
+                            if move ||cfg!(target_os="android") {UpdateControls()}
                         }
                     }
                 }

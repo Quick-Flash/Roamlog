@@ -18,11 +18,14 @@ const HELP: &str = "Roamlog build tasks
   cargo xtask pre-commit              Format, then run all checks
   cargo xtask install-hooks           Enable repository Git pre-commit hook
   cargo xtask android [--release] [--demo]  Build signed ARM64 APK (default: debug)
+  cargo xtask ios [--release] [--device]  Build unsigned Roamlog.app (default: simulator)
 
 Build/run/test/check forward remaining arguments to Cargo.
 Android needs ANDROID_HOME, ANDROID_NDK_HOME, JDK 17+, Python 3, Bash,
 and Rust target aarch64-linux-android. See docs/building.md.
 APK output: target/<debug|release>/apk/roamlog[-demo].apk.
+iOS needs macOS with Xcode and Rust targets aarch64-apple-ios[-sim].
+App output: target/aarch64-apple-ios[-sim]/<debug|release>/Roamlog.app.
 No command installs apps or replaces trip data.";
 
 fn main() -> ExitCode {
@@ -96,6 +99,26 @@ fn dispatch(task: &str, args: &[String]) -> Result<(), String> {
                 .arg(if release { "release" } else { "debug" });
             // Explicit --demo wins over ambient build flags, keeping main/demo predictable.
             command.env("ROAMLOG_DEMO", if demo { "1" } else { "0" });
+            execute(command)
+        }
+        "ios" => {
+            let (mut release, mut device) = (false, false);
+            for arg in args {
+                match arg.as_str() {
+                    "--release" => release = true,
+                    "--device" => device = true,
+                    _ => {
+                        return Err(format!(
+                            "unsupported iOS argument: {arg}; use --release and/or --device"
+                        ));
+                    }
+                }
+            }
+            let mut command = Command::new("bash");
+            command
+                .arg("ios/package.sh")
+                .arg(if release { "release" } else { "debug" })
+                .arg(if device { "device" } else { "sim" });
             execute(command)
         }
         "help" | "--help" | "-h" if args.is_empty() => {

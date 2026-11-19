@@ -449,11 +449,11 @@ impl UiState {
 
     pub fn backup(self) {
         self.settings_open.set(false);
-        #[cfg(target_os = "android")]
-        if let Err(error) = crate::android::backup(self.directory.get_value()) {
+        #[cfg(any(target_os = "android", target_os = "ios"))]
+        if let Err(error) = crate::platform::backup(self.directory.get_value()) {
             self.message.set(error);
         }
-        #[cfg(not(target_os = "android"))]
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
         zgui::reactive::spawn_detached(async move {
             let path = self.directory.get_value().join("roamlog-backup.jsonl");
             let result = match self.request(json!({"op":"backup"})).await {
@@ -478,11 +478,11 @@ impl UiState {
         self.confirm_restore.set(false);
         self.settings_open.set(false);
         self.history_filter.set(TripFilter::All);
-        #[cfg(target_os = "android")]
-        if let Err(error) = crate::android::restore(self.directory.get_value()) {
+        #[cfg(any(target_os = "android", target_os = "ios"))]
+        if let Err(error) = crate::platform::restore(self.directory.get_value()) {
             self.message.set(error);
         }
-        #[cfg(not(target_os = "android"))]
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
         zgui::reactive::spawn_detached(async move {
             let directory = self.directory.get_value();
             let copied = blocking(move || {

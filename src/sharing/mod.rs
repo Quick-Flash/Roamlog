@@ -1,16 +1,18 @@
 //! Opt-in encrypted friend pairing and permission-controlled location sharing.
 
-#[cfg(all(target_os = "android", feature = "ui"))]
-pub mod android_app;
 #[cfg(target_os = "android")]
 mod android_friends;
 #[cfg(target_os = "android")]
 mod android_locations;
 #[cfg(target_os = "android")]
 mod android_probe;
+#[cfg(all(any(target_os = "android", target_os = "ios"), feature = "ui"))]
+pub mod app;
 pub mod groups;
 #[cfg(target_os = "android")]
 pub mod identity;
+#[cfg(all(target_os = "ios", feature = "ui"))]
+mod keychain;
 pub mod location;
 #[cfg(test)]
 #[path = "tests.rs"]

@@ -3,6 +3,9 @@ on:
   push:
   pull_request:
   workflow_dispatch:
+  # Nightly full iOS simulator scenario (schedules run on the default branch only).
+  schedule:
+    - cron: "0 7 * * *"
 permissions:
   contents: read
 jobs:
@@ -14,20 +17,140 @@ jobs:
         with:
           toolchain: nightly-2026-03-27
           components: rustfmt, clippy
+          targets: aarch64-apple-ios, aarch64-apple-ios-sim
       - name: Native build dependencies
         run: sudo apt-get update && sudo apt-get install -y build-essential pkg-config libfontconfig1-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-dev libxcb1-dev libxcursor-dev libxi-dev libxrandr-dev
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           key: checks
       - run: cargo xtask verify
+      # iOS compile errors on every push, without a Mac; ios job below links and runs it.
+      - name: Check iOS build
+        run: bash ios/check.sh
+
+  # Full simulator scenario (~25 min on macOS): nightly, or started by hand from the Actions tab.
+  ios:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: macos-latest
+    timeout-minutes: 60
+    env:
+      # Rust and C (ring, blake3) must target one iOS version, as ios/package.sh does.
+      IPHONEOS_DEPLOYMENT_TARGET: "17.0"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@2c76c034f9e32a5d6e2c104dc4df23a22476db04
+        with:
+          toolchain: nightly-2026-03-27
+          targets: aarch64-apple-ios-sim, aarch64-apple-ios
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          key: ios
+      # Same IPA path ios-release uses, checked on every push.
+      - name: Build device IPA
+        run: |
+          set -euo pipefail
+          cargo xtask ios --device
+          plutil -lint target/aarch64-apple-ios/debug/Roamlog.app/Info.plist
+          unzip -l target/aarch64-apple-ios/debug/roamlog.ipa | grep -E 'Payload/Roamlog.app/(Roamlog|Info.plist|AppIcon60x60@3x.png)$'
+          mkdir -p ios-out && unzip -l target/aarch64-apple-ios/debug/roamlog.ipa > ios-out/ipa-contents.txt
+      - name: Build simulator app
+        run: cargo xtask ios
+      - name: Boot simulator
+        run: |
+          set -euo pipefail
+          udid="$(xcrun simctl list devices available -j | python3 -c 'import json,sys; print(next(d["udid"] for r,ds in json.load(sys.stdin)["devices"].items() if "iOS" in r for d in ds if d["name"].startswith("iPhone")))')"
+          echo "UDID=$udid" >> "$GITHUB_ENV"
+          xcrun simctl boot "$udid"
+          xcrun simctl bootstatus "$udid" -b
+      - name: Install app with demo data
+        run: |
+          set -euo pipefail
+          xcrun simctl install "$UDID" target/aarch64-apple-ios-sim/debug/Roamlog.app
+          data="$(xcrun simctl get_app_container "$UDID" dev.traveler data)/Library/Application Support/roamlog"
+          mkdir -p "$data"
+          cp tests/fixtures/downtown.pmtiles "$data/basemap.pmtiles"
+          cargo run --locked --no-default-features -- "$data/trips.jsonl" < ios/seed-trips.jsonl > /dev/null
+      - name: Install idb
+        run: |
+          set -euo pipefail
+          brew tap facebook/fb
+          brew install facebook/fb/idb-companion
+          pipx install fb-idb
+      - name: Run UI scenario
+        run: |
+          set -euo pipefail
+          mkdir -p ios-out
+          # Companion first: starting it after the app left the home screen in front.
+          idb_companion --udid "$UDID" > ios-out/idb-companion.log 2>&1 &
+          # Companion loads simulator frameworks first (~25 s on CI) before it listens.
+          # No list-targets check: its slow describe makes the client drop the companion.
+          connected=0
+          for _ in $(seq 60); do idb connect localhost 10882 2>/dev/null && { connected=1; break; }; sleep 2; done
+          [ "$connected" = 1 ] || { echo "::error::idb companion never accepted a connection"; exit 1; }
+          # Location granted up front, so no permission prompt needs tapping.
+          xcrun simctl privacy "$UDID" grant location dev.traveler
+          # zgui latency trace (every loop wake, event, park), read back after the scenario.
+          trace="$(xcrun simctl get_app_container "$UDID" dev.traveler data)/tmp/latency.jsonl"
+          SIMCTL_CHILD_ZGUI_LATENCY="$trace" xcrun simctl launch --console-pty "$UDID" dev.traveler > ios-out/console.log 2>&1 &
+          running=1
+          ios/scenario.sh "$UDID" ios-out || running=0
+          xcrun simctl spawn "$UDID" launchctl list | grep dev.traveler > /dev/null || { echo "::error::app not running after scenario"; running=0; }
+          xcrun simctl terminate "$UDID" dev.traveler || true
+          cp "$trace" ios-out/ || true
+          [ "$running" = 1 ]
+      - name: Collect logs
+        if: always()
+        run: |
+          mkdir -p ios-out
+          xcrun simctl spawn "$UDID" log show --last 10m --style compact --predicate 'process == "Roamlog"' > ios-out/system.log 2>&1 || true
+          cp ~/Library/Logs/DiagnosticReports/Roamlog* ios-out/ 2>/dev/null || true
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: ios-simulator
+          path: ios-out/
+
+  # Unsigned IPA for SideStore, published with the APKs. No simulator run: a flaky scenario
+  # must not hold back releases; the ios job tests the same code on every push.
+  ios-release:
+    needs: checks
+    if: github.event_name != 'pull_request' && github.event_name != 'schedule' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: macos-latest
+    timeout-minutes: 60
+    env:
+      IPHONEOS_DEPLOYMENT_TARGET: "17.0"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@2c76c034f9e32a5d6e2c104dc4df23a22476db04
+        with:
+          toolchain: nightly-2026-03-27
+          targets: aarch64-apple-ios
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          key: ios-release
+      - name: Build unsigned IPA
+        run: |
+          set -euo pipefail
+          export ROAMLOG_VERSION_CODE="$((1000 + $(git rev-list --count HEAD)))"
+          cargo xtask ios --release --device
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ios-ipa
+          path: target/aarch64-apple-ios/release/roamlog.ipa
+          if-no-files-found: error
 
   android:
-    needs: checks
-    if: github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    needs: [checks, ios-release]
+    # Android releases even when the iOS build failed; the IPA is attached only when it built.
+    if: always() && needs.checks.result == 'success' && github.event_name != 'pull_request' && github.event_name != 'schedule' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
     runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:
       contents: write
+      # Reads the ios-release job's IPA artifact.
+      actions: read
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -60,6 +183,7 @@ jobs:
       - name: Build main and demo APKs
         env:
           ROAMLOG_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/28.2.13676358"
@@ -70,7 +194,10 @@ jobs:
           cargo xtask android --release --demo
           mkdir dist
           cp target/release/apk/roamlog.apk target/release/apk/roamlog-demo.apk dist/
-          (cd dist && sha256sum *.apk > SHA256SUMS)
+          if [ "${{ needs.ios-release.result }}" = success ]; then
+            gh run download "$GITHUB_RUN_ID" --name ios-ipa --dir dist
+          fi
+          (cd dist && sha256sum *.apk $(ls *.ipa 2> /dev/null) > SHA256SUMS)
           echo "RELEASE_CODE=$ROAMLOG_VERSION_CODE" >> "$GITHUB_ENV"
       - name: Keep APK artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -85,9 +212,26 @@ jobs:
         run: |
           set -euo pipefail
           tag="nightly-${RELEASE_CODE}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          printf 'Automatic ARM64 Android build from %s.\n\nMain: roamlog.apk. Isolated demo: roamlog-demo.apk.\nInstall over existing app; never uninstall to update.\n' "$GITHUB_SHA" > notes.md
+          printf 'Automatic ARM64 Android and iOS build from %s.\n\nMain: roamlog.apk. Isolated demo: roamlog-demo.apk.\nInstall over existing app; never uninstall to update.\n\niOS: roamlog.ipa (unsigned), installed with SideStore; see README.\n' "$GITHUB_SHA" > notes.md
           gh release create "$tag" dist/* --target "$GITHUB_SHA" --title "Roamlog build ${RELEASE_CODE}" --notes-file notes.md --prerelease --latest=false --draft
           gh release edit "$tag" --draft=false
+          echo "RELEASE_TAG=$tag" >> "$GITHUB_ENV"
+      - name: Point SideStore source at new IPA
+        if: needs.ios-release.result == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          base="https://github.com/$GH_REPO/releases/download"
+          python3 ios/source.py dist/roamlog.ipa "0.1.$RELEASE_CODE" "$RELEASE_CODE" \
+            "$base/$RELEASE_TAG/roamlog.ipa" "$base/sidestore/roamlog-source.json" \
+            "https://raw.githubusercontent.com/$GH_REPO/$GITHUB_SHA/assets/logo.png" > roamlog-source.json
+          # Fixed tag, so the source URL users add in SideStore never changes.
+          gh release view sidestore > /dev/null 2>&1 || gh release create sidestore \
+            --title "SideStore source" --prerelease --latest=false \
+            --notes "Add https://github.com/$GH_REPO/releases/download/sidestore/roamlog-source.json as a source in SideStore."
+          gh release upload sidestore roamlog-source.json --clobber
       - name: Remove signing key
         if: always()
         run: rm -f "$RUNNER_TEMP/roamlog.keystore"

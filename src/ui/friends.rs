@@ -4,7 +4,7 @@
 use super::place_alerts::PlaceAlertsProps;
 use super::state::{UiState, now_ms};
 use crate::sharing::{
-    android_app::{self as sharing, PairStep, Pairing},
+    app::{self as sharing, PairStep, Pairing},
     groups::Policy,
     location::UpdatePolicy,
     manager::Mode,
@@ -287,9 +287,9 @@ fn change(
             Err(error) => s.message.set(format!("Sharing: {error}")),
         }
         let outcome = if restart {
-            crate::android::sharing_changed(directory)
+            crate::platform::sharing_changed(directory)
         } else {
-            crate::android::nudge_sharing(&directory);
+            crate::platform::nudge_sharing(&directory);
             Ok(())
         };
         if let Err(error) = outcome {
@@ -383,7 +383,7 @@ pub fn Friends() -> impl IntoView {
                 qr.set_value(None);
                 qr_url.set(None);
                 // Pairing endpoint closed; let service rebind its node.
-                if let Err(error) = crate::android::sharing_changed(s.directory.get_value()) {
+                if let Err(error) = crate::platform::sharing_changed(s.directory.get_value()) {
                     s.message.set(error);
                 }
                 reload();
@@ -413,7 +413,7 @@ pub fn Friends() -> impl IntoView {
         }
         let directory = s.directory.get_value();
         let _ = std::fs::write(directory.join("sharing-name"), &display);
-        crate::android::suspend_sharing(&directory);
+        crate::platform::suspend_sharing(&directory);
         join_access.set(Permission::TripsOnly);
         step.set(PairStep::Starting);
         pairing.set_value(Some(Pairing::start(directory, display, link, group)));
@@ -423,7 +423,7 @@ pub fn Friends() -> impl IntoView {
         qr.set_value(None);
         qr_url.set(None);
         step.set(PairStep::Idle);
-        if let Err(error) = crate::android::sharing_changed(s.directory.get_value()) {
+        if let Err(error) = crate::platform::sharing_changed(s.directory.get_value()) {
             s.message.set(error);
         }
     };
@@ -638,7 +638,7 @@ pub fn Friends() -> impl IntoView {
                             Input(value=name,label="Your name",placeholder="Your name (friends see it)")
                             row(class="row-actions") {
                                 Button(class="invite-friend",on:click=move |_|begin(None,None)) {"Show my code"}
-                                Button(variant=ButtonVariant::Outline,class="scan-invite",on:click=move |_|{if let Err(error)=crate::android::scan_invite(s.directory.get_value()){s.message.set(error)}}) {"Scan theirs"}
+                                Button(variant=ButtonVariant::Outline,class="scan-invite",on:click=move |_|{if let Err(error)=crate::platform::scan_invite(s.directory.get_value()){s.message.set(error)}}) {"Scan theirs"}
                             }
                             row(class="create-row") {
                                 Input(value=s.invite_link,label="Invitation link",placeholder="Or paste roamlog://pair/… link",class="grow")
@@ -658,7 +658,7 @@ pub fn Friends() -> impl IntoView {
                                     {zgui::elements::image().class("qr-image").src(Signal::derive_local(move ||qr_url.get())).alt(Some("Invitation QR code".to_string())).into_view()}
                                 }
                             }
-                            Button(variant=ButtonVariant::Outline,class="share-invite",on:click=move |_|{if let PairStep::Invite{link,..}=step.get_untracked(){crate::android::share_text(&link)}}) {"Share link"}
+                            Button(variant=ButtonVariant::Outline,class="share-invite",on:click=move |_|{if let PairStep::Invite{link,..}=step.get_untracked(){crate::platform::share_text(&link)}}) {"Share link"}
                         }
                         if move ||matches!(step.get(),PairStep::Confirm{..}) {
                             text(class="pair-name") {{move ||match step.get(){PairStep::Confirm{name,group:Some(group),joining:true,..}=>format!("Pair with {name} and join {group}?"),PairStep::Confirm{name,group:Some(group),..}=>format!("Pair with {name} and add them to {group}?"),PairStep::Confirm{name,..}=>format!("Pair with {name}?"),_=>String::new()}}}
@@ -1388,7 +1388,7 @@ fn YouCard(confirm: RwSignal<Option<String>, LocalStorage>) -> impl IntoView {
     let reset = move || {
         let directory = s.directory.get_value();
         zgui::reactive::spawn_detached(async move {
-            match blocking(move || crate::android::reset_identity(&directory)).await {
+            match blocking(move || crate::platform::reset_identity(&directory)).await {
                 Ok(()) => s
                     .message
                     .set("New sharing identity. Pair with friends again.".into()),
@@ -1431,13 +1431,13 @@ fn ProfileCard(name: RwSignal<String, LocalStorage>) -> impl IntoView {
     };
     let size = move || photo.with(|p| p.as_ref().map_or([1.; 2], |p| p.1));
     let pick = move || {
-        if let Err(error) = crate::android::pick_avatar() {
+        if let Err(error) = crate::platform::pick_avatar() {
             s.message.set(error);
         }
     };
     // Picker result arrives after UI remounts on return, so poll for it.
     let poll = set_interval(std::time::Duration::from_millis(300), move || {
-        let result = crate::android::PICKED_AVATAR
+        let result = crate::sharing::app::PICKED_AVATAR
             .lock()
             .ok()
             .and_then(|mut p| p.take());
@@ -1477,7 +1477,8 @@ fn ProfileCard(name: RwSignal<String, LocalStorage>) -> impl IntoView {
         busy.set(true);
         spawn_local(async move {
             let saved =
-                blocking(move || crate::android::save_avatar(&directory, &image, square)).await;
+                blocking(move || crate::sharing::app::save_avatar(&directory, &image, square))
+                    .await;
             busy.set(false);
             match saved {
                 Ok(()) => {
@@ -1644,7 +1645,7 @@ pub fn FriendTrips() -> impl IntoView {
             if created.is_err() {
                 s.message.set("Could not request trips".into());
             }
-            crate::android::nudge_sharing(&s.directory.get_value());
+            crate::platform::nudge_sharing(&s.directory.get_value());
         }
     });
     on_cleanup_local(move || drop(requested));

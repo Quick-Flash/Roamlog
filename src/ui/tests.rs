@@ -121,6 +121,15 @@ fn zgui_controls_follow_trip_state() {
     click("map-chip");
     click("layer-satellite");
     assert!(s.satellite.get_untracked());
+    assert_eq!(
+        s.imagery.get_untracked(),
+        crate::mapping::tiles::Provider::EsriImagery
+    );
+    click("imagery-google");
+    assert_eq!(
+        s.imagery.get_untracked(),
+        crate::mapping::tiles::Provider::GoogleSatellite
+    );
     assert!(s.show_gps.get_untracked());
     assert!(s.show_roads.get_untracked());
     click("show-gps");
@@ -140,6 +149,8 @@ fn zgui_controls_follow_trip_state() {
             && std::fs::read_to_string(directory.path().join("show-gps")).is_ok_and(|v| v == "off")
             && std::fs::read_to_string(directory.path().join("show-roads"))
                 .is_ok_and(|v| v == "off")
+            && std::fs::read_to_string(directory.path().join("imagery"))
+                .is_ok_and(|v| v == "google-satellite")
         {
             break;
         }
@@ -150,6 +161,10 @@ fn zgui_controls_follow_trip_state() {
         .with(|| UiState::new(directory.path().to_path_buf()));
     assert!(!restored.dark.get_untracked());
     assert!(restored.satellite.get_untracked());
+    assert_eq!(
+        restored.imagery.get_untracked(),
+        crate::mapping::tiles::Provider::GoogleSatellite
+    );
     assert!(!restored.show_gps.get_untracked());
     assert!(!restored.show_roads.get_untracked());
     click("show-gps");
