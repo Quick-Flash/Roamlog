@@ -368,3 +368,12 @@
 .stack-avatar { width: 32px; height: 32px; border-radius: 16px; margin-left: -10px; border: 2px solid var(--zui-color-muted); box-sizing: border-box; font-size: 13px; }
 .stack-avatar.stack-live { border-color: #16a34a; }
 .stack-more { font-size: 13px; font-weight: 600; color: var(--zui-color-muted-foreground); }
+/* Profile page: big picture, and square crop with circle guide. */
+.friends-sheet .share-card .profile-entry { min-height: 56px; padding: 4px 6px; gap: 10px; justify-content: flex-start; }
+.profile-card { align-items: center; gap: 12px; padding: 8px 0; }
+.profile-avatar { width: 112px; height: 112px; border-radius: 56px; overflow: hidden; align-items: center; justify-content: center; background: var(--zui-color-muted); font-size: 44px; font-weight: 700; }
+.crop-frame { position: relative; overflow: hidden; align-self: center; border-radius: 12px; background: #000; }
+.crop-image { position: absolute; left: 0; top: 0; }
+.crop-image .friend-avatar-image { object-fit: fill; }
+.crop-ring { position: absolute; left: 0; top: 0; width: 100%; height: 100%; border-radius: 50%; box-shadow: 0 0 0 200px rgba(0,0,0,.5); border: 2px solid #ffffff; box-sizing: border-box; pointer-events: none; }
+.crop-zoom { padding: 4px 14px; }

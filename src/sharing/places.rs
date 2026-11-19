@@ -397,6 +397,10 @@ impl Place {
                 friend.name,
                 now.saturating_sub(fix.timestamp_ms) / 1000
             ));
+            // Old fix never becomes fresh: log it once, not on every check.
+            if fix.timestamp_ms <= now {
+                state.last_ms = fix.timestamp_ms;
+            }
             return None;
         }
         let point = Point {

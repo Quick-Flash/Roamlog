@@ -429,6 +429,7 @@ pub fn Friends() -> impl IntoView {
     };
     let set_mode = move |mode: Mode| change(s, loaded, true, move |m| m.set_mode(mode));
     let options_open = RwSignal::new_local(false);
+    let profile_open = s.profile_open;
     let direct_access = RwSignal::new_local(Permission::Off);
     let invite_until = RwSignal::new_local(None::<u64>);
     let invite_clock = zgui::reactive::RenderEffect::new(move |_| {
@@ -461,10 +462,12 @@ pub fn Friends() -> impl IntoView {
     let deep_link = zgui::reactive::RenderEffect::new(move |_| {
         if s.friends_open.get() && detail.with_untracked(Option::is_some) {
             options_open.set(false);
+            profile_open.set(false);
             groups_open.set(false);
         }
         if !s.friends_open.get() {
             s.profile_from_map.set_value(false);
+            profile_open.set(false);
         }
     });
     on_cleanup_local(move || drop(deep_link));
@@ -536,6 +539,8 @@ pub fn Friends() -> impl IntoView {
             detail.set(None);
         } else if options_open.get_untracked() {
             options_open.set(false);
+        } else if profile_open.get_untracked() {
+            profile_open.set(false);
         } else if groups_open.get_untracked() {
             groups_open.set(false);
         } else {
@@ -571,6 +576,8 @@ pub fn Friends() -> impl IntoView {
                 .unwrap_or_else(|| "Friend".into())
         } else if options_open.get() {
             "Sharing options".into()
+        } else if profile_open.get() {
+            "Your profile".into()
         } else if groups_open.get() {
             "Groups".into()
         } else {
@@ -582,6 +589,7 @@ pub fn Friends() -> impl IntoView {
             && idle()
             && detail.with(Option::is_none)
             && !options_open.get()
+            && !profile_open.get()
             && !groups_open.get()
     };
     let timer_text = move || {
@@ -747,7 +755,10 @@ pub fn Friends() -> impl IntoView {
                                     Signal::derive_local(move ||loaded.with(|l|l.as_ref().is_some_and(|l|l.share_battery))),
                                     move |enabled|change(s,loaded,false,move |m|m.set_share_battery(enabled))))
                             }
-                            YouCard(name=name,edit=edit,confirm=confirm)
+                            YouCard(confirm=confirm)
+                        } else {
+                        if move ||profile_open.get() {
+                            ProfileCard(name=name)
                         } else {
                         if move ||groups_open.get() {
                             for group in move ||groups(),key=|g|g.clone() {
@@ -785,12 +796,14 @@ pub fn Friends() -> impl IntoView {
                             }
                         } else {
                             column(class="share-card") {
-                                row(class="page-heading") {
+                                // Whole row opens your profile: name and picture friends see.
+                                Button(variant=ButtonVariant::Ghost,class="profile-entry",a11y:label="Your profile",on:click=move |_|profile_open.set(true)) {
                                     {friend_avatar("me".into(),name.get_untracked(),mode()!=Mode::Off)}
                                     column(class="grow") {
-                                        text(class="friend-name") {{move ||match mode(){Mode::Off=>"Sharing off",Mode::TripsOnly=>"Sharing during trips",Mode::Always=>"Sharing always"}}}
-                                        text(class="muted") {{move ||{let display = name.get();let display = if display.trim().is_empty(){"You".into()}else{display};timer_text().map_or(display.clone(),|timer|format!("{display} · {timer}"))}}}
+                                        text(class="friend-name") {{move ||{let n=name.get();if n.trim().is_empty(){"Set your name and picture".into()}else{n}}}}
+                                        text(class="muted") {{move ||{let state=match mode(){Mode::Off=>"Sharing off",Mode::TripsOnly=>"Sharing during trips",Mode::Always=>"Sharing always"};timer_text().map_or(state.to_string(),|timer|format!("{state} · {timer}"))}}}
                                     }
+                                    text(class="muted") {"Profile ›"}
                                 }
                     row(class="segmented") {
                         Button(variant=ButtonVariant::Ghost,class:seg-on=move ||mode()==Mode::Off,class="share-off",on:click=move |_|set_mode(Mode::Off)) {"Off"}
@@ -845,7 +858,8 @@ pub fn Friends() -> impl IntoView {
                                 }
                             }
                             }
-                        } } } }
+                        } }
+                        } } }
                     }
                 }
             }
@@ -1091,10 +1105,10 @@ fn FriendRow(
                 }
                 row(class="page-heading") {
                     text(class="section-title grow") {{move ||alert_label.get_value()}}
-                    Button(variant=ButtonVariant::Ghost,a11y:label="Add alert area for friend",on:click=move |_|{
+                    Button(variant=ButtonVariant::Outline,class="add-alert",a11y:label="Add alert area for friend",on:click=move |_|{
                         s.place_peer.set(Some(alert_peer.get_value()));
                         s.places_open.set(true);
-                    }) {"+ Add"}
+                    }) {"+ Add alert"}
                 }
                 if move ||!alert_names().is_empty() {
                     // Each area opens its own page; whole set can be viewed on the map.
@@ -1347,11 +1361,7 @@ fn GroupMemberItem(
 }
 
 #[component]
-fn YouCard(
-    name: RwSignal<String, LocalStorage>,
-    edit: Edit,
-    confirm: RwSignal<Option<String>, LocalStorage>,
-) -> impl IntoView {
+fn YouCard(confirm: RwSignal<Option<String>, LocalStorage>) -> impl IntoView {
     let s = UiState::current();
     let interval =
         RwSignal::new_local(sharing::policy(&s.directory.get_value()).minimum_interval_ms / 1000);
@@ -1375,22 +1385,6 @@ fn YouCard(
             }
         });
     };
-    let pick = move || {
-        if let Err(error) = crate::android::pick_avatar(s.directory.get_value()) {
-            s.message.set(error);
-        }
-    };
-    let chosen = Callback::new(move |item: &'static str| match item {
-        "picture" => pick(),
-        "no_picture" => {
-            let _ = std::fs::remove_file(crate::sharing::transport::own_avatar_path(
-                &s.directory.get_value().join("sharing"),
-            ));
-            s.reload_own_avatar();
-        }
-        "name" => edit.start("me", &name.get_untracked()),
-        _ => edit.start("me", &name.get_untracked()),
-    });
     let reset = move || {
         let directory = s.directory.get_value();
         zgui::reactive::spawn_detached(async move {
@@ -1409,31 +1403,169 @@ fn YouCard(
                 Button(variant=ButtonVariant::Ghost,class:seg-on=move ||interval.get()==seconds,on:click=move |_|set_interval_s(seconds)) {{format!("{seconds} s")}}
             }
         }
-        text(class="section-title") {"Profile"}
-        row(class="friend-line you-row") {
-            Button(variant=ButtonVariant::Ghost,class="you-avatar",on:click=move |_|pick(),a11y:label="Choose your picture") {
-                if move ||s.own_avatar.get().is_some() {
-                    box(class="friend-avatar settings-avatar") {
-                        {zgui::elements::image().class("friend-avatar-image").src(Signal::derive_local(move ||s.own_avatar.get())).alt(Some("Your picture".to_string())).into_view()}
-                    }
-                }
-                if move ||s.own_avatar.get().is_none() {
-                    box(class="settings-avatar avatar-empty") {Icon(icon=PLUS)}
-                }
-            }
-            column(class="friend-text") {
-                text(class="friend-name") {{move ||{let n=name.get();if n.trim().is_empty(){"Set your name".to_string()}else{n}}}}
-                text(class="muted small") {{move ||"Name and picture friends see".to_string()}}
-            }
-            RowMenu(label="Your profile and sharing options".to_string(),items=vec![("picture","Choose picture"),("no_picture","Remove picture"),("name","Change name")],chosen=chosen)
-        }
-        {edit.field("me".to_string(), move |value: String| {
-            if std::fs::write(s.directory.get_value().join("sharing-name"), &value).is_ok() {
-                name.set(value);
-            }
-        })}
         Button(variant=ButtonVariant::Outline,class="danger-text",on:click=move |_|confirm.set(Some("reset:me".into()))) {"Reset sharing identity…"}
         {confirm_line(confirm,"reset:me".to_string(),"Reset identity? All friends and groups are removed; everyone pairs again.".to_string(),reset)}
+    }
+}
+
+/// Your name and picture as friends see them. A picked photo opens a square crop first.
+#[component]
+fn ProfileCard(name: RwSignal<String, LocalStorage>) -> impl IntoView {
+    /// Crop frame side, px.
+    const FRAME: f64 = 260.;
+    let s = UiState::current();
+    let draft = RwSignal::new_local(name.get_untracked());
+    // Photo being cropped: full image, its shown copy, and size in px.
+    let picked = StoredValue::new_local(None::<(image::DynamicImage, zgui_image::ImageBytes)>);
+    let photo = RwSignal::new_local(None::<(String, [f64; 2])>);
+    // Crop center in photo px, and zoom (1 = photo's short side fills frame).
+    let center = RwSignal::new_local([0.; 2]);
+    let zoom = RwSignal::new_local(1.);
+    let drag = StoredValue::new_local(None::<(u64, [f64; 2])>);
+    let busy = RwSignal::new_local(false);
+    let scale_of = |[w, h]: [f64; 2], zoom: f64| FRAME / w.min(h) * zoom;
+    // Keeps frame inside photo.
+    let clamp = move |[x, y]: [f64; 2], size: [f64; 2], zoom: f64| {
+        let half = FRAME / 2. / scale_of(size, zoom);
+        [x.clamp(half, size[0] - half), y.clamp(half, size[1] - half)]
+    };
+    let size = move || photo.with(|p| p.as_ref().map_or([1.; 2], |p| p.1));
+    let pick = move || {
+        if let Err(error) = crate::android::pick_avatar() {
+            s.message.set(error);
+        }
+    };
+    // Picker result arrives after UI remounts on return, so poll for it.
+    let poll = set_interval(std::time::Duration::from_millis(300), move || {
+        let result = crate::android::PICKED_AVATAR
+            .lock()
+            .ok()
+            .and_then(|mut p| p.take());
+        match result {
+            Some(Ok(picked_image)) => {
+                let size = [
+                    f64::from(picked_image.image.width()),
+                    f64::from(picked_image.image.height()),
+                ];
+                let shown = zgui_image::ImageBytes::new(picked_image.png);
+                photo.set(Some((shown.url(), size)));
+                picked.set_value(Some((picked_image.image, shown)));
+                zoom.set(1.);
+                center.set([size[0] / 2., size[1] / 2.]);
+            }
+            Some(Err(error)) => s.message.set(error),
+            None => {}
+        }
+    });
+    on_cleanup_local(move || drop(poll));
+    let close_crop = move || {
+        photo.set(None);
+        picked.set_value(None);
+    };
+    let use_crop = move || {
+        let Some(image) = picked.with_value(|p| p.as_ref().map(|p| p.0.clone())) else {
+            return;
+        };
+        let half = FRAME / 2. / scale_of(size(), zoom.get_untracked());
+        let [x, y] = center.get_untracked();
+        let square = [
+            (x - half).max(0.) as u32,
+            (y - half).max(0.) as u32,
+            (2. * half) as u32,
+        ];
+        let directory = s.directory.get_value();
+        busy.set(true);
+        spawn_local(async move {
+            let saved =
+                blocking(move || crate::android::save_avatar(&directory, &image, square)).await;
+            busy.set(false);
+            match saved {
+                Ok(()) => {
+                    close_crop();
+                    s.reload_own_avatar();
+                    s.message
+                        .set("Picture saved; friends see it within 30 minutes.".into());
+                }
+                Err(error) => s.message.set(error),
+            }
+        });
+    };
+    let save_name = move || {
+        let value = draft.get_untracked().trim().to_owned();
+        if !value.is_empty()
+            && std::fs::write(s.directory.get_value().join("sharing-name"), &value).is_ok()
+        {
+            name.set(value);
+            s.message.set("Name saved.".into());
+        }
+    };
+    view! {
+        if move ||photo.with(Option::is_some) {
+            text(class="section-title") {"Crop picture"}
+            text(class="muted") {"Drag to move · slide to zoom. Friends see the circle."}
+            box(class="crop-frame",style:width=format!("{FRAME}px"),style:height=format!("{FRAME}px"),
+                on:pointer_down=move |ev|{ev.capture_pointer();drag.set_value(Some((ev.id.raw(),[f64::from(ev.position.x.0),f64::from(ev.position.y.0)])));},
+                on:pointer_move=move |ev|{
+                    let at=[f64::from(ev.position.x.0),f64::from(ev.position.y.0)];
+                    let Some(last)=drag.with_value(|d|d.filter(|d|d.0==ev.id.raw()).map(|d|d.1)) else {return;};
+                    drag.set_value(Some((ev.id.raw(),at)));
+                    let size=photo.with_untracked(|p|p.as_ref().map_or([1.;2],|p|p.1));
+                    let zoom=zoom.get_untracked();
+                    let k=scale_of(size,zoom);
+                    center.update(|c|*c=clamp([c[0]-(at[0]-last[0])/k,c[1]-(at[1]-last[1])/k],size,zoom));
+                },
+                on:pointer_up=move |ev|{ev.release_pointer();drag.set_value(None);},
+                on:pointer_cancel=move |ev|{ev.release_pointer();drag.set_value(None);}) {
+                box(class="crop-image",
+                    style:width=move ||Some(format!("{}px",size()[0]*scale_of(size(),zoom.get()))),
+                    style:height=move ||Some(format!("{}px",size()[1]*scale_of(size(),zoom.get()))),
+                    style:transform=move ||{
+                        let k=scale_of(size(),zoom.get());
+                        let [x,y]=center.get();
+                        Some(format!("translate({}px, {}px)",FRAME/2.-x*k,FRAME/2.-y*k))
+                    }) {
+                    {zgui::elements::image().class("friend-avatar-image").src(Signal::derive_local(move ||photo.with(|p|p.as_ref().map(|p|p.0.clone())))).into_view()}
+                }
+                box(class="crop-ring") {}
+            }
+            // Padding keeps the thumb inside the scroll area at both ends.
+            column(class="crop-zoom") {
+            Slider(value=Binding::controlled(Signal::derive_local(move ||zoom.get()),move |z:f64|{
+                    zoom.set(z);
+                    let size=photo.with_untracked(|p|p.as_ref().map_or([1.;2],|p|p.1));
+                    center.update(|c|*c=clamp(*c,size,z));
+                }),min=1.0,max=4.0,step=0.05,label="Zoom")
+            }
+            row(class="actions") {
+                Button(variant=ButtonVariant::Outline,on:click=move |_|close_crop()) {"Cancel"}
+                Button(class="crop-save",disabled=Signal::derive_local(move ||busy.get()),on:click=move |_|use_crop()) {"Use picture"}
+            }
+        } else {
+            column(class="profile-card") {
+                row(class="profile-avatar") {
+                    if move ||s.own_avatar.with(Option::is_some) {
+                        {zgui::elements::image().class("friend-avatar-image").src(Signal::derive_local(move ||s.own_avatar.get())).alt(Some("Your picture".to_string())).into_view()}
+                    } else {
+                        text {{move ||name.with(|n|n.trim().chars().next().map(|c|c.to_uppercase().to_string()).unwrap_or_else(||"?".into()))}}
+                    }
+                }
+                row(class="actions") {
+                    Button(class="choose-picture",on:click=move |_|pick()) {{move ||if s.own_avatar.with(Option::is_some) {"Change picture"} else {"Choose picture"}}}
+                    if move ||s.own_avatar.with(Option::is_some) {
+                        Button(variant=ButtonVariant::Outline,class="no-picture",on:click=move |_|{
+                            let _ = std::fs::remove_file(crate::sharing::transport::own_avatar_path(&s.directory.get_value().join("sharing")));
+                            s.reload_own_avatar();
+                        }) {"No picture"}
+                    }
+                }
+            }
+            text(class="section-title") {"Name"}
+            row(class="create-row") {
+                Input(value=draft,label="Your name",placeholder="Your name (friends see it)",class="grow")
+                Button(class="save-name",disabled=Signal::derive_local(move ||draft.with(|d|d.trim().is_empty()||d.trim()==name.with(|n|n.trim().to_owned()))),on:click=move |_|save_name()) {"Save"}
+            }
+            text(class="muted") {"Friends see your name and picture on their map. Changes reach them within 30 minutes."}
+        }
     }
 }
 

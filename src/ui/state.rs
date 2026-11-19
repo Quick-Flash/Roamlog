@@ -137,6 +137,9 @@ pub struct UiState {
     pub map_friend_selected: RwSignal<Option<String>, LocalStorage>,
     /// Profile opened from map card: Back returns to map.
     pub profile_from_map: StoredValue<bool, LocalStorage>,
+    /// Your profile page in Friends; kept here so it survives the photo picker.
+    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+    pub profile_open: RwSignal<bool, LocalStorage>,
     /// Map setup screen for a new or edited area (saved or alert), when open.
     pub setup: RwSignal<Option<Setup>, LocalStorage>,
     /// Circle kept while setup switches to a drawn shape, restored on switching back.
@@ -275,6 +278,7 @@ impl UiState {
             terrain_enabled: RwSignal::new_local(false),
             map_friend_selected: RwSignal::new_local(None),
             profile_from_map: StoredValue::new_local(false),
+            profile_open: RwSignal::new_local(false),
             setup: RwSignal::new_local(None),
             setup_circle: StoredValue::new_local(None),
             editing_circle: RwSignal::new_local(None),

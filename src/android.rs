@@ -426,50 +426,70 @@ pub(crate) fn scan_invite(directory: PathBuf) -> Result<(), String> {
     })
 }
 
-/// Profile picture: center square of picked photo, 128 px PNG, sent to friends.
-pub(crate) fn pick_avatar(directory: PathBuf) -> Result<(), String> {
+/// Picked photo for the crop step: shrunk so longer side is at most 1024 px.
+pub(crate) struct PickedImage {
+    pub image: image::DynamicImage,
+    /// PNG of `image`, for showing it while cropping.
+    pub png: Vec<u8>,
+}
+
+/// Photo picked for profile picture, for the UI's crop step.
+pub(crate) static PICKED_AVATAR: Mutex<Option<Result<PickedImage, String>>> = Mutex::new(None);
+
+/// Opens image picker; picked photo lands in `PICKED_AVATAR`.
+pub(crate) fn pick_avatar() -> Result<(), String> {
     document::open("image/*", move |picked| {
+        let done = |result| *PICKED_AVATAR.lock().expect("avatar lock") = Some(result);
         let doc = match picked {
             Ok(Some(doc)) => doc,
             Ok(None) => return,
-            Err(error) => return status(&directory, &format!("Could not open image: {error}")),
+            Err(error) => return done(Err(format!("Could not open image: {error}"))),
         };
         std::thread::spawn(move || {
-            let saved = (|| -> Result<(), String> {
+            done((|| {
                 let mut bytes = Vec::new();
                 std::io::Read::read_to_end(
                     &mut std::io::Read::take(doc.file, 32 * 1024 * 1024),
                     &mut bytes,
                 )
                 .map_err(|e| e.to_string())?;
-                let image = image::load_from_memory(&bytes).map_err(|e| e.to_string())?;
-                let side = image.width().min(image.height());
-                let square = image.crop_imm(
-                    (image.width() - side) / 2,
-                    (image.height() - side) / 2,
-                    side,
-                    side,
-                );
-                let small = square.resize_exact(128, 128, image::imageops::FilterType::Lanczos3);
+                let image = image::load_from_memory(&bytes)
+                    .map_err(|e| format!("Could not use picture: {e}"))?;
+                let image = if image.width().max(image.height()) > 1024 {
+                    image.resize(1024, 1024, image::imageops::FilterType::Triangle)
+                } else {
+                    image
+                };
                 let mut png = Vec::new();
-                small
+                image
                     .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
                     .map_err(|e| e.to_string())?;
-                let path = crate::sharing::transport::own_avatar_path(&directory.join("sharing"));
-                let partial = path.with_extension("tmp");
-                std::fs::write(&partial, png)
-                    .and_then(|()| std::fs::rename(&partial, &path))
-                    .map_err(|e| e.to_string())
-            })();
-            status(
-                &directory,
-                &saved.map_or_else(
-                    |e| format!("Could not use picture: {e}"),
-                    |()| "Profile picture saved; friends see it within 30 minutes.".into(),
-                ),
-            );
+                Ok(PickedImage { image, png })
+            })());
         });
     })
+}
+
+/// Saves square `[x, y, side]` of picked photo as 128 px PNG profile picture, sent to friends.
+pub(crate) fn save_avatar(
+    directory: &Path,
+    image: &image::DynamicImage,
+    [x, y, side]: [u32; 3],
+) -> Result<(), String> {
+    let small = image.crop_imm(x, y, side.max(1), side.max(1)).resize_exact(
+        128,
+        128,
+        image::imageops::FilterType::Lanczos3,
+    );
+    let mut png = Vec::new();
+    small
+        .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+        .map_err(|e| e.to_string())?;
+    let path = crate::sharing::transport::own_avatar_path(&directory.join("sharing"));
+    let partial = path.with_extension("tmp");
+    std::fs::write(&partial, png)
+        .and_then(|()| std::fs::rename(&partial, &path))
+        .map_err(|e| format!("Could not save picture: {e}"))
 }
 
 pub(crate) fn share_text(text: &str) {

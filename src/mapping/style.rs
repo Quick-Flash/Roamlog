@@ -172,7 +172,7 @@ pub const STYLES: [Style; 26] = [
     line(0x8BD3E0, 0x003636, RIVER),
     Style {
         light: 0xC9C8BB,
-        dark: 0x3B3B3B,
+        dark: 0x1F1F1F,
         paint: Paint::Fill {
             min_zoom: 14.0,
             alpha: &[(14, 0.5), (15, 0.6), (16, 0.8), (17, 1.0)],

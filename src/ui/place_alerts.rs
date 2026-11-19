@@ -510,9 +510,6 @@ pub fn PlaceAlerts(open: RwSignal<bool, LocalStorage>) -> impl IntoView {
                 row(class="page-heading") {
                     Button(variant=ButtonVariant::Ghost,class="alert-back page-back",a11y:label="Back",on:click=move |_|back()) {"‹"}
                     text(class="page-title grow") {{move ||selected.with(|p|p.as_ref().map(|p|p.name.clone())).unwrap_or_else(||"Alert areas".into())}}
-                    if move ||area.with(Option::is_none) {
-                        Button(class="new-alert-area",on:click=move |_|new_area()) {"+ New"}
-                    }
                 }
                 scroll(class="page-scroll") {
                     column(class="list-body") {
@@ -531,21 +528,24 @@ pub fn PlaceAlerts(open: RwSignal<bool, LocalStorage>) -> impl IntoView {
                             }
                             row(class="page-heading") {
                                 text(class="list-title grow") {"Alerts"}
-                                Button(variant=ButtonVariant::Outline,disabled=Signal::derive_local(move ||records.with(|r|r.0.is_empty()&&r.1.is_empty())),on:click=move |_|new_rule()) {"+ Add alert"}
+                                Button(class="add-alert",disabled=Signal::derive_local(move ||records.with(|r|r.0.is_empty()&&r.1.is_empty())),on:click=move |_|new_rule()) {"+ Add alert"}
                             }
                             if move || !saved.with(|list|list.iter().any(|p|Some(p.area())==area.get()&&!p.no_rule)) {
                                 text(class="muted") {"No alerts yet."}
                             }
                         } else {
                             text(class="muted") {"Get notified when friends arrive at or leave an area."}
+                            // Same actions row as Areas: create first, then view on map.
+                            row(class="actions") {
+                                Button(class="new-alert-area",on:click=move |_|new_area()) {"+ New alert area"}
+                                Button(variant=ButtonVariant::Outline,class="show-areas",disabled=Signal::derive_local(move ||saved.with(Vec::is_empty)),on:click=move |_|show_on_map(s,s.place_peer.get_untracked())) {
+                                    {move ||if s.place_peer.with(Option::is_some) {"Show these on map"} else {"Show all on map"}}
+                                }
+                            }
                             if move ||saved.with(Vec::is_empty) {
                                 column(class="alert-card") {
                                     text(class="list-title") {"No alert areas yet"}
-                                    text(class="muted") {"Tap + New, place a circle or draw a shape on the map, then choose which friends to watch."}
-                                }
-                            } else {
-                                Button(variant=ButtonVariant::Outline,class="wide show-areas",on:click=move |_|show_on_map(s,s.place_peer.get_untracked())) {
-                                    {move ||if s.place_peer.with(Option::is_some) {"Show these areas on map"} else {"Show all areas on map"}}
+                                    text(class="muted") {"Tap + New alert area, place a circle or draw a shape on the map, then choose which friends to watch."}
                                 }
                             }
                             if move ||!filters().is_empty() {
