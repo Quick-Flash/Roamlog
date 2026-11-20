@@ -159,12 +159,15 @@ pub fn MapView() -> impl IntoView {
         camera.center_first(&mut detail);
         detail.truncate(256);
         detail.sort_unstable();
-        camera
-            .map_fallback_tiles(size)
-            .into_iter()
-            .chain(visible)
-            .chain(detail)
-            .collect::<Vec<_>>()
+        // Bing has no zoom-0 tile: its four zoom-1 tiles stand in.
+        provider.expand_tiles(
+            camera
+                .map_fallback_tiles(size)
+                .into_iter()
+                .chain(visible)
+                .chain(detail)
+                .collect(),
+        )
     });
     // Without trips or GPS, open offline map at its own center.
     let center = RenderEffect::new(move |_| {

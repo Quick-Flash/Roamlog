@@ -90,7 +90,9 @@ pub fn TerrainView(
             });
         }
         orbit.screen_first(camera, size, &mut cached);
-        rasters = super::terrain_tiles::prioritize_detail(rasters, cached, &wanted);
+        rasters = source.expand_tiles(super::terrain_tiles::prioritize_detail(
+            rasters, cached, &wanted,
+        ));
         service.demand_layers(
             2,
             if style.satellite { &rasters } else { &[] },
