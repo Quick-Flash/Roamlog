@@ -17,11 +17,11 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 flate2 = "1.1"
 libc = "0.2"
-zgui = { git = "https://github.com/Quick-Flash/zgui", rev = "c4c32eb13db5decc02b45bba089395e8ecec31ec", optional = true }
-zgui-ui = { git = "https://github.com/Quick-Flash/zgui", rev = "c4c32eb13db5decc02b45bba089395e8ecec31ec", optional = true }
-zgui-ui-tokens = { git = "https://github.com/Quick-Flash/zgui", rev = "c4c32eb13db5decc02b45bba089395e8ecec31ec", optional = true }
-zgui-ui-icons = { git = "https://github.com/Quick-Flash/zgui", rev = "c4c32eb13db5decc02b45bba089395e8ecec31ec", optional = true }
-zgui-image = { git = "https://github.com/Quick-Flash/zgui", rev = "c4c32eb13db5decc02b45bba089395e8ecec31ec", optional = true }
+zgui = { git = "https://github.com/Quick-Flash/zgui", rev = "e3abb3c41033b5e8c90598011a672c75b4555bd5", optional = true }
+zgui-ui = { git = "https://github.com/Quick-Flash/zgui", rev = "e3abb3c41033b5e8c90598011a672c75b4555bd5", optional = true }
+zgui-ui-tokens = { git = "https://github.com/Quick-Flash/zgui", rev = "e3abb3c41033b5e8c90598011a672c75b4555bd5", optional = true }
+zgui-ui-icons = { git = "https://github.com/Quick-Flash/zgui", rev = "e3abb3c41033b5e8c90598011a672c75b4555bd5", optional = true }
+zgui-image = { git = "https://github.com/Quick-Flash/zgui", rev = "e3abb3c41033b5e8c90598011a672c75b4555bd5", optional = true }
 plot = { package = "zgui-plot", git = "https://github.com/Quick-Flash/zgui-plot", rev = "40757c406d0384a36434a8baf0fd3fad512b33ed", optional = true }
 kurbo = { version = "0.13.1", optional = true }
 image = { version = "0.25.10", default-features = false, features = ["png", "webp", "jpeg"], optional = true }
@@ -54,15 +54,15 @@ crate-type = ["rlib", "cdylib"]
 netdev = { path = "vendor/netdev" }
 # iOS: Darwin route constants libc now gates to macOS; see vendor/netwatch/src/ios_libc.rs.
 netwatch = { path = "vendor/netwatch" }
-fontique = { git = "https://github.com/Quick-Flash/zgui", rev = "c4c32eb13db5decc02b45bba089395e8ecec31ec" }
-accesskit_android = { git = "https://github.com/Quick-Flash/zgui", rev = "c4c32eb13db5decc02b45bba089395e8ecec31ec" }
+fontique = { git = "https://github.com/Quick-Flash/zgui", rev = "e3abb3c41033b5e8c90598011a672c75b4555bd5" }
+accesskit_android = { git = "https://github.com/Quick-Flash/zgui", rev = "e3abb3c41033b5e8c90598011a672c75b4555bd5" }
 
 [patch."https://github.com/zortax/zgui"]
-zgui = { git = "https://github.com/Quick-Flash/zgui", rev = "c4c32eb13db5decc02b45bba089395e8ecec31ec" }
-zgui-ui = { git = "https://github.com/Quick-Flash/zgui", rev = "c4c32eb13db5decc02b45bba089395e8ecec31ec" }
+zgui = { git = "https://github.com/Quick-Flash/zgui", rev = "e3abb3c41033b5e8c90598011a672c75b4555bd5" }
+zgui-ui = { git = "https://github.com/Quick-Flash/zgui", rev = "e3abb3c41033b5e8c90598011a672c75b4555bd5" }
 
 [dev-dependencies]
-zgui-testkit-view = { git = "https://github.com/Quick-Flash/zgui", rev = "c4c32eb13db5decc02b45bba089395e8ecec31ec" }
+zgui-testkit-view = { git = "https://github.com/Quick-Flash/zgui", rev = "e3abb3c41033b5e8c90598011a672c75b4555bd5" }
 
 [[example]]
 name = "sharing_probe"

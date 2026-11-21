@@ -496,6 +496,11 @@ fn key(t: TileId, dark: bool, overlay: Kind) -> Key {
 }
 
 pub(crate) fn tiles_at(camera: Camera, size: [f64; 2], z: u8) -> Vec<TileId> {
+    tiles_within(camera, size, z, 64)
+}
+
+/// Tiles at `z` covering view, nearest first; empty when more than `limit`.
+pub(crate) fn tiles_within(camera: Camera, size: [f64; 2], z: u8, limit: i64) -> Vec<TileId> {
     let n = 1_i64 << z;
     let span = WORLD / n as f64;
     let [dx, dy] = size.map(|v| v / camera.scale() / 2.0);
@@ -503,7 +508,7 @@ pub(crate) fn tiles_at(camera: Camera, size: [f64; 2], z: u8) -> Vec<TileId> {
     let x1 = ((camera.center[0] + dx + WORLD / 2.0) / span).ceil() as i64;
     let y0 = (((WORLD / 2.0 - camera.center[1] - dy) / span).floor() as i64).clamp(0, n);
     let y1 = (((WORLD / 2.0 - camera.center[1] + dy) / span).ceil() as i64).clamp(0, n);
-    if (x1 - x0) * (y1 - y0) > 64 {
+    if (x1 - x0) * (y1 - y0) > limit {
         return Vec::new();
     }
     let mut tiles: Vec<TileId> = (y0..y1)

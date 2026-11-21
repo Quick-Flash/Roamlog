@@ -386,3 +386,8 @@
 .imagery-choice { flex: 0 0 auto; }
 .imagery-choice .zui-button { height: 32px; min-height: 32px; padding: 0 12px; flex: 0 0 auto; }
 .layers-scroll .actions .zui-button { height: 40px; min-height: 40px; }
+/* Alert bar: Hide beside the count line, filter chips full width below. */
+.area-bar.alert-bar { align-items: stretch; flex-wrap: nowrap; gap: 4px; }
+.alert-bar-head { align-items: center; gap: 6px; }
+.area-bar .area-filter { margin-top: 0; min-height: 36px; height: 36px; }
+.area-bar .area-filter .area-button { height: 32px; min-height: 32px; }

@@ -1634,7 +1634,11 @@ pub fn FriendTrips() -> impl IntoView {
     // Request on open: drop old answer, create request file, wake service.
     let requested = zgui::reactive::RenderEffect::new(move |_| {
         let wanted = s.friend_trips.get().is_some();
-        open.set(wanted);
+        // Write only on change: a set notifies even when equal, and `closed` below
+        // answers every notification by writing `friend_trips`, a loop at full CPU.
+        if open.get_untracked() != wanted {
+            open.set(wanted);
+        }
         reply.set(None);
         if wanted && let Some((request, _)) = paths() {
             let created = request
@@ -1664,7 +1668,7 @@ pub fn FriendTrips() -> impl IntoView {
     });
     on_cleanup_local(move || drop(poll));
     let closed = zgui::reactive::RenderEffect::new(move |_| {
-        if !open.get() {
+        if !open.get() && s.friend_trips.with_untracked(Option::is_some) {
             s.friend_trips.set(None);
         }
     });

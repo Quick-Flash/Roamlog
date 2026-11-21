@@ -8,7 +8,8 @@ use super::{
     camera::{Camera, TileId},
     labels::system_font,
     labels_gpu::{self, Atlas},
-    style::{BACKGROUND, Paint, STYLES},
+    style::{BACKGROUND, FIRST_ROAD, Paint, STYLES},
+    tiles::Payload,
     vector_tiles::{Tile, corner},
 };
 use std::{collections::HashMap, ops::Range, sync::Arc};
@@ -18,6 +19,11 @@ const SAMPLES: u32 = 4;
 const STENCIL: wgpu::TextureFormat = wgpu::TextureFormat::Stencil8;
 /// Draw uniform: offset (2 f32), width, dashed, colour (4 f32), cover rectangle (4 f32).
 const DRAW_SIZE: u64 = 48;
+/// Imagery textures uploaded per frame. A zoom level change brings ~100 new tiles; the
+/// rest wait a frame (coarser tiles beneath show meanwhile) instead of stalling one frame.
+const UPLOADS_PER_FRAME: usize = 8;
+/// Imagery textures kept, current scene first, then most recently drawn (256 KB each).
+const IMAGE_CACHE: usize = 256;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LineStyle {
@@ -96,24 +102,35 @@ impl Lines {
 }
 
 /// What one frame draws. Base map is drawn (with given dark flag) when `base` is set;
-/// otherwise output is transparent apart from lines.
+/// otherwise output is transparent apart from lines. `roads_only`: satellite overlay,
+/// transparent background with roads and labels but no area fills. `imagery`: satellite
+/// raster tiles drawn first, in order (coarse under fine).
 #[derive(Default)]
 pub struct Scene {
     pub tiles: Vec<(TileId, Arc<Tile>)>,
     pub lines: Arc<Lines>,
     pub base: Option<bool>,
+    pub roads_only: bool,
+    pub imagery: Vec<(TileId, Arc<Payload>)>,
 }
 
 /// Same geometry and settings, compared by identity: tiles are large.
 impl PartialEq for Scene {
     fn eq(&self, other: &Self) -> bool {
         self.base == other.base
+            && self.roads_only == other.roads_only
             && Arc::ptr_eq(&self.lines, &other.lines)
             && self.tiles.len() == other.tiles.len()
             && self
                 .tiles
                 .iter()
                 .zip(&other.tiles)
+                .all(|(a, b)| a.0 == b.0 && Arc::ptr_eq(&a.1, &b.1))
+            && self.imagery.len() == other.imagery.len()
+            && self
+                .imagery
+                .iter()
+                .zip(&other.imagery)
                 .all(|(a, b)| a.0 == b.0 && Arc::ptr_eq(&a.1, &b.1))
     }
 }
@@ -139,6 +156,15 @@ enum Cmd<'a> {
     Line(&'a wgpu::Buffer, Range<u32>),
     /// Glyph instances, halo pass then text pass.
     Text(u32),
+    /// One imagery tile: its texture's bind group.
+    Image(&'a wgpu::BindGroup),
+}
+
+/// Uploaded imagery tile; `used` is the last render that drew it.
+struct Image {
+    _payload: Arc<Payload>,
+    bind: wgpu::BindGroup,
+    used: u64,
 }
 
 pub struct Renderer {
@@ -146,6 +172,12 @@ pub struct Renderer {
     cover: wgpu::RenderPipeline,
     line: wgpu::RenderPipeline,
     text: wgpu::RenderPipeline,
+    image: wgpu::RenderPipeline,
+    image_layout: wgpu::BindGroupLayout,
+    image_sampler: wgpu::Sampler,
+    /// Imagery textures by payload identity.
+    images: HashMap<usize, Image>,
+    renders: u64,
     atlas: Atlas,
     /// Glyph instances, rewritten per frame, with capacity in bytes.
     glyphs: Option<(u64, wgpu::Buffer)>,
@@ -220,7 +252,7 @@ impl Renderer {
         });
         let pipeline = |label: &str,
                         vs: &str,
-                        buffers: &[wgpu::VertexBufferLayout<'_>],
+                        buffers: &[Option<wgpu::VertexBufferLayout<'_>>],
                         write: wgpu::ColorWrites,
                         front: wgpu::StencilFaceState,
                         back: wgpu::StencilFaceState| {
@@ -238,6 +270,7 @@ impl Renderer {
                     entry_point: Some(match vs {
                         "vs_line" => "fs_line",
                         "vs_text" => "fs_text",
+                        "vs_image" => "fs_image",
                         _ => "fs_fill",
                     }),
                     compilation_options: Default::default(),
@@ -272,11 +305,11 @@ impl Renderer {
         let fill = pipeline(
             "map.fill",
             "vs_fill",
-            &[wgpu::VertexBufferLayout {
+            &[Some(wgpu::VertexBufferLayout {
                 array_stride: 8,
                 step_mode: wgpu::VertexStepMode::Vertex,
                 attributes: &wgpu::vertex_attr_array![0 => Float32x2],
-            }],
+            })],
             wgpu::ColorWrites::empty(),
             stencil(C::Always, S::IncrementWrap),
             stencil(C::Always, S::DecrementWrap),
@@ -292,11 +325,11 @@ impl Renderer {
         let line = pipeline(
             "map.line",
             "vs_line",
-            &[wgpu::VertexBufferLayout {
+            &[Some(wgpu::VertexBufferLayout {
                 array_stride: 16,
                 step_mode: wgpu::VertexStepMode::Instance,
                 attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2],
-            }],
+            })],
             wgpu::ColorWrites::ALL,
             stencil(C::Always, S::Keep),
             stencil(C::Always, S::Keep),
@@ -304,14 +337,22 @@ impl Renderer {
         let text = pipeline(
             "map.text",
             "vs_text",
-            &[wgpu::VertexBufferLayout {
+            &[Some(wgpu::VertexBufferLayout {
                 array_stride: labels_gpu::INSTANCE,
                 step_mode: wgpu::VertexStepMode::Instance,
                 attributes: &wgpu::vertex_attr_array![
                     0 => Float32x2, 1 => Float32x2, 2 => Float32x2, 3 => Float32x2,
                     4 => Float32x4, 5 => Unorm8x4, 6 => Unorm8x4
                 ],
-            }],
+            })],
+            wgpu::ColorWrites::ALL,
+            stencil(C::Always, S::Keep),
+            stencil(C::Always, S::Keep),
+        );
+        let image = pipeline(
+            "map.image",
+            "vs_image",
+            &[],
             wgpu::ColorWrites::ALL,
             stencil(C::Always, S::Keep),
             stencil(C::Always, S::Keep),
@@ -322,6 +363,15 @@ impl Renderer {
             cover,
             line,
             text,
+            image,
+            image_layout: Atlas::layout(device),
+            image_sampler: device.create_sampler(&wgpu::SamplerDescriptor {
+                mag_filter: wgpu::FilterMode::Linear,
+                min_filter: wgpu::FilterMode::Linear,
+                ..Default::default()
+            }),
+            images: HashMap::new(),
+            renders: 0,
             atlas: Atlas::new(device, &atlas_layout),
             glyphs: None,
             view,
@@ -374,6 +424,95 @@ impl Renderer {
         }
     }
 
+    /// Uploads at most UPLOADS_PER_FRAME scene imagery tiles, coarse first; true when some
+    /// still wait. Trims cache to IMAGE_CACHE, never dropping what this scene draws.
+    fn upload_images(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, scene: &Scene) -> bool {
+        self.renders += 1;
+        let mut budget = UPLOADS_PER_FRAME;
+        let mut waiting = false;
+        for (_, payload) in &scene.imagery {
+            let key = Arc::as_ptr(payload) as usize;
+            if let Some(image) = self.images.get_mut(&key) {
+                image.used = self.renders;
+                continue;
+            }
+            let Payload::Raster(raster) = payload.as_ref() else {
+                continue;
+            };
+            if budget == 0 {
+                waiting = true;
+                continue;
+            }
+            budget -= 1;
+            let size = wgpu::Extent3d {
+                width: raster.width,
+                height: raster.height,
+                depth_or_array_layers: 1,
+            };
+            let texture = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("map.imagery"),
+                size,
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                &raster.rgba,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(raster.width * 4),
+                    rows_per_image: Some(raster.height),
+                },
+                size,
+            );
+            let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: None,
+                layout: &self.image_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(
+                            &texture.create_view(&Default::default()),
+                        ),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&self.image_sampler),
+                    },
+                ],
+            });
+            self.images.insert(
+                key,
+                Image {
+                    _payload: payload.clone(),
+                    bind,
+                    used: self.renders,
+                },
+            );
+        }
+        if self.images.len() > IMAGE_CACHE {
+            let mut order: Vec<_> = self.images.iter().map(|(k, i)| (i.used, *k)).collect();
+            order.sort_unstable();
+            for (used, key) in order {
+                if self.images.len() <= IMAGE_CACHE || used == self.renders {
+                    break;
+                }
+                self.images.remove(&key);
+            }
+        }
+        waiting
+    }
+
+    /// Records one frame; true when imagery uploads still wait, so caller renders again.
     pub fn render(
         &mut self,
         device: &wgpu::Device,
@@ -381,7 +520,7 @@ impl Renderer {
         encoder: &mut wgpu::CommandEncoder,
         scene: &Scene,
         frame: Frame<'_>,
-    ) {
+    ) -> bool {
         let Frame {
             output,
             extent,
@@ -390,6 +529,7 @@ impl Renderer {
             ratio,
         } = frame;
         self.upload(device, queue, scene);
+        let waiting = self.upload_images(device, queue, scene);
         if self
             .targets
             .as_ref()
@@ -409,7 +549,7 @@ impl Renderer {
                         dimension: wgpu::TextureDimension::D2,
                         format,
                         usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-                            | wgpu::TextureUsages::TRANSIENT,
+                            | wgpu::TextureUsages::TRANSIENT_ATTACHMENT,
                         view_formats: &[],
                     })
                     .create_view(&Default::default())
@@ -449,11 +589,28 @@ impl Renderer {
         let rel = |o: [f64; 2]| [o[0] - camera.center[0], o[1] - camera.center[1]];
         let mut clear = wgpu::Color::TRANSPARENT;
         let mut text_draws = None;
+        for (id, payload) in &scene.imagery {
+            if let Some(image) = self.images.get(&(Arc::as_ptr(payload) as usize)) {
+                let span = (super::camera::WORLD / f64::from(1_u32 << id.z)) as f32;
+                cmds.push((
+                    push(
+                        rel(corner(*id)),
+                        0.0,
+                        false,
+                        [255; 4],
+                        [0.0, -span, span, 0.0],
+                    ),
+                    Cmd::Image(&image.bind),
+                ));
+            }
+        }
         if let Some(dark) = scene.base {
-            let [r, g, b, _] = BACKGROUND.rgba(dark, zoom).map(|c| f64::from(c) / 255.0);
-            clear = wgpu::Color { r, g, b, a: 1.0 };
+            if !scene.roads_only {
+                let [r, g, b, _] = BACKGROUND.rgba(dark, zoom).map(|c| f64::from(c) / 255.0);
+                clear = wgpu::Color { r, g, b, a: 1.0 };
+            }
             for (slot, style) in STYLES.iter().enumerate() {
-                if !style.visible(zoom) {
+                if !style.visible(zoom) || (scene.roads_only && slot < FIRST_ROAD) {
                     continue;
                 }
                 let rgba = style.rgba(dark, zoom);
@@ -615,7 +772,13 @@ impl Renderer {
                     pass.set_pipeline(&self.cover);
                     pass.draw(0..6, 0..1);
                 }
+                Cmd::Image(bind) => {
+                    pass.set_pipeline(&self.image);
+                    pass.set_bind_group(2, bind, &[]);
+                    pass.draw(0..6, 0..1);
+                }
                 Cmd::Text(count) => {
+                    pass.set_bind_group(2, &self.atlas.bind, &[]);
                     pass.set_pipeline(&self.text);
                     pass.set_vertex_buffer(0, self.glyphs.as_ref().unwrap().1.slice(..));
                     pass.draw(0..6, 0..count);
@@ -627,6 +790,8 @@ impl Renderer {
                 }
             }
         }
+        drop(pass);
+        waiting
     }
 }
 
@@ -765,7 +930,7 @@ pub(crate) mod tests {
         read.slice(..)
             .map_async(wgpu::MapMode::Read, |r| r.unwrap());
         device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
-        let mapped = read.slice(..).get_mapped_range();
+        let mapped = read.slice(..).get_mapped_range().unwrap();
         Some(
             mapped
                 .chunks(row as usize)

@@ -75,12 +75,7 @@ pub fn TerrainView(
             super::terrain_tiles::detail_tiles(orbit, camera, size, f64::from(host.scale()), &ids);
         let mut cached = Vec::new();
         for &id in &ids {
-            cached.extend(
-                service
-                    .cached_raster_children(id, source)
-                    .into_iter()
-                    .filter(|child| child.z <= id.z.saturating_add(3)),
-            );
+            cached.extend(service.cached_raster_children(id, source, 3));
             tiles.ready.with_value(|ready| {
                 cached.extend(ready.keys().copied().filter(|&child| {
                     super::terrain::contains(id, child)

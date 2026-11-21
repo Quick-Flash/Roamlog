@@ -717,11 +717,17 @@ impl Service {
                 .collect()
         })
     }
-    pub fn cached_raster_children(self, parent: TileId, provider: Provider) -> Vec<TileId> {
+    /// Cached raster tiles 1..=`depth` levels below `parent`.
+    pub fn cached_raster_children(
+        self,
+        parent: TileId,
+        provider: Provider,
+        depth: u8,
+    ) -> Vec<TileId> {
         self.ui.with_value(|ui| {
             let cache = ui.cache.borrow();
             // Keys order by (layer, provider, z, x, y): range each deeper zoom's x band.
-            (parent.z + 1..=MAX_TILE_ZOOM)
+            (parent.z + 1..=parent.z.saturating_add(depth).min(MAX_TILE_ZOOM))
                 .flat_map(|z| {
                     let shift = z - parent.z;
                     let x = u64::from(parent.canonical_x()) << shift;
@@ -789,6 +795,7 @@ impl Service {
             .desired
             .iter()
             .filter_map(|k| cache.entries.get(k)?.value.as_ref().err())
+            .filter(|e| *e != NO_IMAGERY)
             .collect::<Vec<_>>();
         if let Some(error) = errors.first() {
             format!(
@@ -1029,7 +1036,23 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
     file.persist(path).map_err(|e| e.to_string())?;
     Ok(())
 }
+/// Tile the provider does not have: nearest coarser tile stands in, no retry offered.
+pub const NO_IMAGERY: &str = "No imagery at this zoom";
+
+/// Bing answers missing imagery with one fixed 1033-byte placeholder JPEG (header
+/// `x-ve-tile-info: no-tile`); its size also catches copies already in the disk cache.
+const BING_NO_TILE_BYTES: usize = 1033;
+
 pub fn decode(key: Key, bytes: Vec<u8>) -> Result<Payload, String> {
+    if !key.dem
+        && matches!(
+            key.provider,
+            Provider::BingRoad | Provider::BingSatellite | Provider::BingHybrid
+        )
+        && bytes.len() == BING_NO_TILE_BYTES
+    {
+        return Err(NO_IMAGERY.into());
+    }
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     hasher.write(&bytes);
     let version = hasher.finish();

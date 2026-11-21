@@ -162,3 +162,27 @@ fn fs_text(in: Text) -> @location(0) vec4<f32> {
     }
     return vec4<f32>(in.color.rgb * a, a);
 }
+
+// Satellite imagery: one opaque texture per tile over draw.rect (metres from offset; rect
+// min y is the tile's south edge, image row 0 its north edge).
+struct Image {
+    @builtin(position) clip: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+};
+
+@vertex
+fn vs_image(@builtin(vertex_index) i: u32) -> Image {
+    let corner = array<vec2<f32>, 6>(
+        vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 0.0), vec2<f32>(0.0, 1.0),
+        vec2<f32>(0.0, 1.0), vec2<f32>(1.0, 0.0), vec2<f32>(1.0, 1.0),
+    )[i];
+    var out: Image;
+    out.clip = clip(screen(mix(draw.rect.xy, draw.rect.zw, corner)));
+    out.uv = vec2<f32>(corner.x, 1.0 - corner.y);
+    return out;
+}
+
+@fragment
+fn fs_image(in: Image) -> @location(0) vec4<f32> {
+    return vec4<f32>(textureSample(atlas, atlas_sampler, in.uv).rgb, 1.0);
+}

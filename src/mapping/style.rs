@@ -153,6 +153,9 @@ const RIVER: &[(u8, f64)] = &[(11, 0.8), (14, 1.6), (17, 3.0)];
 const RAIL: &[(u8, f64)] = &[(12, 0.8), (14, 1.2), (17, 2.0)];
 const BORDER: &[(u8, f64)] = &[(0, 1.0)];
 
+/// First road-layer slot (path..motorway): satellite overlay draws these only.
+pub const FIRST_ROAD: usize = 17;
+
 /// Paint order: index 0 drawn first.
 pub const STYLES: [Style; 26] = [
     fill(0xCFD5A8, 0x1f2310, 0.0),  // 0 grassland/scrub (green0)

@@ -160,7 +160,7 @@ fn produce(shared: Arc<Shared>, output: SurfaceHandle) {
         let css = state.size.map(|v| f64::from(v) / f64::from(state.scale));
         let ratio = (f64::from(extent[0]) / css[0]) as f32;
         let mut encoder = device.create_command_encoder(&Default::default());
-        renderer.as_mut().unwrap().1.render(
+        let waiting = renderer.as_mut().unwrap().1.render(
             device,
             gpu.queue(),
             &mut encoder,
@@ -193,6 +193,10 @@ fn produce(shared: Arc<Shared>, output: SurfaceHandle) {
                 .is_some_and(|g| g.generation() == gpu.generation())
         {
             output.present(texture);
+        }
+        // Imagery uploads spread over frames: render again without waiting for a change.
+        if waiting {
+            revision = None;
         }
     }
 }

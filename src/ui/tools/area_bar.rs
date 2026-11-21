@@ -33,35 +33,35 @@ pub fn AreaBar() -> impl IntoView {
     view! {
         // Friend card already explains areas drawn for a selected friend.
         if move ||!s.area_marks.with(Vec::is_empty)&&s.map_friend_selected.with(Option::is_none) {
-            row(class="area-bar") {
-                column(class="grow") {
-                    text(class="area-count") {{move ||{
+            column(class="area-bar alert-bar") {
+                row(class="alert-bar-head") {
+                    text(class="area-count grow") {{move ||{
                         let n=s.area_marks.with(Vec::len);
                         let kind=if alerts() {"alert area"} else {"area"};
                         format!("{n} {kind}{} · tap a name to open",if n==1 {""} else {"s"})
                     }}}
-                    if move ||alerts()&&!s.area_filters.with(Vec::is_empty) {
-                        scroll(class="alert-filter area-filter") {
-                            row(class="friend-strip-row") {
-                                for option in move ||std::iter::once(("all".to_string(),"Everyone".to_string())).chain(s.area_filters.get()).collect::<Vec<_>>(),key=|o|o.clone() {
-                                    {{
-                                        let key=option.0.clone();
-                                        let on_key=key.clone();
-                                        view! {
-                                            Button(variant=ButtonVariant::Outline,class="area-button",
-                                                class:seg-on=move ||s.place_peer.with(|p|p.as_deref().unwrap_or("all")==on_key),
-                                                on:click=move |_|{
-                                                    #[cfg(target_os="android")]
-                                                    crate::ui::place_alerts::show_on_map(s,(key!="all").then(||key.clone()));
-                                                }) {{option.1.clone()}}
-                                        }
-                                    }}
-                                }
+                    Button(variant=ButtonVariant::Outline,class="area-button",on:click=move |_|s.area_marks.set(Vec::new())) {"Hide"}
+                }
+                if move ||alerts()&&!s.area_filters.with(Vec::is_empty) {
+                    scroll(class="alert-filter area-filter") {
+                        row(class="friend-strip-row") {
+                            for option in move ||std::iter::once(("all".to_string(),"Everyone".to_string())).chain(s.area_filters.get()).collect::<Vec<_>>(),key=|o|o.clone() {
+                                {{
+                                    let key=option.0.clone();
+                                    let on_key=key.clone();
+                                    view! {
+                                        Button(variant=ButtonVariant::Outline,class="area-button",
+                                            class:seg-on=move ||s.place_peer.with(|p|p.as_deref().unwrap_or("all")==on_key),
+                                            on:click=move |_|{
+                                                #[cfg(target_os="android")]
+                                                crate::ui::place_alerts::show_on_map(s,(key!="all").then(||key.clone()));
+                                            }) {{option.1.clone()}}
+                                    }
+                                }}
                             }
                         }
                     }
                 }
-                Button(variant=ButtonVariant::Outline,class="area-button",on:click=move |_|s.area_marks.set(Vec::new())) {"Hide"}
             }
         } else {
             if move ||s.area_busy.get() {

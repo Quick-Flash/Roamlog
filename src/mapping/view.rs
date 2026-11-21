@@ -1,6 +1,5 @@
 use super::{
-    basemap::Kind,
-    camera::{self, Camera, project},
+    camera::{self, Camera, TileId, project},
     gestures::Contacts,
     map_gpu::{LineStyle, Lines, Scene},
     map_surface::Producer as MapProducer,
@@ -137,6 +136,15 @@ pub fn MapView() -> impl IntoView {
             Provider::OpenStreetMap
         }
     });
+    // Visible raster level: satellite follows device pixels; street tiles keep CSS zoom
+    // (public OSM servers, 4x fewer requests).
+    let raster_visible = Memo::new(move |_| {
+        if s.satellite.get() {
+            imagery_tiles(camera.get(), size.get(), f64::from(host.scale()))
+        } else {
+            camera.get().map_tiles(size.get())
+        }
+    });
     let raster_tiles = Memo::new(move |_| {
         if !raster.get() {
             return Vec::new();
@@ -145,15 +153,10 @@ pub fn MapView() -> impl IntoView {
         let camera = camera.get();
         let size = size.get();
         let provider = provider.get();
-        let visible = camera.map_tiles(size);
+        let visible = raster_visible.get();
         let mut detail = std::collections::BTreeSet::new();
         for &tile in &visible {
-            detail.extend(
-                service
-                    .cached_raster_children(tile, provider)
-                    .into_iter()
-                    .filter(|child| child.z <= tile.z + 2),
-            );
+            detail.extend(service.cached_raster_children(tile, provider, 2));
         }
         let mut detail: Vec<_> = detail.into_iter().collect();
         camera.center_first(&mut detail);
@@ -168,6 +171,83 @@ pub fn MapView() -> impl IntoView {
                 .chain(detail)
                 .collect(),
         )
+    });
+    // Drawn tiles: loaded visible ones over nearest loaded ancestor and a coarse backdrop.
+    // A new image element is blank until decoded, so something already shown must stay
+    // underneath. Cached finer tiles (after zooming out) cover a visible tile until it has
+    // been loaded for GRACE, then go, so the screen settles on one level. Drawing every
+    // demanded fallback level instead stacked a full-screen layer per zoom.
+    const GRACE: std::time::Duration = std::time::Duration::from_millis(250);
+    let loaded_since: StoredValue<std::collections::HashMap<TileId, std::time::Instant>, _> =
+        StoredValue::new_local(Default::default());
+    let settle = RwSignal::new_local(0_u32);
+    let settle_timer = StoredValue::new_local(None);
+    // Timer from component owner, not memo's: a memo re-run must not cancel it.
+    let owner = StoredValue::new_local(zgui::reactive::Owner::current());
+    on_cleanup_local(move || settle_timer.set_value(None));
+    let raster_draw = Memo::new(move |_| {
+        if !raster.get() {
+            return Vec::new();
+        }
+        settle.track();
+        let provider = provider.get();
+        let loaded = |t: TileId| service.url(t, provider).is_some();
+        let parent = |t: TileId| TileId {
+            z: t.z - 1,
+            x: t.x >> 1,
+            y: t.y >> 1,
+        };
+        let now = std::time::Instant::now();
+        let mut since = std::collections::HashMap::new();
+        let mut settling = false;
+        let mut draw = std::collections::BTreeSet::new();
+        for tile in provider.expand_tiles(raster_visible.get()) {
+            let fresh = if loaded(tile) {
+                draw.insert(tile);
+                let at = loaded_since
+                    .with_value(|m| m.get(&tile).copied())
+                    .unwrap_or(now);
+                since.insert(tile, at);
+                now - at < GRACE
+            } else {
+                true
+            };
+            let mut up = tile;
+            while up.z > 0 {
+                up = parent(up);
+                if loaded(up) {
+                    draw.insert(up);
+                    break;
+                }
+            }
+            // Backdrop level changes only every fourth zoom, so fast zooms keep it.
+            let mut back = tile;
+            while back.z > (tile.z.saturating_sub(3) & !3) {
+                back = parent(back);
+            }
+            if back.z < tile.z && loaded(back) {
+                draw.insert(back);
+            }
+            if fresh {
+                let finer = service.cached_raster_children(tile, provider, 2);
+                settling |= loaded(tile) && !finer.is_empty();
+                draw.extend(finer);
+            }
+        }
+        loaded_since.set_value(since);
+        // Re-run while finer tiles wait out GRACE; idle map gets no other trigger.
+        if !settling {
+            settle_timer.set_value(None);
+        } else if let Some(timers) =
+            owner.with_value(|o| o.as_ref().and_then(|o| o.with(Timers::current)))
+            && settle_timer.with_value(Option::is_none)
+        {
+            settle_timer.set_value(Some(
+                timers.set_interval(GRACE, move || settle.update(|n| *n = n.wrapping_add(1))),
+            ));
+        }
+        // TileId orders by zoom first: coarse under fine.
+        draw.into_iter().collect::<Vec<_>>()
     });
     // Without trips or GPS, open offline map at its own center.
     let center = RenderEffect::new(move |_| {
@@ -636,10 +716,10 @@ pub fn MapView() -> impl IntoView {
         }
     });
     on_cleanup_local(move || drop(flat_edit));
-    // GPU map: base map tiles and names (offline vector map, not satellite) and trip lines
-    // drawn by own wgpu surface. Geometry uploads once per change; camera moves only update
+    // GPU map: base map tiles and names (offline vector map; roads and names only over
+    // satellite) and trip lines drawn by own wgpu surface. Geometry uploads once per change; camera moves only update
     // uniforms and label quads.
-    let gpu_base = Memo::new(move |_| !three_d.get() && vector.get() && !s.satellite.get());
+    let gpu_base = Memo::new(move |_| !three_d.get() && vector.get());
     let gpu_lines = Memo::new(move |_| {
         let mut lines = Lines::default();
         if three_d.get() {
@@ -685,10 +765,29 @@ pub fn MapView() -> impl IntoView {
             }
             _ => Vec::new(),
         };
+        // Satellite imagery on GPU surface: hundreds of image elements churned layout,
+        // restyle and decode on every zoom level change.
+        let imagery = if s.satellite.get() {
+            let ids = raster_draw.get();
+            let provider = provider.get();
+            let payloads = service.payloads_untracked(
+                ids.iter()
+                    .map(|&t| super::tiles::Key::raster_from(t, provider)),
+            );
+            ids.into_iter()
+                .zip(payloads)
+                .filter_map(|(t, p)| Some((t, p?)))
+                .collect()
+        } else {
+            Vec::new()
+        };
         Arc::new(Scene {
+            imagery,
             tiles,
             lines: gpu_lines.get(),
-            base: base.then(|| s.dark.get()),
+            // Satellite: dark road and label colours read on photography in both themes.
+            base: base.then(|| s.dark.get() || s.satellite.get()),
+            roads_only: s.satellite.get(),
         })
     });
     let map_producer = std::rc::Rc::new(MapProducer::new());
@@ -744,29 +843,14 @@ pub fn MapView() -> impl IntoView {
                     style:left=move ||Some(format!("{}px",(view_size.get()[0]-size.get()[0])/2.0)),style:top=move ||Some(format!("{}px",(view_size.get()[1]-size.get()[1])/2.0)),
                     style:transform=move ||{let b=s.bearing.get();(b!=0.0).then(||format!("rotate({b}rad)"))}) {
                 box(class="map-tiles",class:map-hidden=move ||!raster.get(),class:map-dark=move ||s.dark.get()&&!s.satellite.get()) {
-                    for tile in move ||raster_tiles.get(),key=|tile|*tile {
-                        box(class="map-tile",style:transform=move ||{let[x,y,scale]=camera.get().place(tile,size.get());Some(format!("translate({x}px, {y}px) scale({scale})"))}) {
+                    for tile in move ||if s.satellite.get(){Vec::new()}else{raster_draw.get()},key=|tile|*tile {
+                        box(class="map-tile",style:transform=move ||{let[x,y,scale]=camera.get().place(tile,size.get());Some(format!("translate({x}px, {y}px) scale({})",scale+1.0/256.0))}) {
+                            // Extra px overlaps neighbours: abutting antialiased edges show seams.
                             {zgui::elements::image().class("map-tile-image").src(Signal::derive_local(move ||service.url(tile,provider.get()))).alt(Some("Basemap imagery tile".to_string())).into_view()}
                         }
                     }
                 }
-                box(class="map-vector-tiles") {
-                    for item in move ||if three_d.get()||!s.satellite.get(){Vec::new()}else{s.basemap.visible(camera.get(),size.get(),true,Kind::Roads,f64::from(host.scale()),!offline.get())},key=|item|item.clone() {
-                        // 512 CSS px box: nominal display size of rendered tile; place() scales 256 px boxes.
-                        box(class="map-vector-tile",style:transform=move ||{let[x,y,scale]=camera.get().place(item.0,size.get());Some(format!("translate({x}px, {y}px) scale({})",scale/2.0))}) {
-                            {zgui::elements::image().class("map-vector-image").src(Some(item.1.clone())).alt(Some("Map tile".to_string())).into_view()}
-                        }
-                    }
-                }
                 box(class="map-overlay",class:map-hidden=move ||three_d.get()) {{map_surface}}
-                // Satellite mode: street names above trip and area lines.
-                box(class="map-vector-tiles") {
-                    for item in move ||if three_d.get()||!s.satellite.get(){Vec::new()}else{s.basemap.visible(camera.get(),size.get(),true,Kind::Labels,f64::from(host.scale()),!offline.get())},key=|item|item.clone() {
-                        box(class="map-vector-tile",style:transform=move ||{let[x,y,scale]=camera.get().place(item.0,size.get());Some(format!("translate({x}px, {y}px) scale({})",scale/2.0))}) {
-                            {zgui::elements::image().class("map-vector-image").src(Some(item.1.clone())).alt(Some("Map labels".to_string())).into_view()}
-                        }
-                    }
-                }
                 // GPS marker as plain rounded boxes: compositor draws them as quads, while
                 // canvas shapes cost area x segments per frame on Mali (45 vs 60 fps at z18).
                 if move ||marker.get().is_some_and(|m|m.cover) {box(class="gps-cover") {}}
@@ -1189,5 +1273,20 @@ fn attribution(three_d: bool, satellite: bool, imagery: Provider, vector: bool) 
         (false, true, _) => format!("Imagery: {imagery} · Roads: © OpenStreetMap"),
         (false, false, true) => "Protomaps © OpenStreetMap".into(),
         (false, false, false) => "© OpenStreetMap contributors".into(),
+    }
+}
+
+/// Satellite tiles near native resolution: 256 px images shown at 0.7x-1.4x device pixels.
+/// Flooring CSS zoom instead stretched each image pixel over up to 5 device pixels.
+fn imagery_tiles(camera: Camera, size: [f64; 2], dpr: f64) -> Vec<TileId> {
+    let mut z = (camera.zoom + dpr.max(1.0).log2())
+        .round()
+        .clamp(0.0, f64::from(super::tiles::MAX_TILE_ZOOM)) as u8;
+    loop {
+        let tiles = super::basemap::tiles_within(camera, size, z, 256);
+        if !tiles.is_empty() || z == 0 {
+            return tiles;
+        }
+        z -= 1;
     }
 }
