@@ -45,7 +45,33 @@ impl Style {
         };
         stops.iter().rev().find(|s| s.0 <= zoom).map(|s| s.1)
     }
+
+    /// Line width at fractional zoom, eased between integer stops so widths change
+    /// smoothly while zooming.
+    pub fn width_at(&self, zoom: f64) -> Option<f64> {
+        let Paint::Line(stops) = self.paint else {
+            return None;
+        };
+        Some(eased(stops, zoom))
+    }
 }
+
+/// Value from per-zoom `stops` at fractional zoom: geometric blend between neighbouring
+/// integer zooms, so sizes change smoothly; first and last stops hold outside the range.
+pub fn eased(stops: &[(u8, f64)], zoom: f64) -> f64 {
+    let at = |z: f64| {
+        stops
+            .iter()
+            .rev()
+            .find(|s| f64::from(s.0) <= z)
+            .map_or(stops[0].1, |s| s.1)
+    };
+    let (a, b) = (at(zoom.floor()), at(zoom.floor() + 1.0));
+    a * (b / a).powf(zoom - zoom.floor())
+}
+
+/// Label text size multiplier by zoom: small names zoomed out, larger up close.
+pub const LABEL_SCALE: &[(u8, f64)] = &[(12, 0.9), (15, 1.0), (17, 1.15), (19, 1.3)];
 
 pub fn rgba(rgb: u32) -> [u8; 4] {
     [(rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8, 255]
@@ -264,5 +290,7 @@ mod tests {
         assert_eq!(primary.width(14), Some(3.2));
         assert_eq!(primary.width(22), Some(11.6));
         assert_eq!(STYLES[13].width(14), None);
+        assert_eq!(primary.width_at(14.0), Some(3.2));
+        assert!((primary.width_at(14.5).unwrap() - (3.2f64 * 3.8).sqrt()).abs() < 1e-9);
     }
 }

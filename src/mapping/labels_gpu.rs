@@ -233,6 +233,8 @@ impl Atlas {
         dark: bool,
     ) -> Result<Vec<u8>, Full> {
         let zoom = camera.zoom.round();
+        // Text size eased with fractional zoom: grows and shrinks smoothly with a pinch.
+        let grow = super::style::eased(super::style::LABEL_SCALE, camera.zoom);
         let scale = camera.scale();
         let [w, h] = css;
         let mut all: Vec<(&Candidate, f64, f64)> = Vec::new();
@@ -263,7 +265,12 @@ impl Atlas {
             {
                 continue;
             }
-            let px = (c.size as f32) * ratio;
+            let size = c.size * grow;
+            // Glyphs rasterized at whole device px (atlas reuse), quads scaled by `fit` to
+            // exact size.
+            let exact = size as f32 * ratio;
+            let px = exact.round().max(1.0);
+            let fit = exact / px;
             let scaled = font.as_scaled(px);
             let mut glyphs = Vec::new();
             let mut pen = 0.0;
@@ -283,13 +290,13 @@ impl Atlas {
                 previous = Some(id);
             }
             let advance = pen;
-            let width = f64::from(pen / ratio);
+            let width = f64::from(pen * fit / ratio);
             if missing || c.room.is_some_and(|room| room * scale < width + 8.0) {
                 continue;
             }
             // Rotated text box (baseline 0.35 size below centre) with 3 px margin.
             let (sin, cos) = c.at.2.sin_cos();
-            let (hw, top, bottom) = (width / 2.0 + 3.0, -0.75 * c.size - 3.0, 0.6 * c.size + 3.0);
+            let (hw, top, bottom) = (width / 2.0 + 3.0, -0.75 * size - 3.0, 0.6 * size + 3.0);
             let corners = [(-hw, top), (hw, top), (-hw, bottom), (hw, bottom)]
                 .map(|(lx, ly)| (x + cos * lx - sin * ly, y + sin * lx + cos * ly));
             let bounds = corners
@@ -318,8 +325,8 @@ impl Atlas {
                 };
                 // Box top-left in label frame, device px from label centre.
                 let local = [pen + g.offset[0] - advance / 2.0, baseline + g.offset[1]];
-                let (mut anchor, mut local) =
-                    ([x as f32, y as f32], [local[0] / ratio, local[1] / ratio]);
+                let k = fit / ratio;
+                let (mut anchor, mut local) = ([x as f32, y as f32], [local[0] * k, local[1] * k]);
                 // Horizontal text lands on whole device pixels: crisp, like CPU tiles.
                 if c.at.2 == 0.0 {
                     anchor = [
@@ -333,8 +340,8 @@ impl Atlas {
                     anchor[1],
                     local[0],
                     local[1],
-                    g.size[0] / ratio,
-                    g.size[1] / ratio,
+                    g.size[0] * k,
+                    g.size[1] * k,
                     cos as f32,
                     sin as f32,
                 ]

@@ -103,8 +103,9 @@ impl Lines {
 
 /// What one frame draws. Base map is drawn (with given dark flag) when `base` is set;
 /// otherwise output is transparent apart from lines. `roads_only`: satellite overlay,
-/// transparent background with roads and labels but no area fills. `imagery`: satellite
-/// raster tiles drawn first, in order (coarse under fine).
+/// transparent background with roads and labels but no area fills. `imagery`: raster tiles
+/// (satellite or street) drawn first, in order (coarse under fine); `imagery_dark` inverts
+/// them for dark mode.
 #[derive(Default)]
 pub struct Scene {
     pub tiles: Vec<(TileId, Arc<Tile>)>,
@@ -112,6 +113,7 @@ pub struct Scene {
     pub base: Option<bool>,
     pub roads_only: bool,
     pub imagery: Vec<(TileId, Arc<Payload>)>,
+    pub imagery_dark: bool,
 }
 
 /// Same geometry and settings, compared by identity: tiles are large.
@@ -119,6 +121,7 @@ impl PartialEq for Scene {
     fn eq(&self, other: &Self) -> bool {
         self.base == other.base
             && self.roads_only == other.roads_only
+            && self.imagery_dark == other.imagery_dark
             && Arc::ptr_eq(&self.lines, &other.lines)
             && self.tiles.len() == other.tiles.len()
             && self
@@ -561,10 +564,8 @@ impl Renderer {
             ));
         }
 
-        // Styles at nearest integer zoom, widths scaled with zoom between: matches CPU tiles.
-        let level = camera.zoom.round().clamp(0.0, 255.0);
-        let zoom = level as u8;
-        let grow = 2f64.powf(camera.zoom - level) as f32;
+        // Styles at nearest integer zoom; widths eased between stops so lines never jump.
+        let zoom = camera.zoom.round().clamp(0.0, 255.0) as u8;
         let mut uniforms: Vec<u8> = Vec::new();
         let mut cmds: Vec<(u32, Cmd<'_>)> = Vec::new();
         let stride = self.stride as usize;
@@ -596,7 +597,7 @@ impl Renderer {
                     push(
                         rel(corner(*id)),
                         0.0,
-                        false,
+                        scene.imagery_dark,
                         [255; 4],
                         [0.0, -span, span, 0.0],
                     ),
@@ -635,7 +636,7 @@ impl Renderer {
                                 &buffers.segments,
                                 tile.line_runs.iter().find(|r| r.0 == slot),
                             ) {
-                                let width = style.width(zoom).unwrap_or(1.0) as f32 * grow;
+                                let width = style.width_at(camera.zoom).unwrap_or(1.0) as f32;
                                 cmds.push((
                                     push(offset, width, false, rgba, [0.0; 4]),
                                     Cmd::Line(buffer, r.clone()),

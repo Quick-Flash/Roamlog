@@ -173,8 +173,7 @@ pub fn MapView() -> impl IntoView {
         )
     });
     // Drawn tiles: loaded visible ones over nearest loaded ancestor and a coarse backdrop.
-    // A new image element is blank until decoded, so something already shown must stay
-    // underneath. Cached finer tiles (after zooming out) cover a visible tile until it has
+    // A new tile is blank until uploaded, so something already shown must stay underneath. Cached finer tiles (after zooming out) cover a visible tile until it has
     // been loaded for GRACE, then go, so the screen settles on one level. Drawing every
     // demanded fallback level instead stacked a full-screen layer per zoom.
     const GRACE: std::time::Duration = std::time::Duration::from_millis(250);
@@ -765,24 +764,22 @@ pub fn MapView() -> impl IntoView {
             }
             _ => Vec::new(),
         };
-        // Satellite imagery on GPU surface: hundreds of image elements churned layout,
+        // Raster tiles on GPU surface: hundreds of image elements churned layout,
         // restyle and decode on every zoom level change.
-        let imagery = if s.satellite.get() {
-            let ids = raster_draw.get();
-            let provider = provider.get();
-            let payloads = service.payloads_untracked(
-                ids.iter()
-                    .map(|&t| super::tiles::Key::raster_from(t, provider)),
-            );
-            ids.into_iter()
-                .zip(payloads)
-                .filter_map(|(t, p)| Some((t, p?)))
-                .collect()
-        } else {
-            Vec::new()
-        };
+        let ids = raster_draw.get();
+        let provider = provider.get();
+        let payloads = service.payloads_untracked(
+            ids.iter()
+                .map(|&t| super::tiles::Key::raster_from(t, provider)),
+        );
+        let imagery = ids
+            .into_iter()
+            .zip(payloads)
+            .filter_map(|(t, p)| Some((t, p?)))
+            .collect();
         Arc::new(Scene {
             imagery,
+            imagery_dark: s.dark.get() && !s.satellite.get(),
             tiles,
             lines: gpu_lines.get(),
             // Satellite: dark road and label colours read on photography in both themes.
@@ -842,14 +839,6 @@ pub fn MapView() -> impl IntoView {
                     style:width=move ||Some(format!("{}px",size.get()[0])),style:height=move ||Some(format!("{}px",size.get()[1])),
                     style:left=move ||Some(format!("{}px",(view_size.get()[0]-size.get()[0])/2.0)),style:top=move ||Some(format!("{}px",(view_size.get()[1]-size.get()[1])/2.0)),
                     style:transform=move ||{let b=s.bearing.get();(b!=0.0).then(||format!("rotate({b}rad)"))}) {
-                box(class="map-tiles",class:map-hidden=move ||!raster.get(),class:map-dark=move ||s.dark.get()&&!s.satellite.get()) {
-                    for tile in move ||if s.satellite.get(){Vec::new()}else{raster_draw.get()},key=|tile|*tile {
-                        box(class="map-tile",style:transform=move ||{let[x,y,scale]=camera.get().place(tile,size.get());Some(format!("translate({x}px, {y}px) scale({})",scale+1.0/256.0))}) {
-                            // Extra px overlaps neighbours: abutting antialiased edges show seams.
-                            {zgui::elements::image().class("map-tile-image").src(Signal::derive_local(move ||service.url(tile,provider.get()))).alt(Some("Basemap imagery tile".to_string())).into_view()}
-                        }
-                    }
-                }
                 box(class="map-overlay",class:map-hidden=move ||three_d.get()) {{map_surface}}
                 // GPS marker as plain rounded boxes: compositor draws them as quads, while
                 // canvas shapes cost area x segments per frame on Mali (45 vs 60 fps at z18).

@@ -16,7 +16,7 @@ struct Draw {
     offset: vec2<f32>,
     // Line width, CSS px.
     width: f32,
-    // 1 for dashed lines.
+    // 1 for dashed lines; 1 for dark-mode imagery.
     dashed: f32,
     // Straight (not premultiplied) colour.
     color: vec4<f32>,
@@ -184,5 +184,26 @@ fn vs_image(@builtin(vertex_index) i: u32) -> Image {
 
 @fragment
 fn fs_image(in: Image) -> @location(0) vec4<f32> {
-    return vec4<f32>(textureSample(atlas, atlas_sampler, in.uv).rgb, 1.0);
+    var c = textureSample(atlas, atlas_sampler, in.uv).rgb;
+    if (draw.dashed > 0.5) {
+        c = dark_tile(c);
+    }
+    return vec4<f32>(c, 1.0);
+}
+
+// Street tiles in dark mode, as CSS filter: invert(1) hue-rotate(180deg) brightness(0.95)
+// contrast(0.9) saturate(0.6). Matrices from Filter Effects spec.
+fn dark_tile(rgb: vec3<f32>) -> vec3<f32> {
+    var c = 1.0 - rgb;
+    c = clamp(vec3<f32>(
+        dot(c, vec3<f32>(-0.574, 1.430, 0.144)),
+        dot(c, vec3<f32>(0.426, 0.430, 0.144)),
+        dot(c, vec3<f32>(0.426, 1.430, -0.856)),
+    ), vec3<f32>(0.0), vec3<f32>(1.0));
+    c = clamp((c * 0.95 - 0.5) * 0.9 + 0.5, vec3<f32>(0.0), vec3<f32>(1.0));
+    return clamp(vec3<f32>(
+        dot(c, vec3<f32>(0.6852, 0.2860, 0.0288)),
+        dot(c, vec3<f32>(0.0852, 0.8860, 0.0288)),
+        dot(c, vec3<f32>(0.0852, 0.2860, 0.6288)),
+    ), vec3<f32>(0.0), vec3<f32>(1.0));
 }

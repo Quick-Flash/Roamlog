@@ -10,13 +10,10 @@
 
 .map-card { flex: 1; min-height: 160px; position: relative; overflow: hidden; background: var(--zui-color-muted); }
 .map-viewport { position: absolute; inset: 0; overflow: hidden; touch-action: none; }
-.map-tiles, .map-vector-tiles, .map-overlay { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
-.map-tile { position: absolute; left: 0; top: 0; width: 256px; height: 256px; transform-origin: 0 0; }
-.map-tile-image { width: 256px; height: 256px; }
+.map-overlay { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
 .map-vector-tile { position: absolute; left: 0; top: 0; width: 512px; height: 512px; transform-origin: 0 0; }
 .map-vector-image { width: 512px; height: 512px; }
 .map-hidden { display: none; }
-.map-dark { filter: invert(1) hue-rotate(180deg) brightness(0.95) contrast(0.9) saturate(0.6); }
 
 .map-top { position: absolute; top: calc(10px + var(--zgui-safe-area-top, 0px)); left: 10px; max-width: calc(100% - 126px); flex-wrap: wrap; gap: 8px; align-items: center; }
 .map-chip { height: 40px; min-height: 40px; padding: 0 14px; border-radius: 20px; font-size: 13px; }
