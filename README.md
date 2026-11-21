@@ -11,6 +11,10 @@ distance; shared road history shows where you have been across all trips.
 Optionally share your location and finished trips with friends and groups through
 encrypted phone-to-phone connections, without a Roamlog account.
 
+<a href="docs/media/roamlog-demo.mp4"><img src="docs/images/demo-video.png" width="240" alt="Roamlog demo video, 58 seconds"></a>
+
+[Watch the 58-second demo video](docs/media/roamlog-demo.mp4) (music: "Severe Tire Damage" by Kevin MacLeod, incompetech.com, CC BY 4.0).
+
 <p>
 <img src="docs/images/demo-dark.png" width="240" alt="Combined demo routes in dark mode">
 <img src="docs/images/demo-light.png" width="240" alt="Demo road coverage in light mode">
