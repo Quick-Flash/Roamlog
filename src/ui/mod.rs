@@ -147,7 +147,8 @@ fn dark_theme() -> Theme {
     )
 }
 
-/// Day map: near-white cool surfaces, same blue darkened for contrast.
+/// Day map: near-white cool surfaces, same blue darkened for contrast. Accent (selection) is a
+/// clear blue tint: a paler one vanishes against the grey segment tracks.
 fn light_theme() -> Theme {
     Theme::light().with_css(
         "--zui-color-background: oklch(0.985 0.004 250);
@@ -162,10 +163,10 @@ fn light_theme() -> Theme {
          --zui-color-secondary-foreground: oklch(0.25 0.02 255);
          --zui-color-muted: oklch(0.955 0.007 250);
          --zui-color-muted-foreground: oklch(0.5 0.02 255);
-         --zui-color-accent: oklch(0.94 0.035 262);
-         --zui-color-accent-foreground: oklch(0.42 0.15 262);
-         --zui-color-border: oklch(0.9 0.01 250);
-         --zui-color-input: oklch(0.88 0.01 250);
+         --zui-color-accent: oklch(0.88 0.07 262);
+         --zui-color-accent-foreground: oklch(0.38 0.17 262);
+         --zui-color-border: oklch(0.87 0.012 250);
+         --zui-color-input: oklch(0.83 0.014 250);
          --zui-color-ring: oklch(0.55 0.17 262);
          --zui-radius-base: 12px;",
     )

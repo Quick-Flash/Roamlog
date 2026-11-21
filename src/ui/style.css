@@ -388,3 +388,83 @@
 .alert-bar-head { align-items: center; gap: 6px; }
 .area-bar .area-filter { margin-top: 0; min-height: 36px; height: 36px; }
 .area-bar .area-filter .area-button { height: 32px; min-height: 32px; }
+
+/* Trip bar: no card behind it; picker, buttons and recording metrics float on the map. */
+.trip-bar { height: 52px; padding: 0; align-items: stretch; background: none; border: none; }
+.tab-stage > .trip-bar { box-shadow: none; }
+.trip-bar .category-select, .trip-metrics, .trip-actions .zui-button { height: 52px; min-height: 52px; border-radius: 16px; box-shadow: 0 3px 12px rgba(0,0,0,.28); }
+.trip-bar .category-select, .trip-metrics, .trip-actions .pause-trip, .trip-actions .finish-trip { background: var(--zui-color-card); border: 1px solid var(--zui-color-border); }
+.trip-metrics { justify-content: center; gap: 0; padding: 0 12px; }
+.trip-metrics .trip-distance { font-size: 18px; }
+.trip-metrics .trip-clock { font-size: 14px; }
+.map-card .attribution { bottom: 64px; }
+.map-card .map-bottom-stack { bottom: 82px; }
+.map-card .map-controls { bottom: 92px; }
+.map-card .terrain-help { bottom: 148px; }
+.tab-stage > .update-notice { bottom: 82px; }
+
+/* Over the map, hover stays opaque: secondary hover is 80% see-through. */
+.map-chip:hover, .map-button:hover, .card-close:hover { background-color: var(--zui-color-secondary) !important; }
+.map-button.locating:hover { background-color: var(--zui-color-primary) !important; }
+.map-summary .friends-button:hover, .map-summary .layers-button:hover { background-color: var(--map-pill) !important; }
+
+/* Close on map cards: boxed, large X. */
+.card-close { width: 40px; height: 40px; min-height: 40px; padding: 0; flex-shrink: 0; border-radius: 12px; }
+.card-close .zui-icon { width: 24px !important; height: 24px !important; }
+
+/* Alert area strip: title + hint beside the close, compact chips. */
+.area-bar.alert-bar { padding: 6px 6px 6px 12px; }
+.area-bar-title { font-size: 13px; font-weight: 700; }
+.area-hint { font-size: 11px; }
+.area-bar .area-filter { min-height: 32px; height: 32px; }
+.area-bar .area-filter .area-button { height: 30px; min-height: 30px; }
+
+/* Large system text: summary truncates instead of running under friends and layers. */
+.map-summary-link { overflow: hidden; }
+.map-summary-link column { min-width: 0; overflow: hidden; }
+.summary-title, .map-summary-link .muted { max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.map-summary .friends-button, .map-summary .layers-button, .map-summary .summary-reset { flex-shrink: 0; }
+
+/* Friends list group filter chips. */
+.group-filter { min-height: 38px; height: 38px; overflow-x: auto; overflow-y: hidden; }
+.group-filter .area-button { height: 34px; min-height: 34px; padding: 0 12px; font-size: 13px; }
+.group-filter .seg-on { background: var(--zui-color-accent); border-color: var(--zui-color-primary); color: var(--zui-color-accent-foreground); }
+
+/* Segments size to their words so the longest never runs off the edge. */
+.segmented .zui-button { flex: 1 1 auto; min-width: 0; padding: 0 8px; }
+
+/* System text size capped at 130%: larger overflows fixed-height map cards and buttons.
+   Doubled :root outranks the theme's own token sheet. */
+:root:root {
+  --zui-type-size-xs: calc(12px * min(var(--zgui-text-scale, 1), 1.3));
+  --zui-type-leading-xs: calc(16px * min(var(--zgui-text-scale, 1), 1.3));
+  --zui-type-size-sm: calc(14px * min(var(--zgui-text-scale, 1), 1.3));
+  --zui-type-leading-sm: calc(20px * min(var(--zgui-text-scale, 1), 1.3));
+  --zui-type-size-md: calc(16px * min(var(--zgui-text-scale, 1), 1.3));
+  --zui-type-leading-md: calc(24px * min(var(--zgui-text-scale, 1), 1.3));
+  --zui-type-size-lg: calc(18px * min(var(--zgui-text-scale, 1), 1.3));
+  --zui-type-leading-lg: calc(28px * min(var(--zgui-text-scale, 1), 1.3));
+  --zui-type-size-xl: calc(20px * min(var(--zgui-text-scale, 1), 1.3));
+  --zui-type-leading-xl: calc(28px * min(var(--zgui-text-scale, 1), 1.3));
+  --zui-type-size-2xl: calc(24px * min(var(--zgui-text-scale, 1), 1.3));
+  --zui-type-leading-2xl: calc(32px * min(var(--zgui-text-scale, 1), 1.3));
+  --zui-type-size-3xl: calc(30px * min(var(--zgui-text-scale, 1), 1.3));
+  --zui-type-leading-3xl: calc(36px * min(var(--zgui-text-scale, 1), 1.3));
+}
+
+/* Friend faces: even padding either side of the stack. */
+.map-summary .friends-button { padding: 0 6px; }
+.map-summary .friends-button .stack-more { padding-right: 4px; }
+
+/* History Trips/Stats: active tab marked like every other selected segment. */
+.history-tabs .zui-tabs__trigger[data-state="active"] { background-color: var(--zui-color-accent) !important; color: var(--zui-color-accent-foreground) !important; font-weight: 600; }
+
+/* Buttons inside the map summary card: muted is nearly the card's own white in light mode, so
+   tint from the foreground instead (darker in light, lighter in dark). */
+.map-summary { --map-pill: color-mix(in oklab, var(--zui-color-foreground) 9%, var(--zui-color-card)); }
+.map-summary .friends-button, .map-summary .layers-button { background-color: var(--map-pill) !important; }
+.stack-avatar { border-color: var(--map-pill); }
+
+/* Checkboxes: zgui draws a 1 px input-colour border that disappears on white cards. */
+.zui-checkbox { border-width: 2px !important; border-color: var(--zui-color-muted-foreground) !important; }
+.zui-checkbox:checked { border-color: var(--zui-color-primary) !important; }

@@ -9,7 +9,7 @@ use crate::sharing::{
     location::UpdatePolicy,
     manager::Mode,
     node::{FriendState, read_published},
-    pairing::GroupRef,
+    pairing::{FriendInvite, GroupRef},
     peers::{Friend, Permission},
 };
 use std::path::PathBuf;
@@ -31,6 +31,7 @@ struct Row {
     /// Highest grant from this friend's groups, and their names.
     group_permission: Permission,
     groups: String,
+    group_ids: Vec<String>,
     blocked: bool,
     status: String,
 }
@@ -166,6 +167,11 @@ fn load(directory: PathBuf) -> Result<Loaded, String> {
                     .map(|g| g.name.as_str())
                     .collect::<Vec<_>>()
                     .join(", "),
+                group_ids: groups
+                    .iter()
+                    .filter(|g| f.groups.contains(&g.id) && g.leaving_since_ms.is_none())
+                    .map(|g| g.id.clone())
+                    .collect(),
             }
         })
         .collect();
@@ -404,6 +410,8 @@ pub fn Friends() -> impl IntoView {
     });
     on_cleanup_local(move || drop(opened));
     let join_access = RwSignal::new_local(Permission::TripsOnly);
+    // Group the shown invitation is for; page title says so.
+    let inviting = RwSignal::new_local(None::<String>);
     let begin = move |link: Option<String>, group: Option<GroupRef>| {
         let display = name.get_untracked().trim().to_owned();
         if display.is_empty() {
@@ -415,6 +423,7 @@ pub fn Friends() -> impl IntoView {
         let _ = std::fs::write(directory.join("sharing-name"), &display);
         crate::platform::suspend_sharing(&directory);
         join_access.set(Permission::TripsOnly);
+        inviting.set(group.as_ref().map(|g| g.name.clone()));
         step.set(PairStep::Starting);
         pairing.set_value(Some(Pairing::start(directory, display, link, group)));
     };
@@ -472,21 +481,37 @@ pub fn Friends() -> impl IntoView {
     });
     on_cleanup_local(move || drop(deep_link));
     let custom_timer = RwSignal::new_local(false);
-    // Opened invitation link: start pairing at once when a name is set; otherwise leave the
-    // link in the field until the user enters a name.
-    let invited = zgui::reactive::RenderEffect::new(move |_| {
-        let link = s.invite_link.get();
-        if link.trim().is_empty() {
+    // Join with link box. A whole link (pasted, or opened from another app) starts at once when
+    // a name is set; one typed key by key waits until complete; Join reports a bad one.
+    let pasted = RwSignal::new_local(String::new());
+    let join = move || {
+        adding.set(true);
+        if name.get_untracked().trim().is_empty() {
+            s.message
+                .set("Enter your name, then tap Join; they see it while pairing.".into());
             return;
         }
-        adding.set(true);
+        let link = pasted.get_untracked().trim().to_owned();
+        pasted.set(String::new());
+        begin(Some(link), None);
+    };
+    let whole_link = zgui::reactive::RenderEffect::new(move |_| {
+        let complete = pasted.with(|l| FriendInvite::from_link(l.trim()).is_ok());
         let ready = matches!(
             step.get_untracked(),
             PairStep::Idle | PairStep::Done(_) | PairStep::Failed(_)
         );
-        if ready && !name.get_untracked().trim().is_empty() {
+        if complete && ready && !name.get_untracked().trim().is_empty() {
+            join();
+        }
+    });
+    on_cleanup_local(move || drop(whole_link));
+    let invited = zgui::reactive::RenderEffect::new(move |_| {
+        let link = s.invite_link.get();
+        if !link.trim().is_empty() {
             s.invite_link.set(String::new());
-            begin(Some(link.trim().to_owned()), None);
+            adding.set(true);
+            pasted.set(link);
         }
     });
     on_cleanup_local(move || drop(invited));
@@ -500,14 +525,18 @@ pub fn Friends() -> impl IntoView {
     let mode = move || loaded.with(|l| l.as_ref().map_or(Mode::Off, |l| l.mode));
     let search = RwSignal::new_local(String::new());
     let all_rows = move || loaded.with(|l| l.as_ref().map_or(0, |l| l.rows.len()));
+    // Friends list limited to one group's members: group id, None for everyone.
+    let group_filter = RwSignal::new_local(None::<String>);
     let rows = move || {
         let wanted = search.with(|q| q.trim().to_lowercase());
+        let group = group_filter.get();
         loaded.with(|l| {
             l.as_ref()
                 .map(|l| {
                     l.rows
                         .iter()
                         .filter(|r| wanted.is_empty() || r.name.to_lowercase().contains(&wanted))
+                        .filter(|r| group.as_ref().is_none_or(|g| r.group_ids.contains(g)))
                         .cloned()
                         .collect::<Vec<_>>()
                 })
@@ -566,7 +595,9 @@ pub fn Friends() -> impl IntoView {
                 PairStep::Confirm {
                     group: Some(group), ..
                 } => format!("Invite to {group}"),
-                _ => "Add friend".into(),
+                _ => inviting
+                    .get()
+                    .map_or_else(|| "Add friend".into(), |group| format!("Invite to {group}")),
             }
         } else if let Some(id) = detail.get() {
             rows()
@@ -641,8 +672,8 @@ pub fn Friends() -> impl IntoView {
                                 Button(variant=ButtonVariant::Outline,class="scan-invite",on:click=move |_|{if let Err(error)=crate::platform::scan_invite(s.directory.get_value()){s.message.set(error)}}) {"Scan theirs"}
                             }
                             row(class="create-row") {
-                                Input(value=s.invite_link,label="Invitation link",placeholder="Or paste roamlog://pair/… link",class="grow")
-                                Button(variant=ButtonVariant::Outline,class="join-invite",disabled=Signal::derive_local(move ||s.invite_link.with(|l|l.trim().is_empty())),on:click=move |_|{let link=s.invite_link.get_untracked().trim().to_owned();s.invite_link.set(String::new());begin(Some(link),None)}) {"Pair"}
+                                Input(value=pasted,label="Join with link",placeholder="Or paste a friend or group link",class="grow")
+                                Button(variant=ButtonVariant::Outline,class="join-invite",disabled=Signal::derive_local(move ||pasted.with(|l|l.trim().is_empty())),on:click=move |_|join()) {"Join"}
                             }
                         }
                         if move ||matches!(step.get(),PairStep::Starting) {
@@ -658,6 +689,7 @@ pub fn Friends() -> impl IntoView {
                                     {zgui::elements::image().class("qr-image").src(Signal::derive_local(move ||qr_url.get())).alt(Some("Invitation QR code".to_string())).into_view()}
                                 }
                             }
+                            text(class="muted") {"Not together? Share the link. They paste it into Join with link, under Add friend or Groups."}
                             Button(variant=ButtonVariant::Outline,class="share-invite",on:click=move |_|{if let PairStep::Invite{link,..}=step.get_untracked(){crate::platform::share_text(&link)}}) {"Share link"}
                         }
                         if move ||matches!(step.get(),PairStep::Confirm{..}) {
@@ -765,6 +797,11 @@ pub fn Friends() -> impl IntoView {
                                 GroupItem(group=group.clone(),loaded=loaded,confirm=confirm,invite=begin_group,edit=edit)
                             }
                             if move ||groups().is_empty() {text(class="muted") {"No groups yet. A group shares locations among several friends at once: create one, then invite people."}}
+                            text(class="section-title") {"Invited to a group?"}
+                            row(class="create-row") {
+                                Input(value=pasted,label="Join with link",placeholder="Paste group link",class="grow")
+                                Button(variant=ButtonVariant::Outline,class="join-group-link",disabled=Signal::derive_local(move ||pasted.with(|l|l.trim().is_empty())),on:click=move |_|join()) {"Join"}
+                            }
                             Dialog(open=new_group) {
                                 DialogContent(class="sheet") {
                                     DialogHeader {DialogTitle {"New group"}}
@@ -835,6 +872,21 @@ pub fn Friends() -> impl IntoView {
                             }
                             text(class="section-title") {{move ||format!("Friends · {}",all_rows())}}
                             if move ||all_rows()>=4 {Input(value=search,label="Search friends",placeholder="Search friends")}
+                            if move ||!groups().is_empty() {
+                                scroll(class="group-filter") {
+                                    row(class="friend-strip-row") {
+                                        for option in move ||std::iter::once((None,"All".to_string())).chain(groups().into_iter().map(|g|(Some(g.id),g.name))).collect::<Vec<_>>(),key=|o|o.clone() {
+                                            {{
+                                                let (id,label)=option;
+                                                let on=id.clone();
+                                                view! {
+                                                    Button(variant=ButtonVariant::Outline,class="area-button",class:seg-on=move ||group_filter.with(|g|*g==on),on:click=move |_|group_filter.set(id.clone())) {{label.clone()}}
+                                                }
+                                            }}
+                                        }
+                                    }
+                                }
+                            }
                             if move ||rows().is_empty() {text(class="muted") {{move ||if all_rows()==0 {"No friends yet. Tap Add friend to pair with someone nearby."} else {"No friend matches."}}}}
                             if move ||!rows().is_empty() {
                             column(class="friends-nav-group") {

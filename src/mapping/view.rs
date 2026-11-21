@@ -30,7 +30,7 @@ use zgui::{
 use zgui_ui::prelude::*;
 use zgui_ui_icons::{
     prelude::*,
-    set::mark::{MINUS, PLUS},
+    set::mark::{CROSS, MINUS, PLUS},
 };
 
 #[component]
@@ -1027,7 +1027,7 @@ pub fn MapView() -> impl IntoView {
                                     format!("{connection} · {when} · ±{:.0} m",p.accuracy_m)
                                 }).unwrap_or_default())}}
                             }
-                            Button(variant=ButtonVariant::Ghost,a11y:label="Close friend profile",on:click=move |_|s.map_friend_selected.set(None)) {"×"}
+                            Button(variant=ButtonVariant::Secondary,class="card-close",a11y:label="Close friend profile",on:click=move |_|s.map_friend_selected.set(None)) {Icon(icon=CROSS)}
                         }
                         row(class="map-profile-actions") {
                             Button(variant=ButtonVariant::Outline,class="open-friend-page",on:click=move |_|{

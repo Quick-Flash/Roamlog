@@ -1,6 +1,7 @@
 use crate::ui::state::UiState;
 use zgui::prelude::*;
 use zgui_ui::prelude::*;
+use zgui_ui_icons::{prelude::*, set::mark::CROSS};
 
 /// Bottom map strip: areas shown on map, or the shown saved area's traveled share.
 #[component]
@@ -35,12 +36,14 @@ pub fn AreaBar() -> impl IntoView {
         if move ||!s.area_marks.with(Vec::is_empty)&&s.map_friend_selected.with(Option::is_none) {
             column(class="area-bar alert-bar") {
                 row(class="alert-bar-head") {
-                    text(class="area-count grow") {{move ||{
-                        let n=s.area_marks.with(Vec::len);
-                        let kind=if alerts() {"alert area"} else {"area"};
-                        format!("{n} {kind}{} · tap a name to open",if n==1 {""} else {"s"})
-                    }}}
-                    Button(variant=ButtonVariant::Outline,class="area-button",on:click=move |_|s.area_marks.set(Vec::new())) {"Hide"}
+                    column(class="grow") {
+                        text(class="area-bar-title") {{move ||{
+                            let n=s.area_marks.with(Vec::len);
+                            format!("{} · {n}",if alerts() {"Alert areas"} else {"Areas"})
+                        }}}
+                        text(class="muted area-hint") {"Tap a name on the map to open it"}
+                    }
+                    Button(variant=ButtonVariant::Secondary,class="card-close",a11y:label="Hide areas",on:click=move |_|s.area_marks.set(Vec::new())) {Icon(icon=CROSS)}
                 }
                 if move ||alerts()&&!s.area_filters.with(Vec::is_empty) {
                     scroll(class="alert-filter area-filter") {
@@ -77,7 +80,7 @@ pub fn AreaBar() -> impl IntoView {
                         }
                         Button(variant=ButtonVariant::Outline,class="area-button edit-area",on:click=move |_|if let Some(id)=s.area_id.get_untracked() {s.edit_area(id)}) {"Edit area"}
                         Button(variant=ButtonVariant::Outline,class="area-button",on:click=move |_|s.area_open.set(true)) {"Details"}
-                        Button(variant=ButtonVariant::Outline,class="area-button",on:click=move |_|s.cancel_area()) {"Hide"}
+                        Button(variant=ButtonVariant::Secondary,class="card-close",a11y:label="Hide area",on:click=move |_|s.cancel_area()) {Icon(icon=CROSS)}
                     }
                 }
             }
