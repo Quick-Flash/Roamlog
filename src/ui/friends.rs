@@ -13,6 +13,7 @@ use crate::sharing::{
     peers::{Friend, Permission},
 };
 use std::path::PathBuf;
+use std::sync::Mutex;
 use std::time::Duration;
 use zgui::prelude::*;
 use zgui::reactive::UnsyncCallback;
@@ -304,6 +305,31 @@ fn change(
     });
 }
 
+/// Pairing outlives the page: Android drops the window while Roamlog is hidden (e.g. behind the
+/// share sheet), and the page rebuilt on return picks the session up again.
+struct Session {
+    pairing: Pairing,
+    /// Group being invited to; page title says so.
+    inviting: Option<String>,
+    /// Started on the Groups page; a failure returns there.
+    from_groups: bool,
+    /// Who and which group the last confirm step was about; Done arrives after Waiting.
+    confirmed: Option<(String, Option<String>, bool)>,
+    /// Invitation expiry for the countdown.
+    expires: Option<u64>,
+}
+
+static SESSION: Mutex<Option<Session>> = Mutex::new(None);
+
+fn session<R>(f: impl FnOnce(&mut Option<Session>) -> R) -> R {
+    f(&mut SESSION.lock().expect("pairing lock"))
+}
+
+/// Pairing in progress; its endpoint holds the identity, so sharing must not restart meanwhile.
+pub(crate) fn pairing_open() -> bool {
+    session(|x| x.is_some())
+}
+
 pub fn sheet() -> impl IntoView {
     view! {
         Friends()
@@ -318,7 +344,6 @@ pub fn Friends() -> impl IntoView {
     let saved_name = std::fs::read_to_string(directory.join("sharing-name")).unwrap_or_default();
     let name = RwSignal::new_local(saved_name);
     let loaded: RwSignal<Option<Loaded>, LocalStorage> = RwSignal::new_local(None);
-    let pairing: StoredValue<Option<Pairing>, LocalStorage> = StoredValue::new_local(None);
     let step = RwSignal::new_local(PairStep::Idle);
     let qr: StoredValue<Option<ImageBytes>, LocalStorage> = StoredValue::new_local(None);
     let qr_url = RwSignal::new_local(None::<String>);
@@ -341,14 +366,24 @@ pub fn Friends() -> impl IntoView {
     };
     // Pairing panel: open while adding a friend, joining from a link, or pairing.
     let adding = RwSignal::new_local(false);
-    // Who and which group the last confirm step was about; Done arrives after Waiting.
-    let last_confirm = StoredValue::new_local(None::<(String, Option<String>, bool)>);
+    let groups_open = RwSignal::new_local(false);
+    // Group the shown invitation is for; page title says so.
+    let inviting = RwSignal::new_local(None::<String>);
+    // Back from another app mid-pairing: reopen the pairing panel where it was.
+    if let Some((group, from_groups)) =
+        session(|x| x.as_ref().map(|x| (x.inviting.clone(), x.from_groups)))
+    {
+        inviting.set(group);
+        groups_open.set(from_groups);
+        adding.set(true);
+        s.friends_open.set(true);
+    }
     // Poll pairing progress and friend status while sheet is open.
     let timer = set_interval(Duration::from_millis(500), move || {
         if !s.friends_open.get_untracked() {
             return;
         }
-        let next = pairing.with_value(|p| p.as_ref().map(Pairing::step));
+        let next = session(|x| x.as_ref().map(|x| x.pairing.step()));
         if let Some(next) = next
             && step.with_untracked(|old| old != &next)
         {
@@ -372,10 +407,16 @@ pub fn Friends() -> impl IntoView {
                 ..
             } = &next
             {
-                last_confirm.set_value(Some((name.clone(), group.clone(), *joining)));
+                let confirmed = Some((name.clone(), group.clone(), *joining));
+                session(|x| {
+                    if let Some(x) = x {
+                        x.confirmed = confirmed;
+                    }
+                });
             }
+            let confirmed = session(|x| x.as_ref().and_then(|x| x.confirmed.clone()));
             if let PairStep::Done(message) = &next {
-                let text = match last_confirm.get_value() {
+                let text = match confirmed.clone() {
                     Some((_, Some(group), true)) => format!("Joined {group}."),
                     Some((name, Some(group), false)) => format!("Added {name} to {group}."),
                     _ => message.clone(),
@@ -383,9 +424,18 @@ pub fn Friends() -> impl IntoView {
                 s.message.set(text);
                 adding.set(false);
             }
+            // Group pairing failed: back to the Groups page with the reason, not Add friend.
+            if let PairStep::Failed(error) = &next
+                && (groups_open.get_untracked()
+                    || inviting.get_untracked().is_some()
+                    || confirmed.is_some_and(|(_, group, _)| group.is_some()))
+            {
+                s.message.set(pairing_error(error));
+                adding.set(false);
+            }
             step.set(next);
             if finished {
-                pairing.set_value(None);
+                session(|x| *x = None);
                 qr.set_value(None);
                 qr_url.set(None);
                 // Pairing endpoint closed; let service rebind its node.
@@ -410,8 +460,6 @@ pub fn Friends() -> impl IntoView {
     });
     on_cleanup_local(move || drop(opened));
     let join_access = RwSignal::new_local(Permission::TripsOnly);
-    // Group the shown invitation is for; page title says so.
-    let inviting = RwSignal::new_local(None::<String>);
     let begin = move |link: Option<String>, group: Option<GroupRef>| {
         let display = name.get_untracked().trim().to_owned();
         if display.is_empty() {
@@ -423,12 +471,22 @@ pub fn Friends() -> impl IntoView {
         let _ = std::fs::write(directory.join("sharing-name"), &display);
         crate::platform::suspend_sharing(&directory);
         join_access.set(Permission::TripsOnly);
-        inviting.set(group.as_ref().map(|g| g.name.clone()));
+        let group_name = group.as_ref().map(|g| g.name.clone());
+        inviting.set(group_name.clone());
         step.set(PairStep::Starting);
-        pairing.set_value(Some(Pairing::start(directory, display, link, group)));
+        let pairing = Pairing::start(directory, display, link, group);
+        session(|x| {
+            *x = Some(Session {
+                pairing,
+                inviting: group_name,
+                from_groups: groups_open.get_untracked(),
+                confirmed: None,
+                expires: None,
+            })
+        });
     };
     let cancel = move || {
-        pairing.set_value(None);
+        session(|x| *x = None);
         qr.set_value(None);
         qr_url.set(None);
         step.set(PairStep::Idle);
@@ -444,7 +502,9 @@ pub fn Friends() -> impl IntoView {
     let invite_clock = zgui::reactive::RenderEffect::new(move |_| {
         if matches!(step.get(), PairStep::Invite { .. }) {
             if invite_until.with_untracked(Option::is_none) {
-                invite_until.set(Some(now_ms() + 300_000));
+                let fresh = now_ms() + 300_000;
+                let until = session(|x| x.as_mut().map(|x| *x.expires.get_or_insert(fresh)));
+                invite_until.set(Some(until.unwrap_or(fresh)));
             }
         } else {
             invite_until.set(None);
@@ -463,7 +523,6 @@ pub fn Friends() -> impl IntoView {
     let group_name = RwSignal::new_local(String::new());
     let group_policy = RwSignal::new_local("managed".to_string());
     let group_access = RwSignal::new_local(Permission::Always);
-    let groups_open = RwSignal::new_local(false);
     let new_group = RwSignal::new_local(false);
     let detail = s.friend_detail;
     // Opened straight to a friend (e.g. from the map): drop sub-pages left open underneath,
@@ -595,9 +654,11 @@ pub fn Friends() -> impl IntoView {
                 PairStep::Confirm {
                     group: Some(group), ..
                 } => format!("Invite to {group}"),
-                _ => inviting
-                    .get()
-                    .map_or_else(|| "Add friend".into(), |group| format!("Invite to {group}")),
+                _ => match inviting.get() {
+                    Some(group) => format!("Invite to {group}"),
+                    None if groups_open.get() => "Join group".into(),
+                    None => "Add friend".into(),
+                },
             }
         } else if let Some(id) = detail.get() {
             rows()
@@ -716,8 +777,8 @@ pub fn Friends() -> impl IntoView {
                                 }
                             }
                             row(class="row-actions") {
-                                Button(class="confirm-pair",on:click=move |_|pairing.with_value(|p|if let Some(p)=p{p.vote(true,if matches!(step.get_untracked(),PairStep::Confirm{group:None,..}) {direct_access.get_untracked()} else {join_access.get_untracked()})})) {"Codes match"}
-                                Button(variant=ButtonVariant::Outline,class="reject-pair",on:click=move |_|pairing.with_value(|p|if let Some(p)=p{p.vote(false,join_access.get_untracked())})) {"Codes differ — reject"}
+                                Button(class="confirm-pair",on:click=move |_|session(|x|if let Some(x)=x{x.pairing.vote(true,if matches!(step.get_untracked(),PairStep::Confirm{group:None,..}) {direct_access.get_untracked()} else {join_access.get_untracked()})})) {"Codes match"}
+                                Button(variant=ButtonVariant::Outline,class="reject-pair",on:click=move |_|session(|x|if let Some(x)=x{x.pairing.vote(false,join_access.get_untracked())})) {"Codes differ — reject"}
                             }
                         }
                         if move ||matches!(step.get(),PairStep::Waiting) {

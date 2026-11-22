@@ -51,7 +51,10 @@ pub fn Roamlog() -> impl IntoView {
     #[cfg(any(target_os = "android", target_os = "ios"))]
     {
         crate::platform::listen_invites();
-        crate::platform::resume_sharing(s.directory.get_value());
+        // Rebuilt after hiding mid-pairing: pairing endpoint still holds the identity.
+        if !friends::pairing_open() {
+            crate::platform::resume_sharing(s.directory.get_value());
+        }
         place_alerts::follow_selected_friend(s);
     }
     on_cleanup_local(move || drop(timer));
