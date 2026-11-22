@@ -1,19 +1,24 @@
 use super::state::UiState;
 use zgui::prelude::*;
 use zgui_ui::prelude::*;
+use zgui_ui_icons::{prelude::*, set::mark::CHECK};
 #[component]
 pub fn UpdateControls() -> impl IntoView {
     let s = UiState::current();
     let u = s.updates;
-    let label = NodeRef::new();
     view! {
         text(class="section-title") {"App updates"}
         text(class="muted") {{format!("Installed: {}",u.version())}}
-        row(class="filter-row") {
-            Checkbox(labelled_by=label,checked=Binding::controlled(Signal::derive_local(move ||if u.automatic.get(){Checked::Yes}else{Checked::No}),move |value|{
-                u.set_automatic(value==Checked::Yes);
-            }))
-            Label(node_ref=label) {"Check automatically while app runs"}
+        // Whole row is the tap target; the box alone is too small to hit reliably.
+        Button(variant=ButtonVariant::Ghost,class="check-row",
+            a11y:label=move ||format!("Check automatically while app runs: {}",if u.automatic.get(){"on"}else{"off"}),
+            on:click=move |_|u.set_automatic(!u.automatic.get_untracked())) {
+            box(class="check-square",class:check-square-on=move ||u.automatic.get()) {
+                if move ||u.automatic.get() {
+                    Icon(icon=CHECK,class="check-square-tick")
+                }
+            }
+            text {"Check automatically while app runs"}
         }
         text(class="muted") {"Checks GitHub on launch and every 6 hours. Downloads only after you tap. Android asks before installing. Finish trip first."}
         Button(variant=ButtonVariant::Outline,class="check-updates",disabled=Signal::derive_local(move ||u.busy.get()||!cfg!(target_os="android")),on:click=move |_|u.check(s.now.get_untracked())) {"Check for updates"}
