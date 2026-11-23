@@ -37,6 +37,8 @@ struct Session {
     view_epoch: u64,
     /// Own journal revision merged into current view.
     view_revision: u64,
+    /// Per viewed trip (index = view ID - 1): (peer ID or "me", person's name, original name).
+    view_from: Vec<(String, String, String)>,
 }
 
 /// Tile limit for area/nearest road loading: about 20 km square at z15.
@@ -47,6 +49,69 @@ const LARGE_AREA_TILES: usize = 12_000;
 const ROAD_TILES: usize = 1500;
 /// Nearest untraveled road search radius.
 const NEAREST_M: f64 = 1500.0;
+
+/// ID of category `name` in `categories`, added when missing.
+fn category_id(categories: &mut Vec<crate::model::Category>, name: &str) -> u64 {
+    if let Some(found) = categories.iter().find(|c| c.name == name) {
+        return found.id;
+    }
+    let id = categories.iter().map(|c| c.id).max().unwrap_or(0) + 1;
+    categories.push(crate::model::Category {
+        id,
+        name: name.to_owned(),
+    });
+    id
+}
+
+/// Adds fixes to own history as one finished trip, filed under own category `category` when
+/// one has that name. Returns the new trip ID.
+fn import(
+    session: &mut Session,
+    directory: &std::path::Path,
+    fixes: Vec<crate::model::Fix>,
+    name: &str,
+    category: &str,
+) -> Result<u64, String> {
+    session.store.catch_up()?;
+    if session.store.state.active().is_some() || recorder_alive(directory) {
+        return Err("Finish current trip before adding another".into());
+    }
+    let name = name.chars().take(120).collect::<String>();
+    let (Some(first), Some(last)) = (fixes.first(), fixes.last()) else {
+        return Err("Trip has no positions".into());
+    };
+    let category_id = session
+        .store
+        .state
+        .categories
+        .iter()
+        .find(|c| !category.is_empty() && c.name.eq_ignore_ascii_case(category))
+        .map(|c| c.id);
+    let mut events = vec![Event::Start {
+        timestamp_ms: first.timestamp_ms,
+        category_id,
+    }];
+    let finish = last.timestamp_ms;
+    events.extend(fixes.into_iter().map(|fix| Event::Fix { fix }));
+    events.push(Event::Finish {
+        timestamp_ms: finish,
+    });
+    session.store.commit_all(events)?;
+    let id = session
+        .store
+        .state
+        .trips
+        .last()
+        .map(|t| t.id)
+        .ok_or("Trip not saved")?;
+    if !name.trim().is_empty() {
+        session
+            .store
+            .commit(Event::RenameTrip { trip_id: id, name })?;
+    }
+    session.reset_roads();
+    Ok(id)
+}
 
 fn trip_filter(command: &Value) -> Result<TripFilter, String> {
     command
@@ -85,6 +150,18 @@ impl Session {
         self.coverage_revision = u64::MAX;
         self.matched_revision = u64::MAX;
         Ok(())
+    }
+
+    /// IDs of viewed trips that came from friends, not own journal.
+    fn friend_trips(&self) -> Vec<u64> {
+        if self.view.is_none() {
+            return Vec::new();
+        }
+        (1..)
+            .zip(&self.view_from)
+            .filter(|(_, from)| from.0 != "me")
+            .map(|(id, _)| id)
+            .collect()
     }
 
     /// History shown: own journal, or several people's finished trips merged.
@@ -141,10 +218,10 @@ impl Session {
             None
         } else {
             let mut merged = State::default();
+            let mut from = Vec::new();
             let label = people.len() > 1;
             for (id, name) in people {
                 let source = if id == "me" {
-                    merged.categories = self.store.state.categories.clone();
                     self.store.state.clone()
                 } else {
                     Store::open(path(id))?.state
@@ -155,16 +232,22 @@ impl Session {
                     .filter(|t| t.status == crate::model::Status::Finished)
                 {
                     let mut trip = trip;
+                    let original = trip.name.clone();
                     if label {
                         trip.name = format!("{} · {name}", trip.title());
                     }
-                    if id != "me" {
-                        trip.category_id = None;
-                    }
+                    // Everyone numbers categories separately; same name shares one entry.
+                    trip.category_id = trip
+                        .category_id
+                        .and_then(|c| source.categories.iter().find(|x| x.id == c))
+                        .map(|c| category_id(&mut merged.categories, &c.name));
+                    from.push((trip.started_ms, (id.clone(), name.clone(), original)));
                     merged.trips.push(trip);
                 }
             }
             merged.trips.sort_by_key(|t| t.started_ms);
+            from.sort_by_key(|f| f.0);
+            self.view_from = from.into_iter().map(|f| f.1).collect();
             for (index, trip) in merged.trips.iter_mut().enumerate() {
                 trip.id = index as u64 + 1;
             }
@@ -284,6 +367,7 @@ pub(crate) fn request(directory: PathBuf, command: Value) -> Result<Value, Strin
             view: None,
             view_epoch: 0,
             view_revision: 0,
+            view_from: Vec::new(),
         });
     }
     let session = guard.as_mut().unwrap();
@@ -371,7 +455,7 @@ pub(crate) fn request(directory: PathBuf, command: Value) -> Result<Value, Strin
                 sections = Some(kept);
             }
             Ok(
-                json!({"state": session.recovered, "total_distance_m": session.recovered.total_distance(None), "sections": sections, "road_total_m": total, "road_traveled_m": traveled, "coverage_filter":filter, "road_count": session.road_count, "platform_status": std::fs::read_to_string(status_path(&directory)).unwrap_or_default(), "position": session.position, "basemap": session.basemap}),
+                json!({"state": session.recovered, "total_distance_m": session.recovered.total_distance(None), "sections": sections, "road_total_m": total, "road_traveled_m": traveled, "coverage_filter":filter, "road_count": session.road_count, "platform_status": std::fs::read_to_string(status_path(&directory)).unwrap_or_default(), "position": session.position, "basemap": session.basemap, "friend_trips": session.friend_trips()}),
             )
         }
         "area" => {
@@ -449,56 +533,69 @@ pub(crate) fn request(directory: PathBuf, command: Value) -> Result<Value, Strin
                         .filter(|p| !p.estimated)
                         .map(|p| p.fix)
                         .collect();
-                    json!({"name": t.name, "started_ms": t.started_ms, "finished_ms": t.finished_ms,
-                        "distance_m": t.distance_m, "fixes": fixes})
+                    let category = session
+                        .store
+                        .state
+                        .categories
+                        .iter()
+                        .find(|c| Some(c.id) == t.category_id)
+                        .map(|c| c.name.as_str());
+                    json!({"name": t.name, "category": category, "started_ms": t.started_ms,
+                        "finished_ms": t.finished_ms, "distance_m": t.distance_m, "fixes": fixes})
                 })
                 .collect();
             Ok(json!({"trips": trips}))
         }
         // Friend's trip copied into own history as finished trip.
         "import_trip" => {
-            session.store.catch_up()?;
-            if session.store.state.active().is_some() || recorder_alive(&directory) {
-                return Err("Finish current trip before adding another".into());
-            }
             let fixes: Vec<crate::model::Fix> =
                 serde_json::from_value(command["fixes"].clone()).map_err(|e| e.to_string())?;
-            let name = command["name"]
-                .as_str()
-                .unwrap_or_default()
-                .chars()
-                .take(120)
-                .collect::<String>();
-            let (Some(first), Some(last)) = (fixes.first(), fixes.last()) else {
-                return Err("Trip has no positions".into());
-            };
-            let trip_id = session
-                .store
-                .state
-                .trips
-                .iter()
-                .map(|t| t.id)
-                .max()
-                .unwrap_or(0)
-                + 1;
-            let mut events = vec![Event::Start {
-                timestamp_ms: first.timestamp_ms,
-                category_id: None,
-            }];
-            let finish = last.timestamp_ms;
-            events.extend(fixes.into_iter().map(|fix| Event::Fix { fix }));
-            events.push(Event::Finish {
-                timestamp_ms: finish,
-            });
-            session.store.commit_all(events)?;
-            let id = session.store.state.trips.last().map_or(trip_id, |t| t.id);
-            if !name.trim().is_empty() {
-                session
-                    .store
-                    .commit(Event::RenameTrip { trip_id: id, name })?;
-            }
-            session.reset_roads();
+            let name = command["name"].as_str().unwrap_or_default();
+            let category = command["category"].as_str().unwrap_or_default();
+            let id = import(session, &directory, fixes, name, category)?;
             Ok(json!({"ok": true, "trip_id": id}))
+        }
+        // Friend's trip shown in History copied into own history, under own same-named category.
+        "import_view_trip" => {
+            let id = command["trip_id"].as_u64().ok_or("Missing trip")?;
+            let (trip, category) = session
+                .view
+                .as_ref()
+                .and_then(|(_, state)| {
+                    let trip = state.trips.iter().find(|t| t.id == id)?;
+                    let category = state
+                        .categories
+                        .iter()
+                        .find(|c| Some(c.id) == trip.category_id);
+                    Some((
+                        trip.clone(),
+                        category.map(|c| c.name.clone()).unwrap_or_default(),
+                    ))
+                })
+                .ok_or("Trip no longer shown")?;
+            let (peer, person, title) = session
+                .view_from
+                .get(id as usize - 1)
+                .cloned()
+                .ok_or("Trip no longer shown")?;
+            if peer == "me" {
+                return Err("Already one of your trips".into());
+            }
+            let fixes = trip
+                .points
+                .iter()
+                .filter(|p| !p.estimated)
+                .map(|p| p.fix)
+                .collect();
+            // Unnamed trips go by their category in History; keep that in the copy's name.
+            let title = match (title.is_empty(), category.is_empty()) {
+                (false, _) => title,
+                (true, false) => category.clone(),
+                (true, true) => "Trip".into(),
+            };
+            let name = format!("{title} (from {person})");
+            let id = import(session, &directory, fixes, &name, &category)?;
+            Ok(json!({"ok": true, "trip_id": id, "peer": peer}))
         }
         "backup" => Ok(json!({"journal": String::from_utf8(session.store.backup()?)
             .map_err(|e| e.to_string())?})),
@@ -711,8 +808,9 @@ mod tests {
         let shared = call(json!({"op": "shared_trips"}));
         let trip = shared["trips"][0].clone();
         assert!(!trip["fixes"].as_array().unwrap().is_empty());
-        let imported =
-            call(json!({"op": "import_trip", "name": "Run (from Alex)", "fixes": trip["fixes"]}));
+        assert_eq!(trip["category"], "Running");
+        let imported = call(json!({"op": "import_trip", "name": "Run (from Alex)",
+            "category": "running", "fixes": trip["fixes"]}));
         let state = call(json!({"op": "snapshot"}));
         let copy = state["state"]["trips"]
             .as_array()
@@ -721,6 +819,7 @@ mod tests {
             .find(|t| t["id"] == imported["trip_id"])
             .unwrap();
         assert_eq!(copy["name"], "Run (from Alex)");
+        assert_eq!(copy["category_id"], 1, "own same-named category");
         assert_eq!(copy["status"], "finished");
         assert!(copy["distance_m"].as_f64().unwrap() > 100.0);
         // Friend view: read-only synced journal replaces own history until cleared.
@@ -730,21 +829,60 @@ mod tests {
             .len();
         let friends = path.join("sharing/friend-history");
         std::fs::create_dir_all(&friends).unwrap();
-        let start = br#"{"op":"start","timestamp_ms":5,"category_id":null}"#;
+        // Friend numbers categories differently; their "Running" is their 2nd.
+        let categories = br#"{"op":"category","name":"Hike"}
+{"op":"category","name":"Running"}"#;
+        let start = br#"{"op":"start","timestamp_ms":5,"category_id":2}"#;
         let fix =
             br#"{"op":"fix","fix":{"lat":45.5,"lon":-122.6,"timestamp_ms":6,"accuracy_m":3}}"#;
         let finish = br#"{"op":"finish","timestamp_ms":7}"#;
         std::fs::write(
             friends.join("abc123.jsonl"),
-            [&start[..], b"\n", fix, b"\n", finish, b"\n"].concat(),
+            [
+                &categories[..],
+                b"\n",
+                start,
+                b"\n",
+                fix,
+                b"\n",
+                finish,
+                b"\n",
+            ]
+            .concat(),
         )
         .unwrap();
         let friend = json!([["abc123", "Alex"]]);
         let viewed = call(json!({"op": "snapshot", "people": friend}));
         assert_eq!(viewed["state"]["trips"].as_array().unwrap().len(), 1);
+        let category = &viewed["state"]["trips"][0]["category_id"];
+        let names = viewed["state"]["categories"].as_array().unwrap();
+        assert!(
+            names
+                .iter()
+                .any(|c| &c["id"] == category && c["name"] == "Running")
+        );
+        assert_eq!(viewed["friend_trips"], json!([1]));
+        // Added to own history under own "Running", not the friend's category number.
+        let before = own;
+        let added = call(json!({"op": "import_view_trip", "trip_id": 1}));
+        assert_eq!(added["peer"], "abc123");
+        let own = before + 1;
         let both = call(json!({"op": "snapshot", "people": [["me", "Me"], ["abc123", "Alex"]]}));
         let trips = both["state"]["trips"].as_array().unwrap();
         assert_eq!(trips.len(), own + 1);
+        let friend_ids = both["friend_trips"].as_array().unwrap();
+        assert_eq!(friend_ids.len(), 1);
+        let mine = trips
+            .iter()
+            .find(|t| !friend_ids.contains(&t["id"]))
+            .unwrap();
+        assert!(
+            request(
+                path.clone(),
+                json!({"op": "import_view_trip", "trip_id": mine["id"]})
+            )
+            .is_err()
+        );
         assert!(
             trips
                 .iter()
@@ -758,7 +896,15 @@ mod tests {
             .is_err()
         );
         let back = call(json!({"op": "snapshot"}));
-        assert_eq!(back["state"]["trips"].as_array().unwrap().len(), own);
+        let back_trips = back["state"]["trips"].as_array().unwrap();
+        assert_eq!(back_trips.len(), own);
+        let copy = back_trips
+            .iter()
+            .find(|t| t["id"] == added["trip_id"])
+            .unwrap();
+        assert_eq!(copy["name"], "Running (from Alex)");
+        assert_eq!(copy["category_id"], 1);
+        assert_eq!(back["friend_trips"], json!([]));
         // Release journal before TempDir cleanup; only this test uses singleton.
         *SESSION.lock().unwrap() = None;
         let persisted = Store::open(path.join("trips.jsonl")).unwrap();

@@ -13,7 +13,6 @@ pub fn load(directory: &Path) -> BTreeMap<u64, String> {
         .unwrap_or_default()
 }
 
-#[cfg_attr(not(any(target_os = "android", target_os = "ios")), allow(dead_code))]
 pub fn add(directory: &Path, trip_id: u64, peer: &str) {
     let mut sources = load(directory);
     sources.insert(trip_id, peer.to_owned());

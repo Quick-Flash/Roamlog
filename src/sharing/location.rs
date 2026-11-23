@@ -50,12 +50,15 @@ pub struct UpdatePolicy {
     pub movement_m: f64,
 }
 
+/// Fixed: with the app open, friends who are both online update every 15 s while moving;
+/// closed, the 5-minute check-ins set the pace.
 impl Default for UpdatePolicy {
     fn default() -> Self {
         Self {
-            minimum_interval_ms: 30_000,
+            minimum_interval_ms: 15_000,
             maximum_interval_ms: 600_000,
-            movement_m: 25.0,
+            // GPS drift while still often exceeds 25 m.
+            movement_m: 50.0,
         }
     }
 }

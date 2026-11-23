@@ -31,13 +31,17 @@ pub struct Style {
     pub layers: Vec<Vec<Polyline>>,
 }
 type SourceKey = Option<(TileId, u64)>;
-type RequestKey = (u64, TileId, SourceKey);
+/// Generation, tile, imagery source, overlay epoch.
+type RequestKey = (u64, TileId, SourceKey, u64);
+type Box = ([f64; 2], [f64; 2]);
 type Imagery = BTreeMap<TileId, (TileId, Arc<Payload>)>;
 #[derive(Clone, Copy)]
 pub struct Tiles {
     pub ready: StoredValue<BTreeMap<TileId, Arc<Payload>>, LocalStorage>,
     pending: StoredValue<HashSet<RequestKey>, LocalStorage>,
-    sources: StoredValue<BTreeMap<TileId, SourceKey>, LocalStorage>,
+    /// Source and overlay epoch each ready tile was drawn with.
+    sources: StoredValue<BTreeMap<TileId, (SourceKey, u64)>, LocalStorage>,
+    epochs: StoredValue<BTreeMap<TileId, u64>, LocalStorage>,
     pub revision: RwSignal<u64, LocalStorage>,
     pub error: RwSignal<String, LocalStorage>,
     generation: StoredValue<Arc<AtomicU64>, LocalStorage>,
@@ -49,6 +53,7 @@ impl Tiles {
             ready: StoredValue::new_local(BTreeMap::new()),
             pending: StoredValue::new_local(HashSet::new()),
             sources: StoredValue::new_local(BTreeMap::new()),
+            epochs: StoredValue::new_local(BTreeMap::new()),
             revision: RwSignal::new_local(0),
             error: RwSignal::new_local(String::new()),
             generation: StoredValue::new_local(Arc::new(AtomicU64::new(0))),
@@ -59,8 +64,26 @@ impl Tiles {
         self.generation.get_value().fetch_add(1, Ordering::Relaxed);
         self.ready.update_value(BTreeMap::clear);
         self.sources.update_value(BTreeMap::clear);
+        self.epochs.update_value(BTreeMap::clear);
         self.error.set(String::new());
         self.revision.update(|n| *n += 1);
+    }
+    /// Overlay lines changed inside `boxes`: re-render those tiles only, old ones stay shown meanwhile.
+    pub fn redraw(self, boxes: &[Box]) {
+        let ids: Vec<TileId> = self.ready.with_value(|r| {
+            r.keys()
+                .copied()
+                .filter(|&id| {
+                    let (min, max) = tile_box(id);
+                    boxes.iter().any(|(a, b)| {
+                        a[0] <= max[0] && b[0] >= min[0] && a[1] <= max[1] && b[1] >= min[1]
+                    })
+                })
+                .collect()
+        });
+        for id in ids {
+            self.epochs.update_value(|e| *e.entry(id).or_default() += 1);
+        }
     }
     pub fn request(
         self,
@@ -78,9 +101,10 @@ impl Tiles {
                 let incoming = imagery
                     .get(&id)
                     .map(|(id, payload)| (*id, payload.version()));
-                let cached = self.sources.with_value(|s| s.get(&id).copied().flatten());
+                let cached = self.sources.with_value(|s| s.get(&id).and_then(|v| v.0));
                 let source = best_source(cached, incoming);
-                (!style.satellite || source.is_some()).then_some((id, (version, id, source)))
+                let epoch = self.epochs.with_value(|e| e.get(&id).copied().unwrap_or(0));
+                (!style.satellite || source.is_some()).then_some((id, (version, id, source, epoch)))
             })
             .collect();
         *self.wanted.get_value().lock().unwrap() = wanted.clone();
@@ -91,12 +115,17 @@ impl Tiles {
         });
         self.ready.with_value(|ready| {
             self.sources
-                .update_value(|sources| sources.retain(|id, _| ready.contains_key(id)))
+                .update_value(|sources| sources.retain(|id, _| ready.contains_key(id)));
+            self.epochs.update_value(|epochs| {
+                epochs.retain(|id, _| ready.contains_key(id) || wanted.contains_key(id))
+            });
         });
         for (id, key) in wanted {
             let source = key.2;
             if self.ready.with_value(|r| r.contains_key(&id))
-                && self.sources.with_value(|s| s.get(&id) == Some(&source))
+                && self
+                    .sources
+                    .with_value(|s| s.get(&id) == Some(&(source, key.3)))
                 || self.pending.with_value(|p| p.contains(&key))
             {
                 continue;
@@ -129,8 +158,10 @@ impl Tiles {
                 self.pending.update_value(|p| {
                     p.remove(&key);
                 });
+                // Epoch check: overlay may have changed since request (render then has old lines).
                 if self.generation.get_value().load(Ordering::Relaxed) == version
                     && self.wanted.get_value().lock().unwrap().get(&id) == Some(&key)
+                    && self.epochs.with_value(|e| e.get(&id).copied().unwrap_or(0)) == key.3
                 {
                     match tile {
                         Ok(tile) => {
@@ -138,7 +169,7 @@ impl Tiles {
                                 r.insert(id, Arc::new(tile));
                             });
                             self.sources.update_value(|s| {
-                                s.insert(id, source);
+                                s.insert(id, (source, key.3));
                             });
                         }
                         Err(error) if error != "stale" => self.error.set(error),
@@ -150,6 +181,62 @@ impl Tiles {
         }
     }
 }
+/// Map-space tile bounds, widened by widest overlay stroke.
+fn tile_box(id: TileId) -> Box {
+    let span = WORLD / f64::from(1u32 << id.z);
+    let left = -WORLD / 2. + id.x as f64 * span;
+    let top = WORLD / 2. - f64::from(id.y) * span;
+    let margin = span * 8. / 512.;
+    (
+        [left - margin, top - span - margin],
+        [left + span + margin, top + margin],
+    )
+}
+
+/// Boxes around overlay lines that differ, or None when base map styling changed.
+/// Lines are compared in build order; a growing track only marks its new tail.
+pub fn changed_boxes(old: &Style, new: &Style) -> Option<Vec<Box>> {
+    if old.dark != new.dark
+        || old.satellite != new.satellite
+        || old.layers.len() != new.layers.len()
+    {
+        return None;
+    }
+    let bounds = |points: &[[f64; 2]]| {
+        points
+            .iter()
+            .fold(([f64::INFINITY; 2], [f64::NEG_INFINITY; 2]), |(a, b), p| {
+                (
+                    [a[0].min(p[0]), a[1].min(p[1])],
+                    [b[0].max(p[0]), b[1].max(p[1])],
+                )
+            })
+    };
+    let mut boxes = Vec::new();
+    for (old, new) in old.layers.iter().zip(&new.layers) {
+        for i in 0..old.len().max(new.len()) {
+            match (old.get(i), new.get(i)) {
+                (Some(a), Some(b)) if a.points == b.points => {}
+                (Some(a), Some(b)) => {
+                    let same = a
+                        .points
+                        .iter()
+                        .zip(&b.points)
+                        .take_while(|(p, q)| p == q)
+                        .count();
+                    let from = same.saturating_sub(1);
+                    boxes.push(bounds(&a.points[from..]));
+                    boxes.push(bounds(&b.points[from..]));
+                }
+                (Some(line), None) | (None, Some(line)) => boxes.push((line.min, line.max)),
+                (None, None) => {}
+            }
+        }
+    }
+    boxes.retain(|(a, b)| a[0] <= b[0] && a[1] <= b[1]);
+    Some(boxes)
+}
+
 /// A cached sharper composite remains useful even when raw source was evicted.
 fn best_source(cached: Option<(TileId, u64)>, incoming: Option<(TileId, u64)>) -> SourceKey {
     match (cached, incoming) {
@@ -547,7 +634,7 @@ mod quality_tests {
                 );
             });
             tiles.sources.update_value(|s| {
-                s.insert(id, source);
+                s.insert(id, (source, 0));
             });
             tiles.request(
                 &[],
@@ -562,9 +649,30 @@ mod quality_tests {
             );
             assert_eq!(
                 tiles.sources.with_value(|s| s.get(&id).copied()),
-                Some(source)
+                Some((source, 0))
             );
         });
+    }
+    #[test]
+    fn growing_track_marks_only_its_new_tail() {
+        let line = |points: Vec<[f64; 2]>| Polyline {
+            min: [0.; 2],
+            max: [1e9; 2],
+            points,
+        };
+        let style = |dark, track: Vec<[f64; 2]>| Style {
+            dark,
+            satellite: false,
+            layers: vec![vec![line(track)]],
+        };
+        let old = style(false, vec![[0., 0.], [100., 0.], [200., 0.]]);
+        let new = style(false, vec![[0., 0.], [100., 0.], [200., 0.], [300., 50.]]);
+        assert_eq!(
+            changed_boxes(&old, &new),
+            Some(vec![([200., 0.], [200., 0.]), ([200., 0.], [300., 50.])])
+        );
+        assert_eq!(changed_boxes(&old, &old), Some(vec![]));
+        assert_eq!(changed_boxes(&old, &style(true, vec![])), None);
     }
 }
 

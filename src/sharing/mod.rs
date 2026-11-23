@@ -8,6 +8,7 @@ mod android_locations;
 mod android_probe;
 #[cfg(all(any(target_os = "android", target_os = "ios"), feature = "ui"))]
 pub mod app;
+pub mod checkin;
 pub mod groups;
 #[cfg(target_os = "android")]
 pub mod identity;

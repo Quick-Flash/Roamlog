@@ -4,8 +4,9 @@ use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send};
 use objc2_core_location::{
-    CLAuthorizationStatus, CLLocation, CLLocationManager, CLLocationManagerDelegate,
-    kCLLocationAccuracyBest, kCLLocationAccuracyNearestTenMeters,
+    CLAuthorizationStatus, CLLocation, CLLocationDistanceMax, CLLocationManager,
+    CLLocationManagerDelegate, kCLLocationAccuracyBest, kCLLocationAccuracyNearestTenMeters,
+    kCLLocationAccuracyThreeKilometers,
 };
 use objc2_foundation::{NSArray, NSError, NSObject, NSObjectProtocol};
 use std::time::Duration;
@@ -75,6 +76,36 @@ pub(super) fn watch(
     precise: bool,
     callback: impl Fn(Update) + 'static,
 ) -> Watch {
+    start(mtm, background, callback, |manager| unsafe {
+        if precise {
+            manager.setDesiredAccuracy(kCLLocationAccuracyBest);
+        } else {
+            manager.setDesiredAccuracy(kCLLocationAccuracyNearestTenMeters);
+            manager.setDistanceFilter(20.0);
+        }
+    })
+}
+
+/// Keeps a backgrounded app running for check-ins at almost no cost: cell/Wi-Fi accuracy and
+/// no updates unless the phone moves very far. iOS suspends apps without a location session.
+pub(super) fn keep_alive(mtm: MainThreadMarker) -> Watch {
+    start(
+        mtm,
+        true,
+        |_| {},
+        |manager| unsafe {
+            manager.setDesiredAccuracy(kCLLocationAccuracyThreeKilometers);
+            manager.setDistanceFilter(CLLocationDistanceMax);
+        },
+    )
+}
+
+fn start(
+    mtm: MainThreadMarker,
+    background: bool,
+    callback: impl Fn(Update) + 'static,
+    configure: impl FnOnce(&CLLocationManager),
+) -> Watch {
     let delegate = Delegate::alloc(mtm).set_ivars(Ivars {
         callback: Box::new(callback),
     });
@@ -82,12 +113,9 @@ pub(super) fn watch(
     let manager = unsafe { CLLocationManager::new() };
     unsafe {
         manager.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
-        if precise {
-            manager.setDesiredAccuracy(kCLLocationAccuracyBest);
-        } else {
-            manager.setDesiredAccuracy(kCLLocationAccuracyNearestTenMeters);
-            manager.setDistanceFilter(20.0);
-        }
+    }
+    configure(&manager);
+    unsafe {
         if background {
             manager.setAllowsBackgroundLocationUpdates(true);
             manager.setPausesLocationUpdatesAutomatically(false);

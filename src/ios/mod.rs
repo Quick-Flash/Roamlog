@@ -3,21 +3,27 @@
 //! last fix on relaunch (recorder lock released with the process), as on Android.
 //! Journal work runs on one worker thread, in order, never on the main (UI) thread.
 //! Location sharing runs its node in this process too. iOS suspends a backgrounded app unless
-//! location updates keep it running: sharing mode Always keeps a coarse location watch for that,
-//! During trips relies on the recording watch.
+//! location updates keep it running: while sharing is on, a near-free cell/Wi-Fi location
+//! session keeps it alive, and timers run the same check-ins as Android (`sharing::checkin`):
+//! one precise fix and a short online window every 5 minutes, connected throughout while open.
 mod files;
 mod location;
 mod notify;
 
 use crate::backend::request;
 use crate::mobile::{self, now_ms, status};
-use crate::sharing::{app as sharing, manager::Mode};
+use crate::sharing::{
+    app as sharing,
+    checkin::{self, Phase},
+    manager::Mode,
+};
 use location::{Update, Watch};
 use objc2::MainThreadMarker;
 use serde_json::json;
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::mpsc::{Sender, channel};
 
 thread_local! {
@@ -25,10 +31,30 @@ thread_local! {
     static GPS: RefCell<Option<Watch>> = const { RefCell::new(None) };
     /// Foreground watch for the map's own-position marker.
     static FOLLOW: RefCell<Option<Watch>> = const { RefCell::new(None) };
-    /// Background watch while sharing Always without a trip.
+    /// Watch while sharing Always without a trip and the app is open.
     static SHARE_GPS: RefCell<Option<Watch>> = const { RefCell::new(None) };
+    /// Near-free location session keeping the closed app alive for check-ins.
+    static KEEP_ALIVE: RefCell<Option<Watch>> = const { RefCell::new(None) };
+    /// Precise watch for the one fix per check-in while closed.
+    static CHECKIN_FIX: RefCell<Option<Watch>> = const { RefCell::new(None) };
     /// Short precise watch after a friend asked for a fresh position.
     static LOCATE: RefCell<Option<Watch>> = const { RefCell::new(None) };
+}
+
+/// App counts as open until this time (own clock); refreshed while open.
+static VISIBLE_UNTIL: AtomicI64 = AtomicI64::new(0);
+const VISIBLE_MS: i64 = 10 * 60_000;
+/// Answering a friend's locate request: stay connected until this time.
+static FRESH_UNTIL: AtomicI64 = AtomicI64::new(0);
+/// Pairing holds the identity; node stays off until pairing ends or this passes.
+static SUSPENDED_UNTIL: AtomicI64 = AtomicI64::new(0);
+/// Check-in whose fix was already taken.
+static SLOT_FIX: AtomicI64 = AtomicI64::new(0);
+/// Only the newest check-in timer acts.
+static TIMER: AtomicU64 = AtomicU64::new(0);
+
+fn own_ms() -> i64 {
+    crate::sharing::manager::now_ms()
 }
 
 /// Last battery level read on the main thread (UIDevice is main-thread only); 255 = unknown.
@@ -68,9 +94,15 @@ pub(crate) fn locate() {
             });
         });
         LOCATE.with_borrow_mut(|locate| *locate = Some(watch));
+        FRESH_UNTIL.store(own_ms() + 20_000, Ordering::Relaxed);
         std::thread::spawn(|| {
             std::thread::sleep(std::time::Duration::from_secs(20));
-            on_main(|_| LOCATE.with_borrow_mut(|locate| drop(locate.take())));
+            on_main(|mtm| {
+                LOCATE.with_borrow_mut(|locate| drop(locate.take()));
+                if let Some(directory) = DIRECTORY.get() {
+                    settle(mtm, directory);
+                }
+            });
         });
     });
 }
@@ -263,45 +295,115 @@ pub(crate) fn open_settings() -> Result<(), String> {
 
 // --- Location sharing -----------------------------------------------------------------------
 
-/// Matches node, recording flag and Always-mode location watch to the current sharing mode.
+/// Hands a sharing fix to the node (or keeps it until the node starts).
+fn share(reading: &mobile::Reading) -> bool {
+    let Some(fix) = reading.sharing_fix() else {
+        return false;
+    };
+    let (speed, bearing) = (reading.speed, reading.bearing);
+    serial(move || {
+        sharing::fix(fix, speed.map(f64::from), bearing.map(f64::from), false);
+    });
+    fix.accuracy_m <= 50.0
+}
+
+/// Matches node, recording flag, location sessions and check-in timer to sharing mode and
+/// check-in phase.
 fn settle(mtm: MainThreadMarker, directory: &Path) {
     read_battery(mtm);
     let recording = GPS.with_borrow(Option::is_some);
     let mode = sharing::mode(directory);
-    if mode == Mode::Always && !recording {
+    let own = own_ms();
+    let live_until = VISIBLE_UNTIL
+        .load(Ordering::Relaxed)
+        .max(FRESH_UNTIL.load(Ordering::Relaxed));
+    let (phase, end) = checkin::schedule(own, live_until);
+    let always = mode == Mode::Always && !recording;
+    // Recording watch keeps the app alive and feeds sharing during trips.
+    let alive = mode != Mode::Off && !recording;
+    if alive && KEEP_ALIVE.with_borrow(Option::is_none) {
+        let watch = location::keep_alive(mtm);
+        KEEP_ALIVE.with_borrow_mut(|keep| *keep = Some(watch));
+    } else if !alive {
+        KEEP_ALIVE.with_borrow_mut(|keep| keep.take());
+    }
+    if always && phase == Phase::Live {
         if SHARE_GPS.with_borrow(Option::is_none) {
             let watch = location::watch(mtm, true, false, move |update| {
                 read_battery(mtm);
-                let Update::Fix(reading) = update else { return };
-                let Some(fix) = reading.sharing_fix() else {
-                    return;
-                };
-                let (speed, bearing) = (reading.speed, reading.bearing);
-                serial(move || {
-                    sharing::fix(fix, speed.map(f64::from), bearing.map(f64::from), false);
-                });
+                if let Update::Fix(reading) = update {
+                    share(&reading);
+                }
             });
             SHARE_GPS.with_borrow_mut(|gps| *gps = Some(watch));
         }
     } else {
-        // Recording watch feeds sharing during trips; no watch otherwise.
         SHARE_GPS.with_borrow_mut(|gps| gps.take());
     }
+    // Closed: one good fix per check-in, taken just before it, then GPS off.
+    let slot = phase
+        .slot()
+        .filter(|at| always && SLOT_FIX.load(Ordering::Relaxed) != *at);
+    match slot {
+        Some(at) if CHECKIN_FIX.with_borrow(Option::is_none) => {
+            let watch = location::watch(mtm, true, true, move |update| {
+                let Update::Fix(reading) = update else { return };
+                if share(&reading) {
+                    SLOT_FIX.store(at, Ordering::Relaxed);
+                    on_main(|_| CHECKIN_FIX.with_borrow_mut(|fix| drop(fix.take())));
+                }
+            });
+            CHECKIN_FIX.with_borrow_mut(|fix| *fix = Some(watch));
+        }
+        Some(_) => {}
+        None => CHECKIN_FIX.with_borrow_mut(|fix| drop(fix.take())),
+    }
+    let online =
+        mode != Mode::Off && phase.online() && own >= SUSPENDED_UNTIL.load(Ordering::Relaxed);
+    let suspended = own < SUSPENDED_UNTIL.load(Ordering::Relaxed);
     let directory = directory.to_owned();
     serial(move || {
         sharing::set_recording(recording);
-        if let Err(error) = sharing::sync_node(&directory) {
-            status(
-                &directory,
-                &format!("Location sharing unavailable: {error}"),
-            );
+        if online {
+            if let Err(error) = sharing::sync_node(&directory) {
+                status(
+                    &directory,
+                    &format!("Location sharing unavailable: {error}"),
+                );
+            }
+        } else if !suspended {
+            sharing::stop_node();
         }
+    });
+    if mode != Mode::Off {
+        wake_at(end);
+    }
+}
+
+/// Runs `settle` again at own time `at_ms`; replaces any earlier timer. Runs while the
+/// keep-alive session keeps the app awake; if iOS suspended it anyway, settle runs on resume.
+fn wake_at(at_ms: i64) {
+    let id = TIMER.fetch_add(1, Ordering::Relaxed) + 1;
+    std::thread::spawn(move || {
+        let wait = (at_ms - own_ms()).max(0) as u64;
+        std::thread::sleep(std::time::Duration::from_millis(wait));
+        if TIMER.load(Ordering::Relaxed) != id {
+            return;
+        }
+        on_main(|mtm| {
+            if let Some(directory) = DIRECTORY.get() {
+                settle(mtm, directory);
+            }
+        });
     });
 }
 
 /// Starts or stops sharing after the UI changed mode, friends or permissions.
 pub(crate) fn sharing_changed(directory: PathBuf) -> Result<(), String> {
     let mtm = main_thread()?;
+    let _ = DIRECTORY.set(directory.clone());
+    SUSPENDED_UNTIL.store(0, Ordering::Relaxed);
+    VISIBLE_UNTIL.store(own_ms() + VISIBLE_MS, Ordering::Relaxed);
     if sharing::mode(&directory) != Mode::Off {
         if location::denied() {
             return Err(
@@ -333,8 +435,20 @@ pub(crate) fn nudge_sharing(directory: &Path) {
     }
 }
 
+/// Open app keeps sharing connected for quick updates; closed, it only checks in.
+pub(crate) fn app_visible(directory: &Path, visible: bool) {
+    let until = if visible { own_ms() + VISIBLE_MS } else { 0 };
+    VISIBLE_UNTIL.store(until, Ordering::Relaxed);
+    if sharing::mode(directory) != Mode::Off
+        && let Ok(mtm) = main_thread()
+    {
+        settle(mtm, directory);
+    }
+}
+
 /// Pairing runs its own endpoint with the same identity; close the node's meanwhile.
 pub(crate) fn suspend_sharing(_directory: &Path) {
+    SUSPENDED_UNTIL.store(own_ms() + VISIBLE_MS, Ordering::Relaxed);
     serial(sharing::stop_node);
 }
 

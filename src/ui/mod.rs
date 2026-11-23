@@ -47,6 +47,11 @@ pub fn Roamlog() -> impl IntoView {
         if tick.get_value().is_multiple_of(5) {
             s.auto_map();
         }
+        // Service forgets an open app after a while; keep saying so.
+        #[cfg(any(target_os = "android", target_os = "ios"))]
+        if tick.get_value().is_multiple_of(240) {
+            crate::platform::app_visible(&s.directory.get_value(), true);
+        }
     });
     #[cfg(any(target_os = "android", target_os = "ios"))]
     {
@@ -55,6 +60,9 @@ pub fn Roamlog() -> impl IntoView {
         if !friends::pairing_open() {
             crate::platform::resume_sharing(s.directory.get_value());
         }
+        // Open app: stay connected for quick updates. Hidden (view torn down): check-ins only.
+        crate::platform::app_visible(&s.directory.get_value(), true);
+        on_cleanup_local(move || crate::platform::app_visible(&s.directory.get_value(), false));
         place_alerts::follow_selected_friend(s);
     }
     on_cleanup_local(move || drop(timer));

@@ -19,6 +19,11 @@ use std::{
 };
 use tokio::sync::watch;
 
+/// Friend counts as reachable this long after last message; sessions close when idle.
+pub const HEARD_MS: i64 = 40 * 60_000;
+/// A friend with Roamlog closed is reachable only at its next check-in (every 5 minutes).
+const LOCATE_WAIT_MS: i64 = 7 * 60_000;
+
 #[derive(Clone, Copy, Default, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Mode {
@@ -74,6 +79,7 @@ struct Remote {
     availability: Availability,
     battery: Option<protocol::BatteryStatus>,
     permission: bool,
+    heard_ms: i64,
 }
 impl Default for Remote {
     fn default() -> Self {
@@ -87,6 +93,7 @@ impl Default for Remote {
             availability: Availability::Off,
             battery: None,
             permission: false,
+            heard_ms: 0,
         }
     }
 }
@@ -111,9 +118,14 @@ struct Memory {
     group_issued: BTreeMap<GroupId, (crate::geo::Point, i64)>,
     group_sent: BTreeMap<(EndpointId, GroupId, EndpointId), u64>,
     sent: BTreeMap<EndpointId, (crate::geo::Point, i64)>,
+    /// Timestamp of the fix last sent; a refresh is answered once a newer fix went out.
+    sent_fix: BTreeMap<EndpointId, u64>,
     remote: BTreeMap<EndpointId, Remote>,
     /// Live session per friend and whether lower identity opened it (preferred on both sides).
     sessions: BTreeMap<EndpointId, (Connection, bool)>,
+    /// Last status and group state each friend was told; a change needs a session.
+    status_sent: BTreeMap<EndpointId, (bool, Availability)>,
+    group_synced: BTreeMap<EndpointId, Vec<Vec<u8>>>,
 }
 
 /// Produces own finished trips as JSON for friends allowed to view them.
@@ -249,6 +261,8 @@ impl Manager {
             return Err("invalid sharing metadata".into());
         }
         metadata.policy.validate()?;
+        // Not user-set any more; older files may hold a chosen interval.
+        metadata.policy = UpdatePolicy::default();
         let mut seen = std::collections::HashSet::new();
         for cursor in &metadata.received {
             if cursor.peer == self.owner()
@@ -354,10 +368,13 @@ impl Manager {
                 .remote
                 .get(&peer)
                 .and_then(|r| r.latest)
-                .is_some_and(|fix| fix.timestamp_ms >= request.at_ms)
+                // Fix time is the friend's clock; allow a few seconds of skew between phones.
+                .is_some_and(|fix| fix.timestamp_ms >= request.at_ms - 5_000)
             {
                 request.status = "Fresh location received".into();
-            } else if now.saturating_sub(request.at_ms) >= 25_000 {
+            } else if request.attempts == 0 && now.saturating_sub(request.at_ms) >= LOCATE_WAIT_MS {
+                request.status = "Not connected; try again when online".into();
+            } else if request.attempts > 0 && now.saturating_sub(request.sent_at_ms) >= 20_000 {
                 request.status = "No fresh location received".into();
             } else if metadata.mode == Mode::Off {
                 request.status = "Enable sharing connections first".into();
@@ -375,7 +392,8 @@ impl Manager {
                     request.sent_at_ms = now;
                 }
             } else {
-                request.status = "Not connected; try again when online".into();
+                // Session opens on demand; dialer is connecting now.
+                continue;
             }
             super::requests::write(&self.0.friends, peer, &request)?;
         }
@@ -485,7 +503,7 @@ impl Manager {
         if memory
             .battery_sent
             .get(&peer)
-            .is_some_and(|(last, sent)| *last == percent && now.saturating_sub(*sent) < 30_000)
+            .is_some_and(|(last, sent)| *last == percent && now.saturating_sub(*sent) < 300_000)
         {
             return Ok(());
         }
@@ -497,16 +515,6 @@ impl Manager {
             .into(),
         )?;
         memory.battery_sent.insert(peer, (percent, now));
-        Ok(())
-    }
-
-    pub fn set_policy(&self, policy: UpdatePolicy) -> Result<()> {
-        policy.validate()?;
-        let _lock = self.0.friends.lock()?;
-        let mut metadata = self.read_metadata()?;
-        metadata.policy = policy;
-        self.write_metadata(&metadata)?;
-        self.0.changed.send_replace(());
         Ok(())
     }
 
@@ -623,15 +631,16 @@ impl Manager {
             // Signed group datagram already carries this fix. A second, newer direct
             // sequence would race it and could prevent the recipient caching relay data.
             memory.sent.insert(peer, (sample.fix.point, now_ms));
+            memory.sent_fix.insert(peer, sample.fix.timestamp_ms);
             return Ok(true);
         }
         let force = memory.last_refresh_ms.is_some_and(|start| {
             now_ms < memory.refresh_until_ms
                 && sample.fix.timestamp_ms >= start as u64
                 && memory
-                    .sent
+                    .sent_fix
                     .get(&peer)
-                    .is_none_or(|(_, sent)| *sent <= start)
+                    .is_none_or(|sent| *sent < start as u64)
         });
         if !force
             && !metadata
@@ -649,6 +658,7 @@ impl Manager {
         self.write_metadata(&metadata)?; // Reserve before enqueue; crashes may skip numbers, never reuse them.
         connection.send_datagram(bytes.into())?;
         memory.sent.insert(peer, (sample.fix.point, now_ms));
+        memory.sent_fix.insert(peer, sample.fix.timestamp_ms);
         Ok(true)
     }
 
@@ -1035,6 +1045,7 @@ impl Manager {
         }
         let mut memory = self.0.memory.lock().map_err(|_| "sharing lock failed")?;
         let remote = memory.remote.entry(peer).or_default();
+        remote.heard_ms = now_ms;
         match message {
             Message::LocationUpdate(update) => {
                 remote.sequence = update.sequence;
@@ -1121,7 +1132,7 @@ impl Manager {
                 latest: remote.latest,
                 battery: remote
                     .battery
-                    .filter(|b| now_ms.saturating_sub(b.timestamp_ms) <= 120_000),
+                    .filter(|b| now_ms.saturating_sub(b.timestamp_ms) <= MAX_FIX_AGE_MS),
                 via: remote.via,
                 withdrawn: remote.withdrawn,
                 age_ms,
@@ -1131,20 +1142,18 @@ impl Manager {
             });
         }
         for snapshot in &mut snapshots {
-            snapshot.connected = memory
-                .sessions
+            let heard = memory
+                .remote
                 .get(&snapshot.peer_id)
-                .is_some_and(|(connection, _)| connection.close_reason().is_none());
+                .is_some_and(|r| now_ms.saturating_sub(r.heard_ms) <= HEARD_MS);
+            snapshot.connected = heard
+                || memory
+                    .sessions
+                    .get(&snapshot.peer_id)
+                    .is_some_and(|(connection, _)| connection.close_reason().is_none());
             snapshot.sharing_active &= snapshot.connected;
         }
         Ok(snapshots)
-    }
-
-    pub(super) fn has_location(&self, peer: EndpointId, now_ms: i64) -> Result<bool> {
-        let memory = self.0.memory.lock().map_err(|_| "sharing lock failed")?;
-        Ok(memory.remote.get(&peer).is_some_and(|remote| {
-            remote.latest.is_some() && now_ms.saturating_sub(remote.received_at_ms) <= RETENTION_MS
-        }))
     }
 
     /// Both friends dial each other. Keep connection opened by lower identity so both
@@ -1167,6 +1176,7 @@ impl Manager {
         // New session starts fresh: an update sent on a replaced connection may be lost.
         memory.update_required.remove(&peer);
         memory.sent.remove(&peer);
+        memory.sent_fix.remove(&peer);
         memory.battery_sent.remove(&peer);
         memory.group_sent.retain(|(p, _, _), _| *p != peer);
         if let Some((old, _)) = memory
@@ -1235,12 +1245,62 @@ impl Manager {
     /// Signed operation sets shared with derived members, over bounded reliable streams.
     pub(super) fn group_sync(&self, peer: EndpointId) -> Result<Vec<Vec<u8>>> {
         let _lock = self.0.friends.lock()?;
+        self.group_sync_locked(peer)
+    }
+
+    fn group_sync_locked(&self, peer: EndpointId) -> Result<Vec<Vec<u8>>> {
         self.0
             .friends
             .sync_for_locked(peer)?
             .into_iter()
             .map(|sync| Ok(postcard::to_allocvec(&Packet::Ops(vec![sync]))?))
             .collect()
+    }
+
+    /// Session delivered this status and group state to `peer`.
+    pub(super) fn mark_told(
+        &self,
+        peer: EndpointId,
+        status: (bool, Availability),
+        sync: &[Vec<u8>],
+    ) -> Result<()> {
+        let mut memory = self.0.memory.lock().map_err(|_| "sharing lock failed")?;
+        memory.status_sent.insert(peer, status);
+        memory.group_synced.insert(peer, sync.to_vec());
+        Ok(())
+    }
+
+    /// Something for `peer` waits on a session: due location, status or group change,
+    /// or a pending "Try to locate". Otherwise no connection is held open.
+    pub(super) fn wants_session(&self, peer: EndpointId, now: i64) -> Result<bool> {
+        let _lock = self.0.friends.lock()?;
+        let records = self.0.friends.list_locked()?;
+        if !trusted(&records, peer) {
+            return Ok(false);
+        }
+        let groups = self.0.friends.groups_locked()?;
+        let metadata = self.read_metadata()?;
+        let sync = self.group_sync_locked(peer)?;
+        let locating =
+            super::requests::read(&self.0.friends, peer).is_some_and(|r| r.status == "Locating…");
+        let memory = self.0.memory.lock().map_err(|_| "sharing lock failed")?;
+        let status = availability(&records, &groups, peer, metadata.mode, &memory, now);
+        let due = status == (true, Availability::Active)
+            && memory.latest.is_some_and(|sample| {
+                metadata.policy.due(
+                    memory.sent.get(&peer).copied(),
+                    sample,
+                    now,
+                    now < memory.refresh_until_ms,
+                )
+            });
+        Ok(locating
+            || due
+            || memory.status_sent.get(&peer) != Some(&status)
+            || memory
+                .group_synced
+                .get(&peer)
+                .map_or(!sync.is_empty(), |told| *told != sync))
     }
 
     /// Returns an acknowledgement after durable merge, before closing removed sessions.

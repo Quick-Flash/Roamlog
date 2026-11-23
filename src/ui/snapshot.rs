@@ -19,6 +19,9 @@ pub(super) struct Snapshot {
     pub basemap: u64,
     pub platform_status: String,
     pub position: Value,
+    /// Shown trips that came from friends; each can be added to own history.
+    #[serde(default)]
+    pub friend_trips: Vec<u64>,
 }
 
 pub(super) async fn load(

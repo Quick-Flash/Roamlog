@@ -3,13 +3,17 @@
 //! the activity closes.
 use crate::backend::request;
 use crate::mobile::{self, Reading, now_ms, status};
-use crate::sharing::{app as sharing, manager::Mode};
+use crate::sharing::{
+    app as sharing,
+    checkin::{self, Phase},
+    manager::Mode,
+};
 use serde_json::json;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::time::{Duration, SystemTime};
-use zgui::app::android::{background, document, location, notification, permission, system};
+use zgui::app::android::{background, document, location, notification, permission, power, system};
 
 #[unsafe(no_mangle)]
 pub fn android_main(app: zgui::app::AndroidApp) {
@@ -296,7 +300,8 @@ pub(crate) fn sharing_changed(directory: PathBuf) -> Result<(), String> {
             }
             let begin = move || {
                 if let Err(error) =
-                    background::start_service("sharing", "", &sharing_notification())
+                    // UI asks: app is open.
+                    background::start_service("sharing", "visible", &sharing_notification())
                 {
                     status(&directory, &error);
                 }
@@ -323,7 +328,7 @@ pub(crate) fn resume_sharing(directory: PathBuf) {
 /// Wakes the running node after friends or permissions changed in this process.
 pub(crate) fn nudge_sharing(directory: &Path) {
     if sharing::mode(directory) != Mode::Off {
-        let _ = background::send_service("sharing", "");
+        let _ = background::send_service("sharing", "visible");
     }
 }
 
@@ -403,6 +408,14 @@ pub(crate) fn reset_identity(directory: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Open app keeps sharing connected for quick updates; closed, it only checks in.
+/// Repeated while open: a UI that dies silently stops counting after `VISIBLE_MS`.
+pub(crate) fn app_visible(directory: &Path, visible: bool) {
+    if sharing::mode(directory) != Mode::Off {
+        let _ = background::send_service(if visible { "visible" } else { "hidden" }, "");
+    }
+}
+
 /// Pairing runs its own endpoint with the same identity; close the service's one meanwhile.
 pub(crate) fn suspend_sharing(directory: &Path) {
     if sharing::mode(directory) != Mode::Off {
@@ -423,13 +436,52 @@ static GPS_WAITING: AtomicBool = AtomicBool::new(false);
 static FRESH_UNTIL: AtomicI64 = AtomicI64::new(0);
 static SHARE_GPS: Mutex<Option<(Watch, Duration)>> = Mutex::new(None);
 
+/// UI counts as open this long after its last signal.
+const VISIBLE_MS: i64 = 10 * 60_000;
+static VISIBLE_UNTIL: AtomicI64 = AtomicI64::new(0);
+/// Pairing holds the identity; node stays off until pairing ends or this passes.
+static SUSPENDED_UNTIL: AtomicI64 = AtomicI64::new(0);
+/// Check-in whose GPS fix was already taken.
+static SLOT_FIX: AtomicI64 = AtomicI64::new(0);
+/// Keeps CPU running through GPS lead and online window while the screen is off.
+static WAKE: Mutex<Option<zgui::app::android::Guard>> = Mutex::new(None);
+/// Service alive in this process; watchdog restarts it otherwise.
+static RUNNING: AtomicBool = AtomicBool::new(false);
+
+/// Check-in phase (see `sharing::checkin`) and when it ends on this phone's own clock.
+fn phase() -> (Phase, i64) {
+    let live_until = VISIBLE_UNTIL
+        .load(Ordering::Relaxed)
+        .max(FRESH_UNTIL.load(Ordering::Relaxed));
+    checkin::schedule(crate::sharing::manager::now_ms(), live_until)
+}
+
+fn at_ms(ms: i64) -> SystemTime {
+    SystemTime::UNIX_EPOCH + Duration::from_millis(ms.max(0) as u64)
+}
+
 fn recorder(event: background::Event) {
     use background::Event;
     let Ok((directory, _)) = system::dirs() else {
         return;
     };
     match event {
-        Event::Service { action, .. } if action == "sharing" => settle(&directory),
+        Event::Service { action, payload } if action == "sharing" => {
+            SUSPENDED_UNTIL.store(0, Ordering::Relaxed);
+            if payload == "visible" {
+                VISIBLE_UNTIL.store(now_ms() as i64 + VISIBLE_MS, Ordering::Relaxed);
+            }
+            settle(&directory);
+        }
+        Event::Service { action, .. } if action == "visible" => {
+            VISIBLE_UNTIL.store(now_ms() as i64 + VISIBLE_MS, Ordering::Relaxed);
+            settle(&directory);
+        }
+        Event::Service { action, .. } if action == "hidden" => {
+            VISIBLE_UNTIL.store(0, Ordering::Relaxed);
+            settle(&directory);
+        }
+        Event::Alarm { id } if id == CHECKIN => settle(&directory),
         Event::Service { action, .. } if action == "locate" => refresh_gps(&directory),
         Event::Alarm { id } if id == LOCATE_DONE => {
             FRESH_UNTIL.store(0, Ordering::Relaxed);
@@ -443,6 +495,7 @@ fn recorder(event: background::Event) {
             settle(&directory);
         }
         Event::Service { action, .. } if action == "sharing_suspend" => {
+            SUSPENDED_UNTIL.store(now_ms() as i64 + VISIBLE_MS, Ordering::Relaxed);
             SHARE_GPS.lock().expect("sharing lock").take();
             sharing::stop_node();
         }
@@ -466,6 +519,8 @@ fn recorder(event: background::Event) {
             let _ = request(directory, json!({"op": "interrupt"}));
         }
         Event::ServiceStopped => {
+            RUNNING.store(false, Ordering::Relaxed);
+            WAKE.lock().expect("wake lock").take();
             SHARE_GPS.lock().expect("sharing lock").take();
             sharing::stop_node();
             let recording = GPS.lock().expect("recorder lock").take().is_some();
@@ -481,7 +536,7 @@ fn recorder(event: background::Event) {
             if sharing::mode(&directory) == Mode::Off {
                 return;
             }
-            if sharing::node_running() {
+            if RUNNING.load(Ordering::Relaxed) {
                 schedule_watchdog();
             } else if background::start_service("sharing", "", &sharing_notification()).is_err() {
                 post_paused();
@@ -505,6 +560,7 @@ fn refresh_gps(directory: &Path) {
 
 const WATCHDOG: i32 = 7;
 const LOCATE_DONE: i32 = 8;
+const CHECKIN: i32 = 9;
 
 pub(crate) fn sharing_timer_expired() {
     let _ = background::send_service("sharing", "");
@@ -524,40 +580,75 @@ fn post_paused() {
     });
 }
 
-/// Matches service to recording and sharing mode: runs node, sharing GPS and notification,
-/// or stops the service when neither trip nor sharing needs it.
+/// Matches service to recording, sharing mode and check-in phase: runs node, sharing GPS and
+/// notification, or stops the service when neither trip nor sharing needs it.
 fn settle(directory: &Path) {
     let recording = GPS.lock().expect("recorder lock").is_some();
     sharing::set_recording(recording);
-    let running = match sharing::sync_node(directory) {
-        Ok(running) => running,
-        Err(error) => {
+    let mode = sharing::mode(directory);
+    let now = crate::sharing::manager::now_ms();
+    let (phase, end) = phase();
+    let online =
+        mode != Mode::Off && phase.online() && now >= SUSPENDED_UNTIL.load(Ordering::Relaxed);
+    if online {
+        if let Err(error) = sharing::sync_node(directory) {
             status(directory, &format!("Location sharing unavailable: {error}"));
-            false
         }
-    };
-    if running {
-        schedule_watchdog();
-    } else {
+    } else if now >= SUSPENDED_UNTIL.load(Ordering::Relaxed) {
+        sharing::stop_node();
+    }
+    {
+        let mut wake = WAKE.lock().expect("wake lock");
+        match phase {
+            Phase::Prep(_) | Phase::Window(_) if mode != Mode::Off => {
+                if wake.is_none() {
+                    // Through window end; next settle releases it.
+                    let window_end = match phase {
+                        Phase::Prep(_) => end + checkin::WINDOW_MS,
+                        _ => end,
+                    };
+                    let left = (window_end - now).max(0) as u64 + 2_000;
+                    *wake = power::wake_lock(Duration::from_millis(left)).ok();
+                }
+            }
+            _ => *wake = None,
+        }
+    }
+    if mode == Mode::Off {
+        let _ = background::cancel_alarm(CHECKIN);
         let _ = background::cancel_alarm(WATCHDOG);
+    } else {
+        let _ = background::schedule_alarm(CHECKIN, at_ms(end));
+        schedule_watchdog();
     }
     if recording {
         // Trip GPS feeds sharing; separate watch would duplicate GPS work.
+        RUNNING.store(true, Ordering::Relaxed);
         SHARE_GPS.lock().expect("sharing lock").take();
         return;
     }
-    if !running {
+    if mode == Mode::Off {
+        RUNNING.store(false, Ordering::Relaxed);
         SHARE_GPS.lock().expect("sharing lock").take();
         let _ = background::stop_service();
         return;
     }
+    RUNNING.store(true, Ordering::Relaxed);
     let _ = notification::post(&sharing_notification());
-    if sharing::mode(directory) == Mode::Always {
-        if SHARE_GPS.lock().expect("sharing lock").is_none() {
-            share_gps(directory.to_owned(), Duration::from_secs(30));
-        }
-    } else {
+    let gps = mode == Mode::Always
+        && match phase {
+            Phase::Live => true,
+            // One fix per check-in while the app is closed.
+            Phase::Prep(_) | Phase::Window(_) => {
+                phase.slot() != Some(SLOT_FIX.load(Ordering::Relaxed))
+            }
+            Phase::Idle(_) => false,
+        };
+    if !gps {
         SHARE_GPS.lock().expect("sharing lock").take();
+    } else if SHARE_GPS.lock().expect("sharing lock").is_none() {
+        let interval = if phase == Phase::Live { 30 } else { 1 };
+        share_gps(directory.to_owned(), Duration::from_secs(interval));
     }
 }
 
@@ -605,11 +696,19 @@ fn share_fix(directory: &Path, update: location::Update) {
         reading.bearing.map(f64::from),
         false,
     );
+    if let Some(at) = phase().0.slot() {
+        // App closed: one good fix per check-in, then GPS off until the next.
+        if shared.accuracy_m <= 50.0 {
+            SLOT_FIX.store(at, Ordering::Relaxed);
+            std::thread::spawn(|| SHARE_GPS.lock().expect("sharing lock").take());
+        }
+        return;
+    }
     let interval = if crate::sharing::manager::now_ms() < FRESH_UNTIL.load(Ordering::Relaxed) {
         Duration::from_secs(1)
     } else {
         mobile::share_interval(
-            sharing::policy(directory).minimum_interval_ms,
+            crate::sharing::location::UpdatePolicy::default().minimum_interval_ms,
             reading.speed,
         )
     };

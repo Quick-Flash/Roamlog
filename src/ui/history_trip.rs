@@ -13,6 +13,30 @@ pub fn HistoryTrip(id: u64, selected: RwSignal<BTreeSet<u64>, LocalStorage>) -> 
     let s = UiState::current();
     let checkbox = NodeRef::new();
     let title = NodeRef::new();
+    // Friend's trip copied into own history, under own category of the same name.
+    let added = RwSignal::new_local(false);
+    let add = move || {
+        added.set(true);
+        zgui::reactive::spawn_detached(async move {
+            match s
+                .request(serde_json::json!({"op":"import_view_trip","trip_id":id}))
+                .await
+            {
+                Ok(reply) => {
+                    if let (Some(trip), Some(peer)) =
+                        (reply["trip_id"].as_u64(), reply["peer"].as_str())
+                    {
+                        super::trip_sources::add(&s.directory.get_value(), trip, peer);
+                    }
+                    s.message.set("Trip added to your history".into());
+                }
+                Err(error) => {
+                    added.set(false);
+                    s.message.set(error);
+                }
+            }
+        });
+    };
     view! {
         row(class="list-row",class:trip-selected=move ||selected.with(|ids|ids.contains(&id))) {
             Checkbox(node_ref=checkbox,labelled_by=title,class=format!("select-trip select-trip-{id}"),checked=Binding::controlled(
@@ -51,6 +75,9 @@ pub fn HistoryTrip(id: u64, selected: RwSignal<BTreeSet<u64>, LocalStorage>) -> 
             }
             if move ||s.people.with(Vec::is_empty) {
                 Button(variant=ButtonVariant::Ghost,class=format!("row-action edit-trip edit-trip-{id}"),on:click=move |_|s.edit_trip(id),a11y:label=format!("Edit trip #{id}")) {"Edit"}
+            }
+            if move ||s.friend_trip_ids.with(|ids|ids.contains(&id)) {
+                Button(variant=ButtonVariant::Ghost,class=format!("row-action add-trip add-trip-{id}"),disabled=Signal::derive_local(move ||added.get()),on:click=move |_|add(),a11y:label=format!("Add trip #{id} to my trips")) {{move ||if added.get(){"Added"}else{"Add to mine"}}}
             }
         }
     }

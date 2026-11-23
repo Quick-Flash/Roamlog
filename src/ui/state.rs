@@ -176,6 +176,8 @@ pub struct UiState {
     /// Whose trips History and map show: empty is own only; else ("me" or peer ID, name),
     /// merged read-only.
     pub people: RwSignal<Vec<(String, String)>, LocalStorage>,
+    /// Trips History shows that came from friends (view IDs).
+    pub friend_trip_ids: RwSignal<Vec<u64>, LocalStorage>,
     /// Friend pictures by peer ID: file time and registered image.
     #[cfg_attr(not(any(target_os = "android", target_os = "ios")), allow(dead_code))]
     avatars: StoredValue<
@@ -314,6 +316,7 @@ impl UiState {
             invite_link: RwSignal::new_local(String::new()),
             friend_trips: RwSignal::new_local(None),
             people: RwSignal::new_local(Vec::new()),
+            friend_trip_ids: RwSignal::new_local(Vec::new()),
             avatars: StoredValue::new_local(Default::default()),
             map_tried: StoredValue::new_local(Default::default()),
             own_avatar: RwSignal::new_local(None),
@@ -366,6 +369,12 @@ impl UiState {
                     self.announce.update_value(|a| a.extend(finished));
                     if self.data.with_untracked(|old| old != &state) {
                         self.data.set(state);
+                    }
+                    if self
+                        .friend_trip_ids
+                        .with_untracked(|old| old != &value.friend_trips)
+                    {
+                        self.friend_trip_ids.set(value.friend_trips);
                     }
                     if !self.loaded.get_untracked() {
                         self.loaded.set(true);

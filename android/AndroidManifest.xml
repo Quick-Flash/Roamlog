@@ -9,6 +9,11 @@
   <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
   <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
   <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+  <!-- Friends' phones check in together every 5 minutes: alarms must fire on time, and the
+       CPU stays awake through each short online window. Sideloaded app: no store policy. -->
+  <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
+  <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" android:maxSdkVersion="32" />
+  <uses-permission android:name="android.permission.WAKE_LOCK" />
   <uses-feature android:name="android.hardware.location.gps" android:required="false" />
   <application android:label="Roamlog" android:icon="@mipmap/ic_launcher" android:roundIcon="@mipmap/ic_launcher" android:allowBackup="false" android:hasCode="true" android:theme="@android:style/Theme.Material.Light.NoActionBar" android:extractNativeLibs="false">
     <activity android:name="dev.zgui.android.ZguiActivity" android:exported="true" android:launchMode="singleTop" android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation|uiMode|density|fontScale|locale|layoutDirection">

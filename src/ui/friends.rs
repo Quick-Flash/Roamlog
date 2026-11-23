@@ -6,7 +6,6 @@ use super::state::{UiState, now_ms};
 use crate::sharing::{
     app::{self as sharing, PairStep, Pairing},
     groups::Policy,
-    location::UpdatePolicy,
     manager::Mode,
     node::{FriendState, read_published},
     pairing::{FriendInvite, GroupRef},
@@ -1129,14 +1128,33 @@ fn FriendRow(
     let (menu_id, menu_name) = (id.clone(), friend.name.clone());
     let chosen = Callback::new(move |item: &'static str| match item {
         "map" => {
-            let point = s.friend_markers.with_untracked(|markers| {
-                markers.iter().find(|m| m.id == menu_id).map(|m| m.point)
+            let marker = s.friend_markers.with_untracked(|markers| {
+                markers
+                    .iter()
+                    .find(|m| m.id == menu_id)
+                    .map(|m| (m.point, m.timestamp_ms))
             });
-            match point {
-                Some(point) => {
+            match marker {
+                Some((point, at)) => {
                     s.friends_open.set(false);
                     s.set_show_friends(true);
                     s.center_on(point);
+                    // Updates come every few minutes; looking asks for a fresh one.
+                    if (s.now.get_untracked() as i64).saturating_sub(at) > 120_000 {
+                        let id = menu_id.clone();
+                        change(s, loaded, false, move |m| {
+                            if m.mode()? == Mode::Off {
+                                return Ok(());
+                            }
+                            // Best effort: a request made under a minute ago still runs.
+                            let _ = crate::sharing::requests::queue(
+                                m.friends(),
+                                id.parse()?,
+                                crate::sharing::manager::now_ms(),
+                            );
+                            Ok(())
+                        });
+                    }
                 }
                 None => s.message.set(format!("No location from {menu_name} yet")),
             }
@@ -1476,28 +1494,6 @@ fn GroupMemberItem(
 #[component]
 fn YouCard(confirm: RwSignal<Option<String>, LocalStorage>) -> impl IntoView {
     let s = UiState::current();
-    let interval =
-        RwSignal::new_local(sharing::policy(&s.directory.get_value()).minimum_interval_ms / 1000);
-    let set_interval_s = move |seconds: i64| {
-        interval.set(seconds);
-        let directory = s.directory.get_value();
-        zgui::reactive::spawn_detached(async move {
-            let saved = blocking(move || {
-                sharing::manager(&directory)
-                    .and_then(|m| {
-                        m.set_policy(UpdatePolicy {
-                            minimum_interval_ms: seconds * 1000,
-                            ..UpdatePolicy::default()
-                        })
-                    })
-                    .map_err(|e| e.to_string())
-            })
-            .await;
-            if let Err(error) = saved {
-                s.message.set(format!("Sharing: {error}"));
-            }
-        });
-    };
     let reset = move || {
         let directory = s.directory.get_value();
         zgui::reactive::spawn_detached(async move {
@@ -1510,12 +1506,7 @@ fn YouCard(confirm: RwSignal<Option<String>, LocalStorage>) -> impl IntoView {
         });
     };
     view! {
-        text(class="muted") {"Send location every, while moving"}
-        row(class="segmented") {
-            for seconds in ||vec![15i64,30,60],key=|seconds|*seconds {
-                Button(variant=ButtonVariant::Ghost,class:seg-on=move ||interval.get()==seconds,on:click=move |_|set_interval_s(seconds)) {{format!("{seconds} s")}}
-            }
-        }
+        text(class="muted") {"Updates come every few seconds while you and a friend both have Roamlog open, otherwise every 5 minutes."}
         Button(variant=ButtonVariant::Outline,class="danger-text",on:click=move |_|confirm.set(Some("reset:me".into()))) {"Reset sharing identity…"}
         {confirm_line(confirm,"reset:me".to_string(),"Reset identity? All friends and groups are removed; everyone pairs again.".to_string(),reset)}
     }
@@ -1715,6 +1706,8 @@ impl Edit {
 struct SharedTrip {
     #[serde(default)]
     name: String,
+    #[serde(default)]
+    category: Option<String>,
     started_ms: u64,
     finished_ms: Option<u64>,
     distance_m: f64,
@@ -1831,7 +1824,11 @@ fn SharedTripRow(trip: SharedTrip, friend: String) -> impl IntoView {
         .saturating_sub(trip.started_ms)
         / 60_000;
     let detail = format!(
-        "{} {} · {} · {} min",
+        "{}{} {} · {} · {} min",
+        trip.category
+            .as_ref()
+            .map(|c| format!("{c} · "))
+            .unwrap_or_default(),
         super::tools::date(trip.started_ms),
         super::tools::clock(trip.started_ms),
         s.distance(trip.distance_m),
@@ -1843,8 +1840,8 @@ fn SharedTripRow(trip: SharedTrip, friend: String) -> impl IntoView {
         column(class="friend-row") {
             text(class="friend-name") {{title.clone()}}
             text(class="muted") {{detail.clone()}}
-            Button(variant=ButtonVariant::Outline,class="import-trip",disabled=Signal::derive_local(move ||added.get()),on:click={let fixes=trip.fixes.clone();let name=import_name.clone();move |_|{
-                let command=serde_json::json!({"op":"import_trip","name":name,"fixes":fixes});
+            Button(variant=ButtonVariant::Outline,class="import-trip",disabled=Signal::derive_local(move ||added.get()),on:click={let fixes=trip.fixes.clone();let name=import_name.clone();let category=trip.category.clone();move |_|{
+                let command=serde_json::json!({"op":"import_trip","name":name,"category":category,"fixes":fixes});
                 added.set(true);
                 zgui::reactive::spawn_detached(async move {
                     match s.request(command).await {

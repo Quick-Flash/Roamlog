@@ -38,12 +38,23 @@ pub fn TerrainView(
     let has_height = RwSignal::new_local(false);
     let retry = RwSignal::new_local(0u64);
     let reset = RenderEffect::new(move |_| {
-        map_style.track();
         s.imagery.track();
         offline.track();
         s.basemap.archive.track();
         tiles.reset();
         scene.set(Arc::new(Scene::default()));
+    });
+    // New GPS point changes only overlay lines: redraw touched tiles, keep the rest.
+    let restyle = RenderEffect::new(move |last: Option<Arc<Style>>| {
+        let style = map_style.get();
+        match last.and_then(|old| super::terrain_tiles::changed_boxes(&old, &style)) {
+            Some(boxes) => tiles.redraw(&boxes),
+            None => {
+                tiles.reset();
+                scene.set(Arc::new(Scene::default()));
+            }
+        }
+        style
     });
     // Camera frames reuse retained scene; tile selection/downloads are bounded to 20 Hz.
     let throttle = super::throttle::Throttle::new(std::time::Duration::from_millis(50));
@@ -199,6 +210,7 @@ pub fn TerrainView(
     let draw = RenderEffect::new(move |_| producer.update(camera.get(), orbit.get(), scene.get()));
     on_cleanup_local(move || {
         drop(reset);
+        drop(restyle);
         drop(work);
         drop(draw);
         throttle.cancel();

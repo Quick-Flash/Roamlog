@@ -17,10 +17,15 @@ use tokio::{
 const MAX_GROUP_SYNC: usize = 256 * 1024;
 const MAX_TRIPS: usize = 16 * 1024 * 1024;
 const TRIPS_REQUEST: &[u8] = b"trips/1";
-const TRIP_SYNC: Duration = Duration::from_secs(6 * 3600);
 const AVATAR_REQUEST: &[u8] = b"avatar/1";
 const AVATAR_SYNC: Duration = Duration::from_secs(30 * 60);
 const MAX_AVATAR: usize = 256 * 1024;
+/// Open QUIC paths send keepalives every few seconds, keeping the radio awake: close
+/// sessions this long after last useful exchange and reconnect when needed.
+const IDLE: Duration = Duration::from_secs(30);
+const IDLE_CODE: u32 = 2;
+/// Status repeat and liveness ping; datagrams may drop, so status is resent.
+const PING: Duration = Duration::from_secs(60);
 
 /// UI process asks for a friend's trips by creating this file; node answers in `friend-trips`.
 pub fn trip_request_path(
@@ -47,6 +52,9 @@ pub fn history_journal(trips: &[u8]) -> Result<Vec<u8>> {
     struct Shared {
         #[serde(default)]
         name: String,
+        /// Friend's category name; absent from older versions and uncategorized trips.
+        #[serde(default)]
+        category: Option<String>,
         fixes: Vec<crate::model::Fix>,
     }
     #[derive(serde::Deserialize)]
@@ -62,10 +70,29 @@ pub fn history_journal(trips: &[u8]) -> Result<Vec<u8>> {
     for trip in reply.trips {
         let first = trip.fixes[0].timestamp_ms;
         let last = trip.fixes[trip.fixes.len() - 1].timestamp_ms;
-        let mut events = vec![Event::Start {
+        let mut events = Vec::new();
+        // Category first seen: declared before the trip that uses it.
+        let category = trip.category.map(|c| c.trim().to_owned());
+        let category_id =
+            category
+                .filter(|c| !c.is_empty() && c.len() <= 80)
+                .map(|name| {
+                    match state
+                        .categories
+                        .iter()
+                        .find(|c| c.name.eq_ignore_ascii_case(&name))
+                    {
+                        Some(c) => c.id,
+                        None => {
+                            events.push(Event::Category { name });
+                            state.categories.len() as u64 + 1
+                        }
+                    }
+                });
+        events.push(Event::Start {
             timestamp_ms: first,
-            category_id: None,
-        }];
+            category_id,
+        });
         events.extend(trip.fixes.into_iter().map(|fix| Event::Fix { fix }));
         events.push(Event::Finish { timestamp_ms: last });
         // Trip that does not replay (overlap, bad fix) is skipped, not the whole history.
@@ -111,6 +138,18 @@ pub fn friend_trips_path(
     peer: iroh::EndpointId,
 ) -> std::path::PathBuf {
     directory.join("friend-trips").join(format!("{peer}.json"))
+}
+
+/// Ping nonce: our check-in clock, which friends align to (older versions sent a counter).
+fn ping_nonce() -> u64 {
+    u64::try_from(super::checkin::now(now_ms())).unwrap_or_default()
+}
+
+/// File written within `age`.
+fn fresh(path: &std::path::Path, age: Duration) -> bool {
+    std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .is_ok_and(|at| at.elapsed().is_ok_and(|e| e < age))
 }
 
 /// Fetches `connection` peer's trips; denial is stored as an error message for the UI.
@@ -269,19 +308,29 @@ pub async fn session(
     let result = async {
         hello(&connection, initiator).await?;
         manager.register(&connection, initiator)?;
-        // Datagrams may reorder or drop. Initial request is repeated on next periodic check
-        // until a location arrives; movement/rate policy still applies on sender.
-        manager.control(&connection, &Message::LocationRequest)?;
+        // Pending "Try to locate" goes out now, not on next service tick.
+        manager.notify();
+        // No automatic LocationRequest: it starts a GPS burst on friend's phone. Friend sends
+        // its latest fix on every new session; only "Try to locate" asks for a fresh one.
+        // Ping right away: its nonce carries our check-in clock for the friend to align to.
+        manager.control(&connection, &Message::Ping { nonce: ping_nonce() })?;
         let mut changed = manager.changes();
-        let mut tick = tokio::time::interval(Duration::from_secs(10));
+        let mut tick = tokio::time::interval(Duration::from_secs(15));
         tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
         let mut last_status: Option<(bool, Availability)> = None;
         let mut last_ping = Instant::now();
-        let mut nonce = 0u64;
         let mut synced: Option<Vec<Vec<u8>>> = None;
         let mut fetching = false;
         let mut last_sync: Option<Instant> = None;
         let mut last_avatar: Option<Instant> = None;
+        let mut active = Instant::now();
+        // Clones held by stream tasks; extra references mean a transfer is running.
+        let busy = std::sync::Arc::new(());
+        // Reconnects (common on mobile) reuse a recently fetched picture.
+        let directory = manager.friends().directory().to_owned();
+        if fresh(&friend_avatar_path(&directory, connection.remote_id()), AVATAR_SYNC) {
+            last_avatar = Some(Instant::now());
+        }
         loop {
             let mut requested = false;
             tokio::select! {
@@ -289,14 +338,17 @@ pub async fn session(
                 _ = endpoint.closed() => return Ok(()),
                 stream = connection.accept_bi() => {
                     let (send, recv) = stream?;
-                    let (manager, peer) = (manager.clone(), connection.remote_id());
+                    let (manager, peer, busy) = (manager.clone(), connection.remote_id(), busy.clone());
+                    active = Instant::now();
                     tokio::spawn(async move {
                         let _ = answer_trips(manager, peer, send, recv).await;
+                        drop(busy);
                     });
                 },
                 stream = connection.accept_uni() => {
                     // Group member list; reliable stream, bounded like friends file entries.
                     let bytes = tokio::time::timeout(Duration::from_secs(30), stream?.read_to_end(MAX_GROUP_SYNC)).await??;
+                    active = Instant::now();
                     if let Some(ack) = manager.apply_group_sync(connection.remote_id(), &bytes)? {
                         let mut stream = connection.open_uni().await?;
                         stream.write_all(&ack).await?;
@@ -307,9 +359,15 @@ pub async fn session(
                 packet = connection.read_datagram() => {
                     let message = protocol::decode(&packet?, now_ms())?;
                     if !manager.ingest(connection.remote_id(), &message, now_ms())? { continue; }
+                    if matches!(message, Message::LocationUpdate(_) | Message::GroupFix(_) | Message::LocationRequest) {
+                        active = Instant::now();
+                    }
                     match message {
                         Message::LocationRequest => { manager.refresh_requested(connection.remote_id(), now_ms())?; requested = true; },
-                        Message::Ping { nonce } => manager.control(&connection, &Message::Pong { nonce })?,
+                        Message::Ping { nonce } => {
+                            super::checkin::heard(connection.remote_id(), nonce, now_ms());
+                            manager.control(&connection, &Message::Pong { nonce })?;
+                        },
                         Message::Hello => return Err("unexpected hello".into()),
                         _ => {},
                     }
@@ -319,20 +377,27 @@ pub async fn session(
             }
             if !manager.is_trusted(connection.remote_id())? { return Err("friend removed or blocked".into()); }
             let status = manager.availability(connection.remote_id(), now_ms())?;
-            if last_status != Some(status) || last_ping.elapsed() >= Duration::from_secs(30) {
+            if last_status != Some(status) || last_ping.elapsed() >= PING {
                 manager.control(&connection, &Message::PermissionUpdate { allowed: status.0 })?;
                 manager.control(&connection, &Message::SharingStatus(status.1))?;
+                if last_status.is_some_and(|last| last != status) {
+                    active = Instant::now();
+                }
                 last_status = Some(status);
             }
-            manager.send_latest(&connection, now_ms(), requested)?;
+            if manager.send_latest(&connection, now_ms(), requested)? {
+                active = Instant::now();
+            }
             manager.send_battery(&connection, now_ms())?;
-            let directory = manager.friends().directory().to_owned();
-            // Sync friend's trips on connect and every 6 hours; UI can also ask for a refresh.
-            let auto = last_sync.is_none_or(|at: Instant| at.elapsed() >= TRIP_SYNC);
-            if (auto || trip_request_path(&directory, connection.remote_id()).exists()) && !fetching {
+            // Friend's trips move only when UI asks (opening their trips); never automatically.
+            if trip_request_path(&directory, connection.remote_id()).exists() && !fetching {
                 fetching = true;
                 last_sync = Some(Instant::now());
-                tokio::spawn(fetch_trips(connection.clone(), directory.clone()));
+                let (connection, directory, busy) = (connection.clone(), directory.clone(), busy.clone());
+                tokio::spawn(async move {
+                    fetch_trips(connection, directory).await;
+                    drop(busy);
+                });
             } else if !trip_request_path(&directory, connection.remote_id()).exists()
                 && last_sync.is_some_and(|at| at.elapsed() > Duration::from_secs(120))
             {
@@ -340,7 +405,11 @@ pub async fn session(
             }
             if last_avatar.is_none_or(|at: Instant| at.elapsed() >= AVATAR_SYNC) {
                 last_avatar = Some(Instant::now());
-                tokio::spawn(fetch_avatar(connection.clone(), directory.clone()));
+                let (connection, directory, busy) = (connection.clone(), directory.clone(), busy.clone());
+                tokio::spawn(async move {
+                    fetch_avatar(connection, directory).await;
+                    drop(busy);
+                });
             }
             let sync = manager.group_sync(connection.remote_id())?;
             if synced.as_ref() != Some(&sync) {
@@ -349,19 +418,29 @@ pub async fn session(
                     let mut stream = connection.open_uni().await?;
                     stream.write_all(bytes).await?;
                     stream.finish()?;
+                    active = Instant::now();
                 }
                 synced = Some(sync);
             }
-            if last_ping.elapsed() >= Duration::from_secs(30) {
-                nonce = nonce.checked_add(1).ok_or("ping counter exhausted")?;
-                manager.control(&connection, &Message::Ping { nonce })?;
-                if !manager.has_location(connection.remote_id(), now_ms())? {
-                    manager.control(&connection, &Message::LocationRequest)?;
-                }
+            if let Some(sync) = &synced {
+                manager.mark_told(connection.remote_id(), status, sync)?;
+            }
+            if active.elapsed() >= IDLE && std::sync::Arc::strong_count(&busy) == 1 {
+                connection.close(IDLE_CODE.into(), b"idle");
+                return Ok(());
+            }
+            if last_ping.elapsed() >= PING {
+                manager.control(&connection, &Message::Ping { nonce: ping_nonce() })?;
                 last_ping = Instant::now();
             }
         }
     }.await;
+    // Friend closed an idle session: normal end, reconnect on demand.
+    if let Some(ConnectionError::ApplicationClosed(close)) = connection.close_reason()
+        && close.error_code == IDLE_CODE.into()
+    {
+        return Ok(());
+    }
     // Inspect transport state before Session's local close hides original reason.
     if result.is_err()
         && connection

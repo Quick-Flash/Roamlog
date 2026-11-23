@@ -20,7 +20,10 @@ use tokio::task::JoinHandle;
 /// UI treats an older file as "sharing service not running".
 pub const HEARTBEAT_MS: i64 = 60_000;
 const FIRST_RETRY: Duration = Duration::from_secs(15);
-const MAX_RETRY: Duration = Duration::from_secs(120);
+/// Offline friend dials back on its own once online; no need to keep trying quickly.
+const MAX_RETRY: Duration = Duration::from_secs(10 * 60);
+/// Check in this often even with nothing to send.
+const PRESENCE: Duration = Duration::from_secs(30 * 60);
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct FriendState {
@@ -91,7 +94,8 @@ fn merge(manager: &Manager, previous: &[FriendState], now: i64) -> Result<Vec<Fr
                 .or_else(|| old.and_then(|f| f.location))
         }
         .filter(|l| now.saturating_sub(l.timestamp_ms) <= RETENTION_MS);
-        let connected = manager.connected(friend.peer_id);
+        // Sessions open on demand: reachable means heard from recently.
+        let connected = current.is_some_and(|s| s.connected);
         friends.push(FriendState {
             peer_id: friend.peer_id,
             name: friend.display_name,
@@ -117,7 +121,8 @@ async fn publish(manager: Manager, path: PathBuf) {
         .and_then(|bytes| serde_json::from_slice::<Published>(&bytes).ok())
         .unwrap_or_default();
     let mut changes = manager.changes();
-    let mut tick = tokio::time::interval(Duration::from_secs(2));
+    // Changes wake this at once; tick covers timers, battery level and heartbeat.
+    let mut tick = tokio::time::interval(Duration::from_secs(10));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         tokio::select! {
@@ -171,12 +176,27 @@ async fn publish(manager: Manager, path: PathBuf) {
 
 /// Keeps dialing one friend while no session is open. Removing or blocking the friend
 /// makes `transport::client` fail and the supervisor aborts this task.
+/// Connects to `peer` only while there is something to exchange; sessions close when idle.
 async fn dial(endpoint: Endpoint, manager: Manager, peer: EndpointId) {
     let mut retry = FIRST_RETRY;
+    let mut changes = manager.changes();
+    let mut last: Option<tokio::time::Instant> = None;
     loop {
-        if manager.connected(peer) {
+        let open = manager.connected(peer);
+        if open {
             retry = FIRST_RETRY;
-            tokio::time::sleep(FIRST_RETRY).await;
+            last = Some(tokio::time::Instant::now());
+        }
+        let directory = manager.friends().directory();
+        let due = !open
+            && (last.is_none_or(|at| at.elapsed() >= PRESENCE)
+                || manager.wants_session(peer, now_ms()).unwrap_or(false)
+                || transport::trip_request_path(directory, peer).exists());
+        if !due {
+            tokio::select! {
+                _ = changes.changed() => {},
+                _ = tokio::time::sleep(Duration::from_secs(60)) => {},
+            }
             continue;
         }
         let started = tokio::time::Instant::now();
@@ -187,8 +207,13 @@ async fn dial(endpoint: Endpoint, manager: Manager, peer: EndpointId) {
         }) {
             manager.require_update(peer);
         }
-        if result.is_ok() || endpoint.is_closed() {
+        if endpoint.is_closed() {
             return;
+        }
+        last = Some(tokio::time::Instant::now());
+        if result.is_ok() {
+            retry = FIRST_RETRY;
+            continue;
         }
         // Long session that ended counts as success: reconnect promptly.
         if started.elapsed() > MAX_RETRY {
@@ -202,7 +227,7 @@ async fn dial(endpoint: Endpoint, manager: Manager, peer: EndpointId) {
 async fn supervise(endpoint: Endpoint, manager: Manager) {
     let mut dialers: BTreeMap<EndpointId, JoinHandle<()>> = BTreeMap::new();
     let mut changes = manager.changes();
-    let mut tick = tokio::time::interval(Duration::from_secs(15));
+    let mut tick = tokio::time::interval(Duration::from_secs(60));
     loop {
         tokio::select! {
             _ = tick.tick() => {},

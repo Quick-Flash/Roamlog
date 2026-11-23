@@ -5,7 +5,7 @@
 use super::identity;
 use super::{
     Result,
-    location::{Sample, UpdatePolicy},
+    location::Sample,
     manager::{Manager, Mode, now_ms},
     node::Node,
     peers::Friends,
@@ -43,6 +43,9 @@ pub(crate) fn save_avatar(
 static KEY: Mutex<Option<SecretKey>> = Mutex::new(None);
 static MANAGER: Mutex<Option<Manager>> = Mutex::new(None);
 static NODE: Mutex<Option<Node>> = Mutex::new(None);
+/// Newest fix and recording flag, kept while the node is off between check-ins (GPS warms up
+/// before it starts) and handed over when it starts.
+static LATEST: Mutex<Option<(Sample, bool)>> = Mutex::new(None);
 
 /// Call once with the VM from `android_main`; background events set it through zgui.
 #[cfg(target_os = "android")]
@@ -223,6 +226,11 @@ pub fn sync_node(directory: &Path) -> Result<bool> {
             crate::backend::request(journal.clone(), serde_json::json!({"op": "shared_trips"}))?;
         Ok(serde_json::to_vec(&trips)?)
     }));
+    if let Ok(latest) = LATEST.lock()
+        && let Some((sample, recording)) = *latest
+    {
+        let _ = manager.update_fix(sample, recording, now_ms());
+    }
     *node = Some(Node::start(key()?, manager, directory)?);
     Ok(true)
 }
@@ -240,18 +248,24 @@ pub fn node_running() -> bool {
 
 /// Current GPS fix from recorder or sharing watch. Only the newest fix is kept.
 pub fn fix(fix: crate::model::Fix, speed: Option<f64>, bearing: Option<f64>, recording: bool) {
-    let Ok(node) = NODE.lock() else { return };
-    let Some(node) = node.as_ref() else { return };
     let sample = Sample {
         fix,
         speed_m_s: speed,
         heading_degrees: bearing,
     };
+    if let Ok(mut latest) = LATEST.lock() {
+        *latest = Some((sample, recording));
+    }
+    let Ok(node) = NODE.lock() else { return };
+    let Some(node) = node.as_ref() else { return };
     let _ = node.manager().update_fix(sample, recording, now_ms());
 }
 
 /// Location services off: friends see "no location" instead of an aging fix.
 pub fn clear_fix() {
+    if let Ok(mut latest) = LATEST.lock() {
+        *latest = None;
+    }
     if let Ok(node) = NODE.lock()
         && let Some(node) = node.as_ref()
     {
@@ -265,18 +279,6 @@ pub fn set_recording(recording: bool) {
     {
         let _ = node.manager().set_recording(recording);
     }
-}
-
-/// Minimum seconds between sent updates; also caps sampling interval while moving.
-pub fn policy(directory: &Path) -> UpdatePolicy {
-    #[derive(serde::Deserialize)]
-    struct State {
-        policy: UpdatePolicy,
-    }
-    std::fs::read(directory.join("sharing").join("location-state.json"))
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<State>(&bytes).ok())
-        .map_or_else(UpdatePolicy::default, |s| s.policy)
 }
 
 // --- UI process: pairing ---------------------------------------------------------------

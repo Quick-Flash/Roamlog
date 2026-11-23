@@ -255,14 +255,22 @@ fn shared_trips_replay_as_friend_journal_oldest_first() {
     let fix = |t: u64, lat: f64| serde_json::json!({"lat": lat, "lon": -111.0, "timestamp_ms": t, "accuracy_m": 4.0});
     let walk = |start: u64, name: &str| serde_json::json!({"name": name, "fixes": (0..10).map(|i| fix(start + i * 2000, 40.0 + i as f64 * 1e-4)).collect::<Vec<_>>()});
     // Newest first, as friends send them, plus one empty trip that is skipped.
-    let reply = serde_json::json!({"trips": [walk(1_000_000, "Later"), walk(1_000, "Earlier"), {"fixes": []}]});
+    let mut later = walk(1_000_000, "Later");
+    later["category"] = "Hike".into();
+    let mut earlier = walk(1_000, "Earlier");
+    earlier["category"] = "Hike".into();
+    let reply = serde_json::json!({"trips": [later, walk(500_000, ""), earlier, {"fixes": []}]});
     let journal = super::transport::history_journal(&serde_json::to_vec(&reply).unwrap()).unwrap();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("friend.jsonl");
     std::fs::write(&path, journal).unwrap();
     let store = crate::store::Store::open(&path).unwrap();
     let names: Vec<_> = store.state.trips.iter().map(|t| t.name.as_str()).collect();
-    assert_eq!(names, ["Earlier", "Later"]);
+    assert_eq!(names, ["Earlier", "", "Later"]);
+    // Friend's category names carried over, declared once.
+    assert_eq!(store.state.categories.len(), 1);
+    let categories: Vec<_> = store.state.trips.iter().map(|t| t.category_id).collect();
+    assert_eq!(categories, [Some(1), None, Some(1)]);
     assert!(
         store
             .state
@@ -611,7 +619,8 @@ async fn refresh_requests_collect_fresh_fix_under_permissions_and_report_result(
     mb.friends()
         .set_permission(a.id(), Permission::Always)
         .unwrap();
-    mb.update_fix(sample(now - 1000), false, now).unwrap();
+    // Older than the clock-skew allowance, so it does not answer the request below.
+    mb.update_fix(sample(now - 10_000), false, now).unwrap();
     assert!(mb.send_latest(&server, now, true).unwrap());
     let old = protocol::decode(&client.read_datagram().await.unwrap(), now).unwrap();
     ma.ingest(b.id(), &old, now).unwrap();
@@ -636,8 +645,36 @@ async fn refresh_requests_collect_fresh_fix_under_permissions_and_report_result(
     );
     assert!(!mb.send_latest(&server, now + 2, false).unwrap());
     assert!(super::requests::queue(ma.friends(), b.id(), now + 2).is_err());
+    // Older fix sent after the request (as on a just-opened session) still lets the fresh one out.
+    let t = now + 130_000;
+    mb.update_fix(sample(t - 500), false, t).unwrap();
+    assert!(mb.refresh_requested(a.id(), t).unwrap());
+    assert!(mb.send_latest(&server, t + 10, true).unwrap());
+    client.read_datagram().await.unwrap();
+    mb.update_fix(sample(t + 20), false, t + 20).unwrap();
+    assert!(mb.send_latest(&server, t + 30, false).unwrap());
+    client.read_datagram().await.unwrap();
     mb.friends().block(a.id()).unwrap();
-    assert!(!mb.refresh_requested(a.id(), now + 70_000).unwrap());
+    assert!(!mb.refresh_requested(a.id(), t + 70_000).unwrap());
+    // No session yet: keeps locating while dialer connects, gives up after the window.
+    ma.unregister(&client);
+    let later = now + 60_000;
+    super::requests::queue(ma.friends(), b.id(), later).unwrap();
+    ma.poll_requests(later).unwrap();
+    assert_eq!(
+        super::requests::read(ma.friends(), b.id()).unwrap().status,
+        "Locating…"
+    );
+    ma.poll_requests(later + 6 * 60_000).unwrap();
+    assert_eq!(
+        super::requests::read(ma.friends(), b.id()).unwrap().status,
+        "Locating…"
+    );
+    ma.poll_requests(later + 7 * 60_000).unwrap();
+    assert_eq!(
+        super::requests::read(ma.friends(), b.id()).unwrap().status,
+        "Not connected; try again when online"
+    );
 }
 
 #[tokio::test]
@@ -667,7 +704,8 @@ async fn battery_is_opt_in_permission_gated_and_cleared_when_disabled() {
         (true, Permission::TripsOnly, None),
         (false, Permission::Always, None),
     ] {
-        now += 30_000;
+        // Unchanged level is resent every 5 minutes.
+        now += 300_000;
         ma.update_battery(Some(73), now).unwrap();
         ma.set_share_battery(enabled).unwrap();
         ma.friends().set_permission(b.id(), permission).unwrap();
